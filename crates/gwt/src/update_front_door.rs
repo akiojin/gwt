@@ -852,15 +852,30 @@ pub fn try_apply_pending_update_at_bootstrap(startup_dir: &Path) -> bool {
         Some(m) => m,
         None => return false,
     };
-    let current_version = env!("CARGO_PKG_VERSION");
-    if !should_apply_pending_at_bootstrap(&manifest.version, current_version) {
+    // Issue #3807 (AC-1): compare against the installed bundle, not only the
+    // compiled version of this process.
+    let current_version = gwt_core::update::effective_current_version();
+    if !should_apply_pending_at_bootstrap(&manifest.version, &current_version) {
         // The pending payload is for our current (or older) version. Drop it
         // unless the operator explicitly deferred it. Preserve that existing
         // hold even for a stale version, and preserve concurrent replacements.
-        if !manifest.auto_apply_deferred {
-            let _ = gwt_core::update::clear_pending_update_manifest_if_unchanged_in(
-                &gwt_core::update::pending_update_dir(),
-                &manifest,
+        if !manifest.auto_apply_deferred
+            && matches!(
+                gwt_core::update::clear_pending_update_manifest_if_unchanged_in(
+                    &gwt_core::update::pending_update_dir(),
+                    &manifest,
+                ),
+                Ok(true)
+            )
+        {
+            // Issue #3807 (AC-4): a stale discard is expected, not a failure.
+            gwt_core::update::log_update_event(
+                "stale_pending_discarded",
+                &[
+                    ("level", "info"),
+                    ("version", &manifest.version),
+                    ("current_version", &current_version),
+                ],
             );
         }
         return false;
@@ -1693,6 +1708,27 @@ mod poll_state_tests {
             gwt_core::update::load_pending_update_manifest().is_none(),
             "the pending manifest is consumed after the helper is spawned"
         );
+    }
+
+    #[test]
+    fn issue_3807_stale_pending_manifest_is_discarded_with_an_info_record() {
+        let home = tempfile::tempdir().unwrap();
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let mut manifest = staged_manifest_in(home.path());
+        manifest.version = "0.0.1".to_string();
+        gwt_core::update::persist_pending_update_manifest(&manifest).unwrap();
+
+        assert!(!super::try_apply_pending_update_at_bootstrap(home.path()));
+
+        assert!(gwt_core::update::load_pending_update_manifest().is_none());
+        let log = std::fs::read_to_string(gwt_core::update::update_log_path()).unwrap();
+        let entry: serde_json::Value = log
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .find(|entry| entry["stage"] == "stale_pending_discarded")
+            .expect("stale pending discard is recorded");
+        assert_eq!(entry["level"], "info");
+        assert_eq!(entry["version"], "0.0.1");
     }
 
     #[test]

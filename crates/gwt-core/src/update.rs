@@ -1010,6 +1010,44 @@ pub fn log_update_event(stage: &str, fields: &[(&str, &str)]) {
 /// strictly newer than `current`. Refuses to act on unparseable input on
 /// either side so a malformed manifest cannot silently authorize an apply
 /// (CodeRabbit review on PR #2630).
+/// Issue #3807 (AC-1): `CFBundleShortVersionString` of the `.app` bundle that
+/// contains `exe`. A running process keeps its compiled version after the
+/// bundle on disk has been replaced, so update decisions read the bundle.
+pub fn installed_bundle_version(exe: &Path) -> Option<Version> {
+    let plist = app_bundle_from_executable(exe)?
+        .join("Contents")
+        .join("Info.plist");
+    let plist = fs::read_to_string(plist).ok()?;
+    let value = plist
+        .split("<key>CFBundleShortVersionString</key>")
+        .nth(1)?
+        .trim_start()
+        .strip_prefix("<string>")?
+        .split("</string>")
+        .next()?;
+    parse_tag_version(value)
+}
+
+/// Issue #3807 (AC-1): the newer of the compiled version and the version of
+/// the installed bundle that contains `exe`.
+pub fn effective_current_version_for(compiled: &str, exe: Option<&Path>) -> String {
+    let installed = exe.and_then(installed_bundle_version);
+    match (parse_tag_version(compiled), installed) {
+        (Some(compiled), Some(installed)) if installed > compiled => installed.to_string(),
+        (Some(compiled), _) => compiled.to_string(),
+        (None, Some(installed)) => installed.to_string(),
+        (None, None) => compiled.trim().trim_start_matches('v').to_string(),
+    }
+}
+
+/// [`effective_current_version_for`] for this process.
+pub fn effective_current_version() -> String {
+    effective_current_version_for(
+        env!("CARGO_PKG_VERSION"),
+        std::env::current_exe().ok().as_deref(),
+    )
+}
+
 pub fn pending_version_is_newer(candidate: &str, current: &str) -> bool {
     let trim = |v: &str| v.trim().trim_start_matches('v').to_string();
     let candidate_trim = trim(candidate);
@@ -1236,7 +1274,7 @@ impl UpdateManager {
     /// Create a new update manager for the current running version.
     pub fn new() -> Self {
         let current_version =
-            Version::parse(env!("CARGO_PKG_VERSION")).unwrap_or_else(|_| Version::new(0, 0, 0));
+            Version::parse(&effective_current_version()).unwrap_or_else(|_| Version::new(0, 0, 0));
 
         let cache_path = crate::paths::gwt_update_cache_path();
         let updates_dir = crate::paths::gwt_updates_dir();
@@ -1298,6 +1336,16 @@ impl UpdateManager {
     #[cfg(test)]
     fn with_cache_path(mut self, path: PathBuf) -> Self {
         self.cache_path = path;
+        self
+    }
+
+    #[cfg(test)]
+    fn with_current_exe(mut self, exe: &Path) -> Self {
+        self.current_version = parse_tag_version(&effective_current_version_for(
+            env!("CARGO_PKG_VERSION"),
+            Some(exe),
+        ))
+        .unwrap_or_else(|| Version::new(0, 0, 0));
         self
     }
 
@@ -2108,10 +2156,57 @@ pub fn internal_apply_update_with_executor(
     args_file: &Path,
     executor: &dyn ProcessExecutor,
 ) -> Result<(), String> {
+    log_helper_stages("apply-update", target_exe, || {
+        internal_apply_update_stages(old_pid, target_exe, source_exe, args_file, executor)
+    })
+}
+
+/// Issue #3807 (AC-2): the detached helper's outcome is otherwise invisible,
+/// so every helper run records `apply_start`, and either the swap stages
+/// written by `run` or `fail` with the reason, in the update log.
+fn log_helper_stages(
+    helper: &str,
+    target_exe: &Path,
+    run: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    let target = target_exe.to_string_lossy();
+    log_update_event("apply_start", &[("helper", helper), ("target", &target)]);
+    let result = run();
+    if let Err(reason) = &result {
+        log_update_event(
+            "fail",
+            &[
+                ("phase", "helper_apply"),
+                ("helper", helper),
+                ("reason", reason),
+            ],
+        );
+    }
+    result
+}
+
+/// Wrap the irreversible replacement in `swap_start` / `swap_complete`.
+fn log_swap<T>(target_exe: &Path, swap: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+    let target = target_exe.to_string_lossy();
+    log_update_event("swap_start", &[("target", &target)]);
+    let value = swap()?;
+    log_update_event("swap_complete", &[("target", &target)]);
+    Ok(value)
+}
+
+fn internal_apply_update_stages(
+    old_pid: u32,
+    target_exe: &Path,
+    source_exe: &Path,
+    args_file: &Path,
+    executor: &dyn ProcessExecutor,
+) -> Result<(), String> {
     wait_for_pid_exit(old_pid, Duration::from_secs(300), executor)?;
     let args = UpdateManager::read_restart_args_file(args_file)?;
     let cli_marker = owned_cli_update_marker(&args)?;
-    replace_bundle_executables(target_exe, source_exe)?;
+    log_swap(target_exe, || {
+        replace_bundle_executables(target_exe, source_exe)
+    })?;
     finish_cli_update_apply(cli_marker)?;
 
     executor
@@ -2151,6 +2246,26 @@ pub fn internal_run_installer_with_executor(
     args_file: &Path,
     executor: &dyn ProcessExecutor,
 ) -> Result<(), String> {
+    log_helper_stages("run-installer", target_exe, || {
+        internal_run_installer_stages(
+            old_pid,
+            target_exe,
+            installer,
+            installer_kind,
+            args_file,
+            executor,
+        )
+    })
+}
+
+fn internal_run_installer_stages(
+    old_pid: u32,
+    target_exe: &Path,
+    installer: &Path,
+    installer_kind: InstallerKind,
+    args_file: &Path,
+    executor: &dyn ProcessExecutor,
+) -> Result<(), String> {
     wait_for_pid_exit(old_pid, Duration::from_secs(300), executor)?;
 
     #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -2171,54 +2286,60 @@ pub fn internal_run_installer_with_executor(
                 ));
             }
         }
-        let restart_exe = match installer_kind {
-            InstallerKind::MacDmg => {
-                #[cfg(target_os = "macos")]
-                {
-                    let target_app = run_macos_dmg_installer_with_privileges(
-                        installer,
-                        target_exe,
-                        restart.allow_elevation,
-                        executor,
-                    )?;
-                    app_bundle_executable_path(&target_app, target_exe)
-                        .unwrap_or_else(|| target_exe.to_path_buf())
+        let restart_exe = log_swap(target_exe, || -> Result<PathBuf, String> {
+            Ok(match installer_kind {
+                InstallerKind::MacDmg => {
+                    #[cfg(target_os = "macos")]
+                    {
+                        let target_app = run_macos_dmg_installer_with_privileges(
+                            installer,
+                            target_exe,
+                            restart.allow_elevation,
+                            executor,
+                        )?;
+                        app_bundle_executable_path(&target_app, target_exe)
+                            .unwrap_or_else(|| target_exe.to_path_buf())
+                    }
+                    #[cfg(not(target_os = "macos"))]
+                    {
+                        return Err("mac_dmg installer can only run on macOS".to_string());
+                    }
                 }
-                #[cfg(not(target_os = "macos"))]
-                {
-                    return Err("mac_dmg installer can only run on macOS".to_string());
+                InstallerKind::MacPkg => {
+                    #[cfg(target_os = "macos")]
+                    {
+                        run_macos_pkg_installer_with_privileges(installer, executor)?;
+                        resolve_macos_restart_executable(
+                            Path::new("/Applications"),
+                            target_exe,
+                            None,
+                        )
+                    }
+                    #[cfg(not(target_os = "macos"))]
+                    {
+                        return Err("mac_pkg installer can only run on macOS".to_string());
+                    }
                 }
-            }
-            InstallerKind::MacPkg => {
-                #[cfg(target_os = "macos")]
-                {
-                    run_macos_pkg_installer_with_privileges(installer, executor)?;
-                    resolve_macos_restart_executable(Path::new("/Applications"), target_exe, None)
+                InstallerKind::WindowsMsi => {
+                    #[cfg(target_os = "windows")]
+                    {
+                        // Recheck after the parent exits. Automatic apply must never
+                        // opt into UAC or the explicit legacy migration path.
+                        run_windows_msi_with_eligibility(
+                            installer,
+                            restart.allow_elevation,
+                            automatic_refusal.map_or(Ok(()), Err),
+                            executor,
+                        )?;
+                        resolve_windows_restart_executable(target_exe)
+                    }
+                    #[cfg(not(target_os = "windows"))]
+                    {
+                        return Err("windows_msi installer can only run on Windows".to_string());
+                    }
                 }
-                #[cfg(not(target_os = "macos"))]
-                {
-                    return Err("mac_pkg installer can only run on macOS".to_string());
-                }
-            }
-            InstallerKind::WindowsMsi => {
-                #[cfg(target_os = "windows")]
-                {
-                    // Recheck after the parent exits. Automatic apply must never
-                    // opt into UAC or the explicit legacy migration path.
-                    run_windows_msi_with_eligibility(
-                        installer,
-                        restart.allow_elevation,
-                        automatic_refusal.map_or(Ok(()), Err),
-                        executor,
-                    )?;
-                    resolve_windows_restart_executable(target_exe)
-                }
-                #[cfg(not(target_os = "windows"))]
-                {
-                    return Err("windows_msi installer can only run on Windows".to_string());
-                }
-            }
-        };
+            })
+        })?;
 
         let restart_exe = fs::canonicalize(&restart_exe).unwrap_or(restart_exe);
         finish_cli_update_apply(cli_marker)?;
@@ -3455,6 +3576,67 @@ mod tests {
         }
     }
 
+    fn fake_app_bundle(root: &Path, version: &str) -> PathBuf {
+        let contents = root.join("GWT.app").join("Contents");
+        fs::create_dir_all(contents.join("MacOS")).unwrap();
+        fs::write(
+            contents.join("Info.plist"),
+            format!(
+                "<?xml version=\"1.0\"?>\n<plist version=\"1.0\">\n<dict>\n  \
+                 <key>CFBundleShortVersionString</key>\n  <string>{version}</string>\n\
+                 </dict>\n</plist>\n"
+            ),
+        )
+        .unwrap();
+        contents.join("MacOS").join("gwt")
+    }
+
+    #[test]
+    fn issue_3807_installed_bundle_version_reads_info_plist() {
+        let temp = tempfile::tempdir().unwrap();
+        let exe = fake_app_bundle(temp.path(), "9.200.1");
+        assert_eq!(
+            installed_bundle_version(&exe),
+            Some(Version::new(9, 200, 1))
+        );
+        assert_eq!(installed_bundle_version(&temp.path().join("gwt")), None);
+    }
+
+    #[test]
+    fn issue_3807_effective_version_prefers_a_newer_installed_bundle() {
+        let temp = tempfile::tempdir().unwrap();
+        let exe = fake_app_bundle(temp.path(), "9.2.0");
+        assert_eq!(effective_current_version_for("9.1.0", Some(&exe)), "9.2.0");
+        assert_eq!(effective_current_version_for("9.3.0", Some(&exe)), "9.3.0");
+        assert_eq!(effective_current_version_for("9.1.0", None), "9.1.0");
+    }
+
+    #[test]
+    fn issue_3807_installed_newer_bundle_suppresses_the_update_cta() {
+        let temp = tempfile::tempdir().unwrap();
+        let exe = fake_app_bundle(temp.path(), "999.0.0");
+        let mgr = UpdateManager::new()
+            .with_api_base_url("http://127.0.0.1:9")
+            .with_cache_path(temp.path().join("update-check.json"))
+            .with_updates_dir(temp.path().join("updates"))
+            .with_current_exe(&exe);
+        let cache = UpdateCacheFile {
+            checked_at: UtcTimestamp::now(),
+            latest_version: Some("999.0.0".to_string()),
+            release_url: Some("https://example.com/release".to_string()),
+            portable_asset_url: None,
+            installer_asset_url: None,
+            asset_url: Some("https://example.com/asset".to_string()),
+        };
+        write_cache(mgr.cache_path(), &cache).unwrap();
+
+        let state = mgr.check(false);
+        assert!(
+            matches!(state, UpdateState::UpToDate { .. }),
+            "an already-installed release must not be offered again: {state:?}"
+        );
+    }
+
     #[test]
     fn force_check_bypasses_cache_and_can_fail() {
         let temp = tempfile::tempdir().unwrap();
@@ -4643,6 +4825,58 @@ mod tests {
         assert_eq!(restart.program, target_exe.as_os_str());
         assert_eq!(restart.mode, ExecutionMode::Spawn);
         assert_eq!(restart.args_lossy(), vec!["update"]);
+        let log = fs::read_to_string(update_log_path()).unwrap();
+        let stages: Vec<String> = log
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .filter_map(|entry| entry["stage"].as_str().map(str::to_owned))
+            .collect();
+        assert_eq!(stages, ["apply_start", "swap_start", "swap_complete"]);
+    }
+
+    #[test]
+    fn issue_3807_internal_apply_failure_is_recorded_in_the_update_log() {
+        let temp = tempfile::tempdir().unwrap();
+        let _home = crate::test_support::ScopedGwtHome::set(temp.path());
+        let target_exe = temp.path().join("install").join("gwt");
+        fs::create_dir_all(target_exe.parent().unwrap()).unwrap();
+        fs::write(&target_exe, b"old-gwt").unwrap();
+        let args_file = temp.path().join("restart-args.json");
+        write_json_atomic(
+            &args_file,
+            &RestartArgsFile {
+                args: vec!["--no-tray".to_string()],
+                cwd: String::new(),
+                allow_elevation: true,
+            },
+        )
+        .unwrap();
+        let mock = MockProcessExecutor::new();
+        mock.push_program_response("kill", ProcessOutput::failed(1));
+        mock.push_program_response("powershell", ProcessOutput::failed(1));
+
+        let missing_source = temp.path().join("missing").join("gwt");
+        let err = internal_apply_update_with_executor(
+            4242,
+            &target_exe,
+            &missing_source,
+            &args_file,
+            &mock,
+        )
+        .expect_err("missing payload must fail");
+
+        assert_eq!(fs::read(&target_exe).unwrap(), b"old-gwt");
+        let log = fs::read_to_string(update_log_path()).unwrap();
+        let entries: Vec<serde_json::Value> = log
+            .lines()
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .collect();
+        let stages: Vec<&str> = entries
+            .iter()
+            .filter_map(|entry| entry["stage"].as_str())
+            .collect();
+        assert_eq!(stages, ["apply_start", "swap_start", "fail"]);
+        assert_eq!(entries[2]["reason"], err.as_str());
     }
 
     #[test]
