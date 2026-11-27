@@ -41,10 +41,14 @@
 //! its connection closed through the coordinator (`close_connection`), so one
 //! browser cannot end the registration for the others.
 //!
-//! The caller answers a claimed connection with [`OutboundSignal`]s, sent one at
-//! a time while enabled. A signal whose frame exceeds the coordinator's message
-//! bound would end the whole registration there, so it is dropped and only its
-//! connection closed. Dropping every signal sender only ends signal input.
+//! The caller answers a claimed or reconnected connection with typed
+//! [`OutboundSignal`]s, sent one at a time while enabled on the Host wire of
+//! that connection ([`super::signal`]). A signal for a connection without wire
+//! state (never admitted, or closed) or already rejected is dropped; the first
+//! that breaks the wire closes its connection. A signal whose frame exceeds
+//! the coordinator's message bound would end the whole registration there, so
+//! it is dropped and only its connection closed. Dropping every signal sender
+//! only ends signal input.
 //!
 //! The coordinator ends a registration whose socket exceeds the Host message
 //! rate it announces in `registered`. Every message the client sends spends
@@ -54,7 +58,7 @@
 //! for a token, which backpressures the caller's bounded channel.
 
 use super::credential::LoadedHostCredential;
-use super::signal::{BrowserSignal, SignalError, SignalSequence};
+use super::signal::{BrowserSignal, HostSignal, SignalError, SignalSequence};
 use crate::mobile_connection::{AuthorizationError, IssuedInvite, MobileAuthorization};
 use base64::Engine as _;
 use futures_util::{SinkExt as _, StreamExt as _};
@@ -133,11 +137,10 @@ pub enum ConnectionEvent {
     },
 }
 
-/// An opaque signal for one claimed connection of this registration. The
-/// coordinator ignores a connection that is no longer live.
+/// A signal for one claimed or reconnected connection of this registration.
 pub struct OutboundSignal {
     pub connection_id: Uuid,
-    pub payload: String,
+    pub signal: HostSignal,
 }
 
 /// A pairing invite for the coordinator to admit under this registration.
@@ -456,8 +459,25 @@ async fn register_and_renew(
                     signals_open = false;
                     continue;
                 };
-                budget.spend(Instant::now());
-                send_signal(&mut socket, generation, signal).await?;
+                let Some(sequence) = sequences.get_mut(&signal.connection_id) else {
+                    continue;
+                };
+                match sequence.send(&signal.signal) {
+                    Ok(payload) => {
+                        budget.spend(Instant::now());
+                        if !send_signal(&mut socket, generation, signal.connection_id, payload)
+                            .await?
+                        {
+                            sequence.reject();
+                        }
+                    }
+                    // Already closed: drop what was in flight.
+                    Err(SignalError::Rejected) => {}
+                    Err(_) => {
+                        budget.spend(Instant::now());
+                        send_close(&mut socket, generation, signal.connection_id).await?;
+                    }
+                }
             }
             // Wakes the loop when the next signal token is due.
             _ = tokio::time::sleep_until(budget.next_token().into()), if signals_open
@@ -702,24 +722,27 @@ async fn send_close(
 }
 
 /// Relays a signal to one claimed connection, or closes that connection when
-/// the frame would exceed the coordinator's message bound.
+/// the frame would exceed the coordinator's message bound (`false`).
 async fn send_signal(
     socket: &mut Socket,
     generation: Uuid,
-    signal: OutboundSignal,
-) -> Result<(), RegistrationClientError> {
+    connection_id: Uuid,
+    payload: String,
+) -> Result<bool, RegistrationClientError> {
     let text = serde_json::json!({
         "type": "signal", "generation": generation,
-        "connection_id": signal.connection_id, "payload": signal.payload,
+        "connection_id": connection_id, "payload": payload,
     })
     .to_string();
     if text.len() > MAX_MESSAGE_BYTES {
-        return send_close(socket, generation, signal.connection_id).await;
+        send_close(socket, generation, connection_id).await?;
+        return Ok(false);
     }
     socket
         .send(Message::text(text))
         .await
-        .map_err(|_| RegistrationClientError::Closed)
+        .map_err(|_| RegistrationClientError::Closed)?;
+    Ok(true)
 }
 
 /// `register_invite` JSON assembled in a wiped buffer around the hex secret.
