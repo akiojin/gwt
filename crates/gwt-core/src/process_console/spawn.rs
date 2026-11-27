@@ -1678,14 +1678,13 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn cleanup_future_is_abandoned_after_grace() {
-        let completed = tokio::time::timeout(
-            Duration::from_secs(2),
-            run_cleanup_with_grace(Duration::from_millis(20), std::future::pending()),
+        let completed = run_cleanup_with_grace(
+            Duration::from_millis(100),
+            tokio::time::sleep(Duration::from_secs(1)),
         )
-        .await
-        .expect("cleanup grace must bound a stalled cleanup future");
+        .await;
 
         assert!(!completed, "stalled cleanup must report incomplete");
     }
