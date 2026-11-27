@@ -135,6 +135,10 @@
 - develop ブランチへの直接コミット / push は許可する。ただし共有ブランチなので、`origin/develop` を取り込んだ上で fast-forward を維持し、履歴を壊さないこと
 - SPEC 策定・ブレインストーミングは develop 上のエージェントで行える。必要に応じて feature ブランチを使ってもよいが、develop でのコミット / push も禁止しない
 
+### Hook ペイロード契約
+
+- 新しいプロバイダーを launch candidate pool に追加するときは、対応する各 Hook イベントについて実セッションから採取した JSON を `crates/gwt/tests/fixtures/hook_payloads/<provider>/<version>/` に追加し、パーサー入口の契約テストで検証する。セッション ID・絶対パス・トークンなどの秘匿値は採取時に置換する。
+
 ### 📝 設計ガイドライン
 
 - 設計に関するドキュメントには、ソースコードを書かないこと
