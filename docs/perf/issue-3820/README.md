@@ -24,7 +24,7 @@ p50 / p95 は nearest-rank。n=10 のため p95 は最悪値と同じ。
 - host: macOS 27.2.1、Apple M5 Max（`p02-environment.txt`）。2026-11-27T17:21Z。
 - 起動: `--no-tray --no-open`、fresh HOME。`~/.gwt/runtime`、`.gitconfig`、`.config` だけを symlink した。
 - fixture: 1 commit・1 ファイルの git repo を 10 個用意し、それぞれ一度だけ開いた。GitHub remote は無い。
-  各 repo の PM auto start と Issue Monitor は browser-check の seed で無効にした。
+  各 repo の PM auto start と Issues の自動実行は browser-check の seed で無効にした。
 - 操作: Hub WebSocket から production の frontend event `reopen_recent_project` を 1 件ずつ送り、
   isolated HOME の perf log に新しい `route:project.open` が書かれるのを待ってから、1 秒置いて次を送った（`p02-drive.mjs`）。
 - 計測の起点と終点: route の定義どおり、`request_project_open` の受付から、同じ request の
