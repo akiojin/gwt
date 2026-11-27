@@ -85,11 +85,18 @@
 2. **process 全体の状態は施錠して触る。** テスト関数内の `env::set_var` /
    `env::remove_var` / `env::set_current_dir` は、同じ関数内で
    `gwt_core::test_support::env_lock()` / `env_test_lock()` を取得するか、
-   `ScopedEnvVar` / `ScopedGwtHome` で包む。
+   `ScopedEnvVar` / `ScopedGwtHome` で包む（env 変数の書き込み自体は 4 により新規禁止）。
 3. **正当な例外は理由付きで宣言する。** 違反行またはその直前行に
    `// test-hygiene: allow-short-duration <理由>` もしくは
    `// test-hygiene: allow-unlocked-env <理由>` を置く。理由本文が空なら通らない。
-4. **`test_hygiene_baseline.txt` に行を足さない。** これは SPEC #4551 導入時点の
+4. **テストで process env を書かない（SPEC #4072）。** `env::set_var` /
+   `remove_var` / `ScopedEnvVar::set|unset` は lock 下でも不可。値は
+   `gwt_core::test_support::ScopedEnvOverride`（HOME は `ScopedGwtHome`）で
+   thread-local に固定し、production は `gwt_core::env::var` / `var_os` で読む。
+   子プロセスへは `Command::env` で渡す。既存箇所は
+   `crates/gwt-core/tests/process_env_baseline.txt`（縮む一方の台帳）に据え置き、
+   正当な例外は `// test-hygiene: allow-process-env #<Issue> <理由>` で宣言する。
+5. **`test_hygiene_baseline.txt` に行を足さない。** これは SPEC #4551 導入時点の
    既存違反を据え置いた一覧で、縮む一方の台帳である。違反を直したら該当行を削除する
    （残っているとゲートが落ちる）。一括整理の後は
    `cargo test -p gwt-core --test test_hygiene_test -- --ignored regenerate_the_baseline`
