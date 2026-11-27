@@ -5677,14 +5677,27 @@ fn switch_source_exit_preserves_reused_session_and_runtime() {
                         .probe(&successor.id, successor.incarnation)
                         .await
                         .unwrap();
-                    if current.pending_fresh_execution.is_none() {
+                    // Issue #8005: the successor's own startup banner arrives
+                    // asynchronously. Take the invariance baseline only after
+                    // it is received, or a late banner reads as stale output.
+                    #[cfg(unix)]
+                    let started = current
+                        .pane
+                        .lock()
+                        .unwrap()
+                        .screen()
+                        .contents()
+                        .contains("running 1 test");
+                    #[cfg(not(unix))]
+                    let started = true;
+                    if current.pending_fresh_execution.is_none() && started {
                         return current;
                     }
                     tokio::task::yield_now().await;
                 }
             })
             .await
-            .expect("the real successor must finish its readiness handshake")
+            .expect("the real successor must finish its readiness handshake and startup output")
         });
         let session = successor.session.as_ref().unwrap();
         assert_eq!(session.id == source_session.id, reuse_session);

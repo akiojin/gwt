@@ -31,7 +31,7 @@ import { createRepositoryLabelChip } from "./ui-content.js";
 import { bindControlExplanations, setControlExplanation } from "./control-explanations.js";
 import { SETUP_REVIEW_STEPS, firstRunSetupUrlPath } from "./first-run-setup.js";
 
-function renderUpdateSettingsStatus(panel, status) {
+function renderUpdateSettingsStatus(panel, status, send) {
   const document = panel.ownerDocument;
   panel.replaceChildren();
   const values = document.createElement("p");
@@ -39,6 +39,10 @@ function renderUpdateSettingsStatus(panel, status) {
   const configured = status.auto_apply_updates;
   values.textContent = `Saved: ${configured == null ? "Default (Off)" : configured ? "On" : "Off"} · Effective: ${status.auto_apply_updates_effective ? "On" : "Off"}`;
   panel.appendChild(values);
+  // Issue #7248 AC-2: the last settled apply (outcome, target, expected /
+  // observed version, time) and this session's last apply error, whatever the
+  // update CTA status was when it arrived.
+  renderApplyOutcome();
   const drain = status.update_drain;
   const pending = document.createElement("p");
   pending.className = "settings-help";
@@ -61,6 +65,44 @@ function renderUpdateSettingsStatus(panel, status) {
   }
   if (!list.children.length) pending.textContent += " · waiting for quiet observations";
   panel.appendChild(list);
+
+  function renderApplyOutcome() {
+    const result = status.last_apply_result;
+    const line = document.createElement("p");
+    line.className = "settings-help";
+    line.dataset.updateLastApplyResult = "true";
+    if (!result) {
+      line.textContent = "Last update: none recorded";
+    } else if (result.outcome === "failure") {
+      line.setAttribute("role", "alert");
+      line.textContent = `Last update: Failed · v${result.from_version} → v${result.to_version} · expected v${result.to_version}, observed v${result.observed_version} · ${result.recorded_at}`
+        + (result.message ? ` · ${result.message}` : "");
+    } else {
+      line.textContent = `Last update: Succeeded · v${result.from_version} → v${result.to_version} · observed v${result.observed_version} · ${result.recorded_at}`;
+    }
+    panel.appendChild(line);
+    const error = status.last_apply_error;
+    if (error) {
+      const errorLine = document.createElement("p");
+      errorLine.className = "settings-help";
+      errorLine.dataset.updateLastApplyError = "true";
+      errorLine.setAttribute("role", "alert");
+      errorLine.textContent = `Last apply error: ${error.stage || "Update"} — ${error.reason || "Unknown reason"} · ${error.at}`;
+      panel.appendChild(errorLine);
+    }
+    if (!error && result?.outcome !== "failure") return;
+    const openLog = document.createElement("button");
+    openLog.type = "button";
+    openLog.className = "wizard-button is-compact";
+    openLog.dataset.updateOpenLog = "true";
+    openLog.textContent = "Open update log";
+    openLog.addEventListener("click", () => {
+      const message = { kind: "open_update_log" };
+      if (error?.log_path) message.log_path = error.log_path;
+      send?.(message);
+    });
+    panel.appendChild(openLog);
+  }
 }
 
 function settingsTabId(windowId, tabId) {
@@ -1294,8 +1336,10 @@ export function createSettingsSurface({
         const previous = renderedUpdateStatuses.get(panel);
         if (previous && previous.auto_apply_updates === state.auto_apply_updates
           && previous.auto_apply_updates_effective === state.auto_apply_updates_effective
+          && previous.last_apply_result === state.last_apply_result
+          && previous.last_apply_error === state.last_apply_error
           && previous.drains[root] === state.drains[root]) return;
-        renderUpdateSettingsStatus(panel, { ...state, update_drain: state.drains[root] || null });
+        renderUpdateSettingsStatus(panel, { ...state, update_drain: state.drains[root] || null }, send);
         renderedUpdateStatuses.set(panel, state);
       }
       // Preserve synchronous control reconciliation, including same-value save errors.
@@ -1321,6 +1365,11 @@ export function createSettingsSurface({
         globalUpdateModel.update(state => ({ ...state, ...event.status, loaded: true,
           drains: { ...state.drains, [event.project_root || ""]: event.status.update_drain },
         }));
+      }
+      function applyUpdateApplyFailure(failure) {
+        if (!failure) return;
+        globalUpdateModel.update(state => ({ ...state,
+          last_apply_error: { ...failure, at: new Date().toISOString() } }));
       }
       function projectSettingsSnapshot(body) {
         const root = body.dataset.settingsProjectRoot || "";
@@ -3131,6 +3180,7 @@ export function createSettingsSurface({
         hookDoctorModel,
         applyHookDoctorEvent,
         applyGlobalUpdateSettings,
+        applyUpdateApplyFailure,
         applyIssueSettingsStatus,
         applySettingsRepositoryLabels,
         applySettingsLabelsFailure,

@@ -936,6 +936,7 @@ impl AppRuntime {
                     auto_apply_updates: configured,
                     auto_apply_updates_effective: configured.unwrap_or(false),
                     update_drain: None,
+                    last_apply_result: gwt_core::update::load_update_apply_result(),
                 })
             }
         };
