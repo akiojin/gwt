@@ -2135,6 +2135,7 @@ impl AppRuntime {
         if let Some(context) = self.project_context(tab_id) {
             let event = if origin == RestoreOrigin::Automatic {
                 gwt::BackendEvent::IssueMonitorToast {
+                    host_notice: false,
                     notification_transition: None,
                     notification_transition_id: None,
                     level: "error".into(),

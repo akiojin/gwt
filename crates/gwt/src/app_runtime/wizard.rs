@@ -223,6 +223,7 @@ fn issue_monitor_non_head_selection_toast(
     Some(OutboundEvent::project(
         context.project_key.clone(),
         BackendEvent::IssueMonitorToast {
+            host_notice: false,
             notification_transition: None,
             notification_transition_id: None,
             level: "info".to_string(),
@@ -3430,6 +3431,7 @@ impl AppRuntime {
             return vec![OutboundEvent::reply(
                 client_id,
                 BackendEvent::IssueMonitorToast {
+                    host_notice: false,
                     notification_transition: None,
                     notification_transition_id: None,
                     level: "error".to_string(),
@@ -3449,6 +3451,7 @@ impl AppRuntime {
             return vec![OutboundEvent::reply(
                 client_id,
                 BackendEvent::IssueMonitorToast {
+                    host_notice: false,
                     notification_transition: None,
                     notification_transition_id: None,
                     level: "error".to_string(),
@@ -3462,6 +3465,7 @@ impl AppRuntime {
             return vec![OutboundEvent::reply(
                 client_id,
                 BackendEvent::IssueMonitorToast {
+                    host_notice: false,
                     notification_transition: None,
                     notification_transition_id: None,
                     level: "error".to_string(),
@@ -3481,6 +3485,7 @@ impl AppRuntime {
                     return vec![OutboundEvent::reply(
                         client_id,
                         BackendEvent::IssueMonitorToast {
+                            host_notice: false,
                             notification_transition: None,
                             notification_transition_id: None,
                             level: "error".to_string(),
@@ -3526,6 +3531,7 @@ impl AppRuntime {
                     OutboundEvent::reply(
                         client_id,
                         BackendEvent::IssueMonitorToast {
+                            host_notice: false,
                             notification_transition: None,
                             notification_transition_id: None,
                             level: "info".to_string(),
@@ -3539,6 +3545,7 @@ impl AppRuntime {
             Err(error) => vec![OutboundEvent::reply(
                 client_id,
                 BackendEvent::IssueMonitorToast {
+                    host_notice: false,
                     notification_transition: None,
                     notification_transition_id: None,
                     level: "error".to_string(),
@@ -3617,6 +3624,7 @@ impl AppRuntime {
                 return vec![OutboundEvent::reply(
                     client_id,
                     BackendEvent::IssueMonitorToast {
+                        host_notice: false,
                         notification_transition: None,
                         notification_transition_id: None,
                         level: "error".into(),
@@ -3721,6 +3729,7 @@ impl AppRuntime {
             return vec![OutboundEvent::reply(
                 client_id,
                 BackendEvent::IssueMonitorToast {
+                    host_notice: false,
                     notification_transition: None,
                     notification_transition_id: None,
                     level: "error".to_string(),
@@ -3734,6 +3743,7 @@ impl AppRuntime {
             return vec![OutboundEvent::reply(
                 client_id,
                 BackendEvent::IssueMonitorToast {
+                    host_notice: false,
                     notification_transition: None,
                     notification_transition_id: None,
                     level: "error".to_string(),
@@ -3747,6 +3757,7 @@ impl AppRuntime {
             return vec![OutboundEvent::reply(
                 client_id,
                 BackendEvent::IssueMonitorToast {
+                    host_notice: false,
                     notification_transition: None,
                     notification_transition_id: None,
                     level: "error".to_string(),
@@ -3767,6 +3778,7 @@ impl AppRuntime {
             return vec![OutboundEvent::reply(
                 client_id,
                 BackendEvent::IssueMonitorToast {
+                    host_notice: false,
                     notification_transition: None,
                     notification_transition_id: None,
                     level: "error".into(),
@@ -3842,6 +3854,7 @@ impl AppRuntime {
             OutboundEvent::reply(
                 client_id,
                 BackendEvent::IssueMonitorToast {
+                    host_notice: false,
                     notification_transition: None,
                     notification_transition_id: None,
                     level: "info".to_string(),
@@ -4924,6 +4937,7 @@ impl AppRuntime {
             return vec![OutboundEvent::project(
                 failure_context.project_key,
                 BackendEvent::IssueMonitorToast {
+                    host_notice: false,
                     notification_transition: None,
                     notification_transition_id: None,
                     level: "error".into(),
@@ -4964,6 +4978,7 @@ impl AppRuntime {
                 return vec![OutboundEvent::project(
                     completion.context.project_key,
                     BackendEvent::IssueMonitorToast {
+                        host_notice: false,
                         notification_transition: None,
                         notification_transition_id: None,
                         level: "error".into(),
@@ -4996,6 +5011,7 @@ impl AppRuntime {
             OutboundEvent::project(
                 completion.context.project_key,
                 BackendEvent::IssueMonitorToast {
+                    host_notice: false,
                     notification_transition: None,
                     notification_transition_id: None,
                     level: "error".into(),
@@ -5064,6 +5080,7 @@ impl AppRuntime {
         vec![OutboundEvent::project(
             context.project_key,
             BackendEvent::IssueMonitorToast {
+                host_notice: false,
                 notification_transition: None,
                 notification_transition_id: None,
                 level: "error".into(),
@@ -5631,6 +5648,7 @@ impl AppRuntime {
                     recovery_events.push(OutboundEvent::project(
                         context.project_key.clone(),
                         BackendEvent::IssueMonitorToast {
+                            host_notice: false,
                             notification_transition: None,
                             notification_transition_id: None,
                             level: "info".to_string(),
@@ -5712,6 +5730,7 @@ impl AppRuntime {
                     let disposition = " kept pending for the project owner";
                     recovery_events.push(OutboundEvent::project(context.project_key.clone(),
                         BackendEvent::IssueMonitorToast {
+                            host_notice: false,
                             notification_transition: None,
                             notification_transition_id: None,
                             level: "error".to_string(),
@@ -5834,6 +5853,7 @@ impl AppRuntime {
         events.push(OutboundEvent::project(
             context.project_key.clone(),
             BackendEvent::IssueMonitorToast {
+                host_notice: false,
                 notification_transition: None,
                 notification_transition_id: None,
                 level: "warn".to_string(),
@@ -5952,6 +5972,7 @@ impl AppRuntime {
             Ok(None) => vec![OutboundEvent::project(
                 context.project_key.clone(),
                 BackendEvent::IssueMonitorToast {
+                    host_notice: false,
                     notification_transition: None,
                     notification_transition_id: None,
                     level: "warn".to_string(),
@@ -6470,6 +6491,7 @@ impl AppRuntime {
             events.push(OutboundEvent::project(
                 context.project_key.clone(),
                 BackendEvent::IssueMonitorToast {
+                    host_notice: false,
                     notification_transition: None,
                     notification_transition_id: None,
                     level: "warn".to_string(),
@@ -6487,6 +6509,7 @@ impl AppRuntime {
         events.push(OutboundEvent::project(
             context.project_key.clone(),
             BackendEvent::IssueMonitorToast {
+                host_notice: false,
                 notification_transition: None,
                 notification_transition_id: None,
                 level: "info".to_string(),
@@ -6734,6 +6757,7 @@ impl AppRuntime {
         events.push(OutboundEvent::project(
             context.project_key.clone(),
             BackendEvent::IssueMonitorToast {
+                host_notice: false,
                 notification_transition: None,
                 notification_transition_id: None,
                 level: "info".to_string(),
@@ -8151,6 +8175,7 @@ impl AppRuntime {
             OutboundEvent::reply(
                 &client_id,
                 BackendEvent::IssueMonitorToast {
+                    host_notice: false,
                     notification_transition: None,
                     notification_transition_id: None,
                     level: "info".to_string(),

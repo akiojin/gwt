@@ -308,3 +308,13 @@ test("Stopped and Interrupted desktop copy stays factual without claiming work f
     assert.doesNotMatch(notice.title + notice.body, /finish|complete/i);
   }
 });
+
+test("Issue #3922: projectNoticeTitle prefixes a bounded project name and falls back to the plain title", () => {
+  const { projectNoticeTitle } = notifications;
+  assert.equal(projectNoticeTitle("Issues #3752", { title: "gwt" }), "[gwt] Issues #3752");
+  assert.equal(projectNoticeTitle("Issues", { title: "  ", project_root: "/repos/alpha/" }), "[alpha] Issues");
+  assert.equal(projectNoticeTitle("Issues", { title: "a-very-long-project-name-for-the-toast" }), "[a-very-long-project-nam…] Issues");
+  for (const missing of [null, undefined, {}, { title: "" }]) {
+    assert.equal(projectNoticeTitle("Issues #7", missing), "Issues #7");
+  }
+});

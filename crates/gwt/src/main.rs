@@ -2070,6 +2070,7 @@ fn issue_monitor_daemon_user_event(
         }
         "toast" => {
             let toast = BackendEvent::IssueMonitorToast {
+                host_notice: false,
                 notification_transition_id: payload
                     .get("notification_transition_id")
                     .and_then(serde_json::Value::as_str)
@@ -12052,6 +12053,7 @@ fn main() -> std::io::Result<()> {
                             return None;
                         };
                         Some(OutboundEvent::project(context.project_key, BackendEvent::IssueMonitorToast {
+                            host_notice: false,
                             notification_transition: None,
                             notification_transition_id: None,
                             level: "error".to_string(),

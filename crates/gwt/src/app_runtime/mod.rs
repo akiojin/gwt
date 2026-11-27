@@ -6348,6 +6348,7 @@ impl AppRuntime {
         self.issue_monitor_project_notification(
             Some(&delivery.project_root),
             BackendEvent::IssueMonitorToast {
+                host_notice: false,
                 notification_transition: None,
                 notification_transition_id: None,
                 level: level.into(),
@@ -6830,6 +6831,7 @@ impl AppRuntime {
             events.extend(self.issue_monitor_project_notification(
                 project_root,
                 BackendEvent::IssueMonitorToast {
+                    host_notice: false,
                     notification_transition: None,
                     notification_transition_id: None,
                     level: "error".to_string(),
@@ -7657,6 +7659,7 @@ impl AppRuntime {
         events.extend(self.issue_monitor_project_notification(
             Some(project_root),
             BackendEvent::IssueMonitorToast {
+                host_notice: false,
                 notification_transition: None,
                 notification_transition_id: None,
                 level: "error".to_string(),
@@ -7826,6 +7829,7 @@ impl AppRuntime {
                         OutboundEvent::project(
                             context.project_key.clone(),
                             BackendEvent::IssueMonitorToast {
+                                host_notice: false,
                                 notification_transition: None,
                                 notification_transition_id: None,
                                 level: "error".to_string(),
@@ -7983,6 +7987,7 @@ impl AppRuntime {
                 events.extend(self.issue_monitor_project_notification(
                     Some(&context.project_root),
                     BackendEvent::IssueMonitorToast {
+                        host_notice: false,
                         notification_transition: None,
                         notification_transition_id: None,
                         level: "error".to_string(),
@@ -8593,6 +8598,7 @@ impl AppRuntime {
         // Keep the last authoritative snapshot; an empty reconstructed monitor
         // would overwrite live queue/active counts with zeros (Issue #4273).
         let toast = BackendEvent::IssueMonitorToast {
+            host_notice: false,
             notification_transition: None,
             notification_transition_id: None,
             level: "error".to_string(),
@@ -8644,6 +8650,7 @@ impl AppRuntime {
             return vec![OutboundEvent::reply(
                 client_id,
                 BackendEvent::IssueMonitorToast {
+                    host_notice: false,
                     notification_transition: None,
                     notification_transition_id: None,
                     level: "error".to_string(),
@@ -8662,6 +8669,7 @@ impl AppRuntime {
                     return vec![OutboundEvent::reply(
                         client_id,
                         BackendEvent::IssueMonitorToast {
+                            host_notice: false,
                             notification_transition: None,
                             notification_transition_id: None,
                             level: "error".to_string(),
@@ -8679,6 +8687,7 @@ impl AppRuntime {
                 return vec![OutboundEvent::reply(
                     client_id,
                     BackendEvent::IssueMonitorToast {
+                        host_notice: false,
                         notification_transition: None,
                         notification_transition_id: None,
                         level: "error".to_string(),
@@ -8697,6 +8706,7 @@ impl AppRuntime {
                 return vec![OutboundEvent::reply(
                     client_id,
                     BackendEvent::IssueMonitorToast {
+                        host_notice: false,
                         notification_transition: None,
                         notification_transition_id: None,
                         level: "error".to_string(),
@@ -8717,6 +8727,7 @@ impl AppRuntime {
                 OutboundEvent::reply(
                     client_id,
                     BackendEvent::IssueMonitorToast {
+                        host_notice: false,
                         notification_transition: None,
                         notification_transition_id: None,
                         level: "error".to_string(),
@@ -8734,6 +8745,7 @@ impl AppRuntime {
         events.push(OutboundEvent::reply(
             client_id,
             BackendEvent::IssueMonitorToast {
+                host_notice: false,
                 notification_transition: None,
                 notification_transition_id: None,
                 level: "info".to_string(),
@@ -9243,6 +9255,7 @@ impl AppRuntime {
                     events.extend(self.issue_monitor_project_notification(
                         Some(&project_root),
                         BackendEvent::IssueMonitorToast {
+                            host_notice: false,
                             notification_transition: None,
                             notification_transition_id: None,
                             level: "error".to_string(),
@@ -9777,6 +9790,7 @@ impl AppRuntime {
             events.extend(self.issue_monitor_project_notification(
                 Some(&project_root),
                 BackendEvent::IssueMonitorToast {
+                    host_notice: false,
                     notification_transition: None,
                     notification_transition_id: None,
                     level: "error".to_string(),
@@ -10059,6 +10073,7 @@ impl AppRuntime {
         vec![OutboundEvent::project(
             context.project_key,
             BackendEvent::IssueMonitorToast {
+                host_notice: false,
                 notification_transition: None,
                 notification_transition_id: None,
                 level: "error".to_string(),
@@ -12470,6 +12485,7 @@ impl AppRuntime {
                     return vec![OutboundEvent::reply(
                         client_id,
                         BackendEvent::IssueMonitorToast {
+                            host_notice: false,
                             notification_transition: None,
                             notification_transition_id: None,
                             level: "error".into(),
@@ -12491,6 +12507,7 @@ impl AppRuntime {
                         Err(error) => ("error", format!("Daemon restart: {error}")),
                     };
                     proxy.send(UserEvent::Dispatch(vec![OutboundEvent::reply(client_id, BackendEvent::IssueMonitorToast {
+                        host_notice: false,
                         notification_transition: None, notification_transition_id: None,
                         level: level.into(), message, issue_number: None,
                     })]));
@@ -15956,6 +15973,7 @@ impl AppRuntime {
             } => vec![OutboundEvent::project(
                 context.project_key.clone(),
                 BackendEvent::IssueMonitorToast {
+                    host_notice: false,
                     level,
                     message,
                     issue_number,
@@ -17035,6 +17053,7 @@ impl AppRuntime {
                         notification.push(OutboundEvent::project(
                             context.project_key.clone(),
                             BackendEvent::IssueMonitorToast {
+                                host_notice: false,
                                 notification_transition: None,
                                 notification_transition_id: None,
                                 level: "info".into(),
@@ -17292,6 +17311,7 @@ impl AppRuntime {
             events.push(OutboundEvent::project(
                 context.project_key.clone(),
                 BackendEvent::IssueMonitorToast {
+                    host_notice: false,
                     level: "error".into(),
                     message,
                     issue_number: Some(issue_number),

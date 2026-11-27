@@ -17,7 +17,7 @@ import { parseHTML } from "linkedom";
 import { DEFAULT_COALESCE_KINDS } from "../socket-receive-dispatcher.js";
 import { createUiStateStore } from "../ui-state-store.js";
 import { windowCommandErrorPresentation } from "../window-command-error.js";
-import { notificationForTransition, monitorDiagnostic, monitorNoticeIdentity } from "../agent-completion-notifications.js";
+import { notificationForTransition, monitorDiagnostic, monitorNoticeIdentity, projectNoticeTitle } from "../agent-completion-notifications.js";
 import { createNotificationCenter } from "../notification-center.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -110,7 +110,7 @@ test("issue_monitor_toast records into the notification center with Issues title
   const call = calls[0];
   assert.match(call, /kind:\s*"issue-monitor"/);
   assert.match(call, /level:\s*event\?\.level/);
-  assert.match(call, /title:\s*monitorNotice\?\.title \|\| "Issues"/, "typed Issues transitions use state wording");
+  assert.match(call, /title:\s*projectTitle\(monitorNotice\?\.title \|\| "Issues"\)/, "typed Issues transitions use state wording");
   assert.match(block, /notification_transition/);
   assert.match(block, /source: "monitor"/);
   assert.match(call, /message:\s*event\?\.message/);
@@ -127,12 +127,12 @@ test("Issues model snapshots are immutable and repeated events each reach histor
   const initialization = appSource.match(/const issueMonitorNotificationModel = createUiStateStore\(null\);[\s\S]*?\n {6}\}\);/)?.[0];
   assert.ok(initialization, "Issues notification model must exist");
   const records = [];
-  const { model, receive } = new Function("createUiStateStore", "notificationForTransition", "notificationCenter", "monitorDiagnostic", "monitorNoticeIdentity", `
+  const { model, receive } = new Function("createUiStateStore", "notificationForTransition", "notificationCenter", "monitorDiagnostic", "monitorNoticeIdentity", "projectNoticeTitle", "activeProjectTab", `
     ${initialization}
     return { model: issueMonitorNotificationModel, receive(event) {
       ${caseBlock(appSource, "issue_monitor_toast").replace('case "issue_monitor_toast":', '')}
     }};
-  `)(createUiStateStore, notificationForTransition, { recordError: notice => records.push(notice) }, monitorDiagnostic, monitorNoticeIdentity);
+  `)(createUiStateStore, notificationForTransition, { recordError: notice => records.push(notice) }, monitorDiagnostic, monitorNoticeIdentity, projectNoticeTitle, () => null);
   assert.equal(records.length, 0);
   const event = { kind: "issue_monitor_toast", level: "error", message: "retry", issue_number: 5016 };
   receive(event);
@@ -154,12 +154,12 @@ test("launch requested repeats share one Issue row until dismissed or cleared", 
   const { document } = parseHTML("<!doctype html><html><body></body></html>");
   const center = createNotificationCenter({ document });
   center.mount(document.body);
-  const receive = new Function("createUiStateStore", "notificationForTransition", "notificationCenter", "monitorDiagnostic", "monitorNoticeIdentity", `
+  const receive = new Function("createUiStateStore", "notificationForTransition", "notificationCenter", "monitorDiagnostic", "monitorNoticeIdentity", "projectNoticeTitle", "activeProjectTab", `
     ${initialization}
     return event => {
       ${caseBlock(appSource, "issue_monitor_toast").replace('case "issue_monitor_toast":', '')}
     };
-  `)(createUiStateStore, notificationForTransition, center, monitorDiagnostic, monitorNoticeIdentity);
+  `)(createUiStateStore, notificationForTransition, center, monitorDiagnostic, monitorNoticeIdentity, projectNoticeTitle, () => null);
   const launch = { kind: "issue_monitor_toast", level: "info", message: "Issues launch requested", issue_number: 3852 };
   for (let i = 0; i < 4; i += 1) receive(launch);
   assert.equal(center.count(), 1, "repeated launch attempts share one visible row");
@@ -189,10 +189,10 @@ test("Issue #7520: a renewed steering request updates one counted row per Issue 
   const { document } = parseHTML("<!doctype html><html><body></body></html>");
   const center = createNotificationCenter({ document });
   center.mount(document.body);
-  const receive = new Function("createUiStateStore", "notificationForTransition", "notificationCenter", "monitorDiagnostic", "monitorNoticeIdentity", `
+  const receive = new Function("createUiStateStore", "notificationForTransition", "notificationCenter", "monitorDiagnostic", "monitorNoticeIdentity", "projectNoticeTitle", "activeProjectTab", `
     ${initialization}
     return event => { ${caseBlock(appSource, "issue_monitor_toast").replace('case "issue_monitor_toast":', '')} };
-  `)(createUiStateStore, notificationForTransition, center, monitorDiagnostic, monitorNoticeIdentity);
+  `)(createUiStateStore, notificationForTransition, center, monitorDiagnostic, monitorNoticeIdentity, projectNoticeTitle, () => null);
   const steering = (issue, count, reason) => ({ kind: "issue_monitor_toast", level: "warn", issue_number: issue,
     message: `Issue #${issue} steering requested (${count}): ${reason}` });
   for (let count = 1; count <= 3; count += 1) receive(steering(4499, count, "launch stuck for 900s"));
@@ -218,10 +218,10 @@ test("Issue #6932 groups repeated Issues failures and suppresses continued/stabl
   let clock = new Date("2026-11-09T00:00:00Z");
   const center = createNotificationCenter({ document, now: () => clock });
   center.mount(document.body);
-  const receive = new Function("createUiStateStore", "notificationForTransition", "notificationCenter", "monitorDiagnostic", "monitorNoticeIdentity", `
+  const receive = new Function("createUiStateStore", "notificationForTransition", "notificationCenter", "monitorDiagnostic", "monitorNoticeIdentity", "projectNoticeTitle", "activeProjectTab", `
     ${initialization}
     return event => { ${caseBlock(appSource, "issue_monitor_toast").replace('case "issue_monitor_toast":', '')} };
-  `)(createUiStateStore, notificationForTransition, center, monitorDiagnostic, monitorNoticeIdentity);
+  `)(createUiStateStore, notificationForTransition, center, monitorDiagnostic, monitorNoticeIdentity, projectNoticeTitle, () => null);
   const failure = { kind: "issue_monitor_toast", level: "error", message: "Issues scan failed at open-pr-readback stage: GitHub connection failed after 30s" };
   for (let i = 0; i < 5; i++) { clock = new Date(clock.getTime() + 60_000); receive({ ...failure, message: failure.message.replace("30s", `${30 + i}s`) }); }
   assert.equal(center.count(), 1);
@@ -247,6 +247,45 @@ test("Issue #6932 groups repeated Issues failures and suppresses continued/stabl
   assert.equal(center.unreadCount(), 0, "stable stalled cause must not rearm unread");
   receive({ ...failure, message: "Issues scan stalled; last scan at 2026-11-09T00:02:00Z; previous failure: issue #43: needs_human: decision needed" });
   assert.equal(center.count(), 4, "changed human decision remains actionable");
+});
+
+test("Issue #3922: every Issues notice names its project, so two project pages stay distinguishable", () => {
+  const initialization = appSource.match(/const issueMonitorNotificationModel = createUiStateStore\(null\);[\s\S]*?\n {6}\}\);/)?.[0];
+  const page = (projectTab) => {
+    const { document } = parseHTML("<!doctype html><html><body></body></html>");
+    const center = createNotificationCenter({ document });
+    center.mount(document.body);
+    const receive = new Function("createUiStateStore", "notificationForTransition", "notificationCenter", "monitorDiagnostic", "monitorNoticeIdentity", "projectNoticeTitle", "activeProjectTab", `
+      ${initialization}
+      return event => { ${caseBlock(appSource, "issue_monitor_toast").replace('case "issue_monitor_toast":', '')} };
+    `)(createUiStateStore, notificationForTransition, center, monitorDiagnostic, monitorNoticeIdentity, projectNoticeTitle, () => projectTab);
+    const titles = () => [...document.querySelectorAll(".notification-center__item")].map(row => `${row.querySelector(".notification-center__title").textContent} ${row.textContent}`);
+    return { receive, titles };
+  };
+  const alpha = page({ title: "alpha", project_root: "/repos/alpha" });
+  const beta = page({ title: "beta", project_root: "/repos/beta" });
+  // Launch request, process exit (ordinary), needs_human (typed), and an error diagnostic.
+  for (const target of [alpha, beta]) {
+    target.receive({ kind: "issue_monitor_toast", level: "info", message: "Issues launch requested", issue_number: 3752 });
+    target.receive({ kind: "issue_monitor_toast", level: "warn", message: "Process exited", issue_number: 3752 });
+    target.receive({ kind: "issue_monitor_toast", level: "warn", message: "decide", issue_number: 3752, notification_transition: "needs_human" });
+    target.receive({ kind: "issue_monitor_toast", level: "error", message: "Issues scan failed at candidate-load stage: offline", issue_number: 3752 });
+  }
+  for (const [target, name, other] of [[alpha, "alpha", "beta"], [beta, "beta", "alpha"]]) {
+    const titles = target.titles();
+    assert.equal(titles.length, 4);
+    for (const title of titles) {
+      assert.match(title, new RegExp(`\\[${name}\\] `), `every notice names its project: ${title}`);
+      assert.doesNotMatch(title, new RegExp(`\\[${other}\\]`));
+    }
+  }
+  // AC-3: a missing project name and a host-wide notice keep the plain title.
+  const unnamed = page(null);
+  unnamed.receive({ kind: "issue_monitor_toast", level: "info", message: "Issues launch requested", issue_number: 7 });
+  assert.match(unnamed.titles()[0], /^Issues #7/);
+  alpha.receive({ kind: "issue_monitor_toast", level: "info", message: "Update ready", host_notice: true });
+  assert.ok(alpha.titles().some(title => /^Issues/.test(title) && title.includes("Update ready")),
+    "host notices are not attributed to a project");
 });
 
 // --- T-017: completion / attention / board-mention seams (FR-011, Sc 3, Sc 7) ---

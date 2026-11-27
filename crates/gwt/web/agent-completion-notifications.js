@@ -24,6 +24,17 @@ function projectLabel(projectTab) {
   return "Project";
 }
 
+// Issue #3922: Issues notices name their project so pages stay distinguishable.
+// A missing name keeps the plain title; long names are shortened.
+const PROJECT_NOTICE_NAME_MAX = 24;
+export function projectNoticeTitle(title, projectTab) {
+  const root = String(projectTab?.project_root || "").replace(/[\\/]+$/, "");
+  const name = String(projectTab?.title || "").trim() || root.split(/[\\/]/).pop() || "";
+  if (!name) return title;
+  const shown = name.length > PROJECT_NOTICE_NAME_MAX ? `${name.slice(0, PROJECT_NOTICE_NAME_MAX - 1)}…` : name;
+  return `[${shown}] ${title}`;
+}
+
 function defaultDesktopPermission(windowRef) {
   return windowRef?.Notification?.permission || "unsupported";
 }
