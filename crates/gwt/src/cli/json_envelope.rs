@@ -1203,15 +1203,42 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             project_root: optional_path(params, "project_root")?,
             action: crate::issue_monitor::AgentSwitchAction::Read { request_id: None },
         }),
-        "issue.monitor.switch.request" => CliCommand::Issue(IssueCommand::MonitorSwitch {
-            project_root: optional_path(params, "project_root")?,
-            action: crate::issue_monitor::AgentSwitchAction::Request {
-                operation_id: required_string(params, "operation_id")?,
-                member_id: required_string(params, "member_id")?,
-                expected_roster_revision: required_u64(params, "expected_roster_revision")?,
-                target_issue_number: required_u64(params, "target_issue_number")?,
-            },
-        }),
+        "issue.monitor.switch.request" => {
+            use crate::issue_monitor::AgentSwitchDisposition;
+            let disposition = lookup(params, "disposition")
+                .map(|value| serde_json::from_value(value.clone()))
+                .transpose()
+                .map_err(|error| CliParseError::InvalidJson(format!("disposition: {error}")))?
+                .unwrap_or_default();
+            let target_issue_number = match disposition {
+                AgentSwitchDisposition::SwitchToTarget => {
+                    Some(required_u64(params, "target_issue_number")?)
+                }
+                AgentSwitchDisposition::SaveAndReturn => {
+                    if lookup(params, "target_issue_number").is_some() {
+                        return Err(CliParseError::InvalidJson(
+                            "save_and_return does not accept target_issue_number".into(),
+                        ));
+                    }
+                    None
+                }
+            };
+            if !disposition.permits_target(target_issue_number) {
+                return Err(CliParseError::InvalidJson(
+                    "target_issue_number must be a positive Issue number".into(),
+                ));
+            }
+            CliCommand::Issue(IssueCommand::MonitorSwitch {
+                project_root: optional_path(params, "project_root")?,
+                action: crate::issue_monitor::AgentSwitchAction::Request {
+                    operation_id: required_string(params, "operation_id")?,
+                    member_id: required_string(params, "member_id")?,
+                    expected_roster_revision: required_u64(params, "expected_roster_revision")?,
+                    disposition,
+                    target_issue_number,
+                },
+            })
+        }
         "issue.monitor.switch.cancel" => CliCommand::Issue(IssueCommand::MonitorSwitch {
             project_root: optional_path(params, "project_root")?,
             action: crate::issue_monitor::AgentSwitchAction::Cancel {
@@ -1223,6 +1250,12 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             head: required_string(params, "head")?,
             work_id: required_string(params, "work_id")?,
             board_entry_id: required_string(params, "board_entry_id")?,
+            resume_condition: lookup(params, "resume_condition")
+                .map(|value| serde_json::from_value(value.clone()))
+                .transpose()
+                .map_err(|error| {
+                    CliParseError::InvalidJson(format!("resume_condition: {error}"))
+                })?,
         }),
         "issue.monitor.schedule.read" => CliCommand::Issue(IssueCommand::MonitorSchedule {
             project_root: optional_path(params, "project_root")?,
@@ -7558,6 +7591,36 @@ mod tests {
             forged[field] = json!("untrusted");
             let _ = err("issue.monitor.switch.ack", forged);
         }
+    }
+
+    #[test]
+    fn issue_monitor_switch_save_and_return_accepts_no_target_and_typed_resume_condition() {
+        let mut request = json!({
+            "operation_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "member_id": "member",
+            "expected_roster_revision": 3,
+            "disposition": "save_and_return"
+        });
+        let _ = ok("issue.monitor.switch.request", request.clone());
+        request["target_issue_number"] = json!(42);
+        let _ = err("issue.monitor.switch.request", request.clone());
+        request["target_issue_number"] = json!(null);
+        let _ = err("issue.monitor.switch.request", request);
+
+        let mut ack = json!({
+            "operation_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "head": "a".repeat(40),
+            "work_id": "work",
+            "board_entry_id": "board",
+            "resume_condition": {
+                "blocker_numbers": [42],
+                "reason": "waiting for dependency",
+                "next_action": "resume saved Work"
+            }
+        });
+        let _ = ok("issue.monitor.switch.ack", ack.clone());
+        ack["resume_condition"]["claim_id"] = json!("forged");
+        let _ = err("issue.monitor.switch.ack", ack);
     }
 
     #[test]

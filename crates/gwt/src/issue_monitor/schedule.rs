@@ -299,7 +299,7 @@ fn reconcile_with_health(
                         || entry.reason == AgentScheduleReason::AssignedByYou
                         || prefs.agent_switch_intents.values().any(|intent| {
                             intent.has_admission_pin()
-                                && intent.request.target_issue_number == entry.issue_number
+                                && intent.request.target_issue_number == Some(entry.issue_number)
                                 && intent.request.member_id == entry.agent_member_id
                                 && intent.source.assignment.host_id == host
                         })
@@ -320,7 +320,7 @@ fn reconcile_with_health(
         }
         if let Some(pin) = prefs.agent_switch_intents.values().find(|intent| {
             intent.has_admission_pin()
-                && intent.request.target_issue_number == entry.number
+                && intent.request.target_issue_number == Some(entry.number)
                 && intent.source.assignment.host_id == host
         }) {
             reservations.push(AgentIssueReservation {
@@ -389,7 +389,7 @@ fn reconcile_with_health(
             || entry.reason == AgentScheduleReason::AssignedByYou
             || prefs.scheduled_issue_has_pending_claim(entry.issue_number)
             || prefs.agent_switch_intents.values().any(|intent| {
-                intent.request.target_issue_number == entry.issue_number
+                intent.request.target_issue_number == Some(entry.issue_number)
                     && intent.request.member_id == entry.agent_member_id
                     && intent.source.assignment.host_id == host
                     && !matches!(
@@ -597,7 +597,7 @@ fn mutate_project_agent_schedule_with_probe(
             if snapshot.roster_revision != *expected_roster_revision || snapshot.queue_revision != *expected_queue_revision || snapshot.schedule_revision != *expected_schedule_revision {
                 return Err(io::Error::other(format!("Agent schedule changed: expected roster={expected_roster_revision}, queue={expected_queue_revision}, schedule={expected_schedule_revision}; current roster={}, queue={}, schedule={}; read issue.monitor.schedule.read and retry",snapshot.roster_revision,snapshot.queue_revision,snapshot.schedule_revision)));
             }
-            if prefs.agent_switch_intents.values().any(|intent| intent.has_admission_pin() && intent.request.target_issue_number == *issue_number) {
+            if prefs.agent_switch_intents.values().any(|intent| intent.has_admission_pin() && intent.request.target_issue_number == Some(*issue_number)) {
                 return Err(io::Error::other("Switch target is pinned to its selected member; wait for the switch or resume its saved source work"));
             }
             if prefs.scheduled_issue_in_flight(*issue_number) || prefs.scheduled_issue_has_pending_claim(*issue_number) {return Err(io::Error::other("Issue already claiming, launching or running; read issue.monitor.schedule.read and retry"));}
@@ -722,6 +722,10 @@ impl IssueMonitorState {
             .find(|delivery| delivery.issue_number == number)
             .and_then(|delivery| delivery.agent_member_id.as_deref())
             .or_else(|| {
+                self.saved_switch_resume(number)
+                    .map(|intent| intent.request.member_id.as_str())
+            })
+            .or_else(|| {
                 self.agent_issue_schedule
                     .reservations
                     .iter()
@@ -770,6 +774,55 @@ impl IssueMonitorState {
             .find(|entry| entry.issue_number == number && entry.host_id != host)
         {
             return Some(format!("scheduled_on_other_host: expected host={}, current host={host}; read issue.monitor.queue.list for that terminal; use issue.monitor.queue.adopt with terminal to recover a retired host, then read issue.monitor.schedule.read", foreign.host_id));
+        }
+        if let Some(intent) = self.saved_switch_resume(number) {
+            let member_id = &intent.request.member_id;
+            let delivery = self.pending_launch_deliveries.iter().find(|delivery| {
+                delivery.issue_number == number
+                    && delivery.agent_member_id.as_ref() == Some(member_id)
+            });
+            let exact_delivery = delivery.is_some_and(|delivery| {
+                intent.resume_delivery_id.as_ref() == Some(&delivery.delivery_id)
+            });
+            let member_available = self
+                .agent_roster
+                .iter()
+                .flat_map(|roster| &roster.members)
+                .any(|member| {
+                    member.agent_member_id == *member_id
+                        && member.implementation_eligible()
+                        && member.assignment.as_ref().is_none_or(|assignment| {
+                            exact_delivery
+                                && assignment.issue_number == Some(number)
+                                && assignment.project_key == self.agent_registry_project_key
+                                && assignment.delivery_id == intent.resume_delivery_id
+                        })
+                });
+            let fixed_assignment = self.agent_issue_schedule.reservations.iter().any(|entry| {
+                entry.issue_number == number && entry.reason == AgentScheduleReason::AssignedByYou
+            });
+            let reserved_elsewhere = self.pending_launch_deliveries.iter().any(|delivery| {
+                delivery.issue_number != number
+                    && delivery.agent_member_id.as_ref() == Some(member_id)
+            }) || self.agent_switch_intents.values().any(|other| {
+                other.request.operation_id != intent.request.operation_id
+                    && other
+                        .admission_exclusion(Some(number), Some(member_id), false)
+                        .is_some()
+            });
+            let available = intent.source.assignment.host_id == host
+                && !self.launch_auto
+                && (intent.stage == AgentSwitchStage::Returned || exact_delivery)
+                && member_available
+                && !fixed_assignment
+                && !reserved_elsewhere
+                && !self.agent_schedule_ineligible.contains_key(member_id)
+                && !self
+                    .prefs()
+                    .registered_launch_profiles_for_issue(number)
+                    .is_empty();
+            return (!available)
+                .then(|| "Saved Work is waiting for its original Agent and launch profile".into());
         }
         if let Some(reason) = self.agent_switch_intents.values().find_map(|intent| {
             intent.admission_exclusion(Some(number), self.scheduled_agent_member_id(number), false)

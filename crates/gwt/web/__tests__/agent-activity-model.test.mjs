@@ -636,6 +636,25 @@ test("switch refresh selects the latest timestamped operation without terminal r
   assert.deepEqual(model.read().intents, [latest], "an old progress receipt cannot undo the final result");
 });
 
+test("saved work tracks return, resume, and recovery without a target issue", async () => {
+  const { createAgentSwitchModel } = await import("../agent-activity-model.js");
+  const { model, applyAgentSwitchSnapshot, beginAgentSwitchRequest } = createAgentSwitchModel("project");
+  const intent = { operation_id: "return", member_id: "m1", source_issue_number: 4777, disposition: "save_and_return" };
+  const observe = stage => {
+    applyAgentSwitchSnapshot({ project_key: "project", intents: [{ ...intent, stage }] });
+    return model.read().intents[0]?.stage;
+  };
+  assert.equal(observe("checkpoint_verified"), "checkpoint_verified");
+  assert.equal(beginAgentSwitchRequest({ kind: "cancel", operation_id: intent.operation_id }), false);
+  assert.equal(observe("stopping_current"), "stopping_current");
+  assert.equal(observe("returned"), "returned");
+  assert.equal(observe("resuming"), "resuming");
+  assert.equal(observe("returned"), "returned");
+  assert.equal(observe("checkpoint_verified"), "returned");
+  assert.equal(observe("completed"), "completed");
+  assert.equal(observe("resuming"), "completed");
+});
+
 
 test("only a correlated Unknown read may release an absent local switch for a new explicit request", async t => {
   const crypto = globalThis.crypto, descriptor = Object.getOwnPropertyDescriptor(crypto, "randomUUID");

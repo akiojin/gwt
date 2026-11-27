@@ -2432,6 +2432,7 @@ pub(crate) fn load_open_issue_monitor_candidates_for_repo_path_observing(
                 tracing::warn!(%error, "urgent assignment cache unavailable");
                 crate::IssueMonitorPrefs::default()
             });
+            refresh_saved_switch_blockers(repo_path, owner, repo, &prefs, &mut issues);
             // Construct/authenticate only when a live urgent revision actually
             // needs enrichment. Retain a construction error for this scan so a
             // broken credential probe is not repeated for every urgent row.
@@ -2506,6 +2507,11 @@ pub(crate) fn load_open_issue_monitor_candidates_for_repo_path_observing(
         result
     });
     let mut loaded = resolve_loaded_issue_monitor_candidates(Err(live_error), cache_results)?;
+    if let Ok(prefs) =
+        crate::load_issue_monitor_prefs(&crate::issue_monitor_prefs_path_for_repo_path(repo_path))
+    {
+        refresh_saved_switch_blockers(repo_path, owner, repo, &prefs, &mut loaded.issues);
+    }
     if owner.eq_ignore_ascii_case("akiojin") && repo.eq_ignore_ascii_case("gwt") {
         backfill_missing_issue_authors((owner, repo), &mut loaded.issues, |issue| {
             try_refresh_issue_monitor_candidate(repo_path, owner, repo, issue).inspect_err(
@@ -2839,9 +2845,21 @@ pub fn try_refresh_issue_monitor_candidate(
     repo: &str,
     issue: &IssueMonitorIssue,
 ) -> Result<IssueMonitorIssue, IssueMonitorScanFailure> {
+    let mut refreshed =
+        try_refresh_issue_monitor_candidate_number(repo_path, owner, repo, issue.number)?;
+    refreshed.url.clone_from(&issue.url);
+    Ok(refreshed)
+}
+
+fn try_refresh_issue_monitor_candidate_number(
+    repo_path: &Path,
+    owner: &str,
+    repo: &str,
+    issue_number: u64,
+) -> Result<IssueMonitorIssue, IssueMonitorScanFailure> {
     let cache_root = crate::issue_cache::issue_cache_root_for_repo_path(repo_path)
         .unwrap_or_else(|| crate::issue_cache::issue_cache_root_for_repo_slug(owner, repo));
-    let number = IssueNumber(issue.number);
+    let number = IssueNumber(issue_number);
     run_budgeted_readback_stage(IssueMonitorScanStage::CandidateLoad, || {
         crate::issue_cache::refresh_issue_cache_entry_from_remote(repo_path, &cache_root, number)
     })?;
@@ -2850,7 +2868,7 @@ pub fn try_refresh_issue_monitor_candidate(
             IssueMonitorScanStage::CandidateLoad,
             format!(
                 "issue #{number} has no cache entry after a targeted refresh",
-                number = issue.number
+                number = issue_number
             ),
         )
     })?;
@@ -2883,10 +2901,61 @@ pub fn try_refresh_issue_monitor_candidate(
             IssueState::Closed => IssueMonitorIssueState::Closed,
         },
         body: (!body.is_empty()).then_some(body),
-        url: issue.url.clone(),
+        url: None,
         readiness,
         updated_at: Some(entry.snapshot.updated_at.0),
     })
+}
+
+fn refresh_saved_switch_blockers(
+    repo_path: &Path,
+    owner: &str,
+    repo: &str,
+    prefs: &crate::IssueMonitorPrefs,
+    issues: &mut Vec<IssueMonitorIssue>,
+) {
+    use crate::issue_monitor::AgentSwitchStage;
+    if !prefs.enabled {
+        return;
+    }
+    let host = crate::process::current_hostname();
+    let blockers: BTreeSet<_> = prefs
+        .agent_switch_intents
+        .values()
+        .filter(|intent| {
+            intent.source.assignment.host_id == host
+                && matches!(
+                    intent.stage,
+                    AgentSwitchStage::Returned | AgentSwitchStage::Resuming
+                )
+        })
+        .filter_map(|intent| intent.resume_condition.as_ref())
+        .flat_map(|condition| condition.blocker_numbers.iter().copied())
+        .collect();
+    // Closed blockers disappear from the open listing. Read the exact Issue
+    // through the existing cache refresh path even when no claim slot is free.
+    // In the cache fallback an old closure cannot stand in for this read.
+    issues.retain(|issue| {
+        issue.state != IssueMonitorIssueState::Closed || !blockers.contains(&issue.number)
+    });
+    for number in blockers {
+        if !readback_fan_out_has_budget() {
+            break;
+        }
+        match try_refresh_issue_monitor_candidate_number(repo_path, owner, repo, number) {
+            Ok(mut issue) => {
+                if let Some(listed) = issues.iter_mut().find(|listed| listed.number == number) {
+                    issue.url.clone_from(&listed.url);
+                    *listed = issue;
+                } else {
+                    issues.push(issue);
+                }
+            }
+            Err(error) => {
+                tracing::debug!(issue = number, %error, "Saved Work dependency readback deferred")
+            }
+        }
+    }
 }
 
 /// Checked completion probe used by scan proposal transactions.
@@ -4333,9 +4402,21 @@ pub fn cached_agent_member_spec_owner(project_root: &Path, issue_number: u64) ->
 pub fn load_cached_issue_monitor_dependency_candidates(
     cache_root: &Path,
     issue_number: u64,
+    before_load: impl FnMut(u64) -> Result<(), String>,
+) -> Result<Vec<IssueMonitorIssue>, String> {
+    load_cached_issue_monitor_dependency_candidates_with_roots(
+        cache_root,
+        [issue_number],
+        before_load,
+    )
+}
+
+pub(crate) fn load_cached_issue_monitor_dependency_candidates_with_roots(
+    cache_root: &Path,
+    roots: impl IntoIterator<Item = u64>,
     mut before_load: impl FnMut(u64) -> Result<(), String>,
 ) -> Result<Vec<IssueMonitorIssue>, String> {
-    let mut pending = BTreeSet::from([issue_number]);
+    let mut pending: BTreeSet<_> = roots.into_iter().collect();
     let mut seen = BTreeSet::new();
     let mut issues = Vec::new();
     while let Some(number) = pending.pop_first() {

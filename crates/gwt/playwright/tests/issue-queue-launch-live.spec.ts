@@ -1,5 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 import { spawn, type ChildProcess } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { mkdir, readFile, readdir, realpath, rename, rmdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { startIssueQueueLaunchFixture } from "./_helpers/issue-queue-launch";
@@ -3056,6 +3057,210 @@ request.catch(() => {});
       await info.attach(`operator-hold-released-${theme}`, { body: await page.screenshot(), contentType: "image/png" });
     } finally {
       try { await page.close(); } finally { await fixture.stop(); }
+    }
+    expect(errors, "zero console/page errors including owned fixture cleanup").toEqual([]);
+  });
+
+  test("Issue #7273 saves and returns a shared slot, then resumes the saved Work once", async ({ page }, info) => {
+    const supportedHost = process.platform === "linux"
+      || (process.platform === "darwin" && (process.geteuid?.() ?? 0) !== 0);
+    test.skip(!supportedHost || process.env.GWT_PLAYWRIGHT_SWITCH_POSITIVE !== "1",
+      "requires the isolated Linux root process namespace or a non-root macOS Host");
+    test.setTimeout(12 * 60_000);
+    const sourceIssue = 43;
+    const blocker = 44;
+    const otherIssue = 45;
+    const resumeCondition = {
+      blocker_numbers: [blocker], reason: "Waiting for the fixture dependency",
+      next_action: "Resume the unfinished source implementation",
+    };
+    const fixture = await startIssueQueueLaunchFixture(info, {
+      page, issueNumber: sourceIssue, additionalIssueNumbers: [blocker], secondProject: { issueNumbers: [otherIssue] },
+      switching: true, positive: true, switchResumeCondition: resumeCondition, autonomousMode: true,
+      monitorPreferences: { max_active_agents: 1, autonomous_tuning: { max_attempts: 3, stuck_timeout_secs: 1800,
+        heartbeat_interval_secs: 120, merge_watch_timeout_secs: 3600, deliver_fix_loop_cap: 5,
+        retry_backoff_base_secs: 5, retry_backoff_cap_secs: 10 } },
+    });
+    const secondPage = await page.context().newPage().catch(async error => { await fixture.stop(); throw error; });
+    const theme = info.project.name.endsWith("light") ? "light" : "dark";
+    const errors: string[] = [];
+    for (const target of [page, secondPage]) {
+      target.on("pageerror", error => errors.push(error.message));
+      target.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+    }
+    const preferences = async () => JSON.parse((await fixture.monitorPreferencesBytes()).toString());
+    const machine = async (file: string) => JSON.parse(await readFile(join(fixture.home, ".gwt/machine-state", file), "utf8"));
+    const assignments = async (key: string) => Object.values((await machine("agent-registry.json")).project_assignments[key] ?? {})
+      .filter((assignment: any) => assignment.role !== "pm");
+    const sourceOperation = randomUUID();
+    const savedIntent = async () => (await preferences()).agent_switch_intents?.[sourceOperation];
+    const actor = async (stage: string, session?: string | null) => (await fixture.actorEvents()).find((event: any) =>
+      event.stage === stage && (!session || event.gwt_session_id === session));
+    const status = (project?: string) => readOperationOutput("issue.monitor.status",
+      () => fixture.operationAsync("issue.monitor.status", {}, project));
+    const session = (id: string) => readFile(join(fixture.home, ".gwt/sessions", `${id}.toml`), "utf8");
+    const waitForScan = async (after: string, message: string) => expect.poll(async () => {
+      const prefs = await preferences();
+      return prefs.last_scan_at > after && !prefs.last_scan_error;
+    }, { timeout: 120_000, message }).toBe(true);
+    const windowId = async (target: Page, session: string) => target.evaluate(session => {
+      const messages = (window as any).__gwtPlaywrightMessages ?? [];
+      return messages.findLast(({ payload }: any) => payload.kind === "workspace_state")?.payload.workspace.tabs
+        .flatMap((tab: any) => tab.workspace.windows).find((window: any) => window.session_id === session)?.id;
+    }, session);
+    try {
+      const projectKey = fixture.fixtureOperation("issue.monitor.status").project_store.hash;
+      for (const [target, key] of [[page, projectKey], [secondPage, fixture.second.key]] as const) {
+        await target.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme), theme);
+        await gotoLiveGwt(target, liveGwtProjectUrl(fixture.url, key), { enableTestBridge: true });
+        await expect(target.locator("html")).toHaveAttribute("data-theme", theme);
+      }
+      expect(fixture.second.key).not.toBe(projectKey);
+      await sendLiveGwtEvent(page, { kind: "set_issue_monitor_max_active_agents", max_active_agents: 1 });
+      await expect.poll(() => machine("agent-settings.json"), { timeout: 30_000 }).toMatchObject({ mode: "manual", manual_limit: 1 });
+
+      await expect.poll(() => page.evaluate(() => (window as any).__gwtPlaywrightMessages
+        ?.findLast(({ payload }: any) => payload.kind === "project_execution_status")?.payload.status.view_state),
+      { timeout: 60_000 }).toBe("open");
+      await sendLiveGwtEvent(page, { kind: "open_pm_agent" });
+      await expect.poll(() => actor("pm_ready"), { timeout: 90_000 }).toBeTruthy();
+      const pm = (await actor("pm_ready")).gwt_session_id as string;
+      await expect.poll(() => windowId(page, pm), { timeout: 60_000 }).toBeTruthy();
+      const pmWindow = await windowId(page, pm);
+      const workers = async () => (await fixture.launches()).filter(launch => launch.gwt_session_id !== pm);
+      const workerIssues = async () => (await fixture.launchIssues()).filter(Number.isFinite);
+      await sendLiveGwtEvent(page, { kind: "issue_monitor_queue_push", issue_numbers: [sourceIssue] });
+      await expect.poll(workerIssues, { timeout: 90_000 }).toEqual([sourceIssue]);
+      const [source] = await workers();
+      await expect.poll(() => actor("idle", source.gwt_session_id), { timeout: 60_000 }).toBeTruthy();
+      const idle = await actor("idle", source.gwt_session_id);
+      expect(fixture.processAlive(idle.tree_child_pid)).toBe(true);
+      await expect.poll(() => assignments(projectKey)).toEqual([expect.objectContaining({
+        issue_number: sourceIssue, session_id: source.gwt_session_id,
+      })]);
+
+      // A is already running when it discovers a missing dependency. B is queued through its own Monitor.
+      const beforeDependency = (await preferences()).last_scan_at;
+      await fixture.updateIssue(sourceIssue, { body: "## Acceptance Criteria\n- [ ] AC-1: Resume saved work.\n\n## Dependencies\nBlocked-by: #44" });
+      await waitForScan(beforeDependency, "A observes its newly declared blocker after launch");
+      await sendLiveGwtEvent(secondPage, { kind: "issue_monitor_queue_push", issue_numbers: [otherIssue] });
+      await expect.poll(async () => {
+        const second = await status(fixture.second.project);
+        return second.inbox.some((row: any) => row.issue_number === otherIssue && row.state !== "launched")
+          && second.launch_capacity.admission_saturated;
+      }, { timeout: 120_000, message: "B is queued while A holds the common Manual slot" }).toBe(true);
+      expect(await workerIssues()).toEqual([sourceIssue]);
+
+      const roster = await readCanonicalRoster(page);
+      const member = roster.members.find((candidate: any) => candidate.assignment?.session_id === source.gwt_session_id);
+      expect(member).toBeTruthy();
+      await writeFile(join(fixture.home, "switch-request.json"), JSON.stringify({
+        project_root: fixture.project, operation_id: sourceOperation, member_id: member.agent_member_id,
+        expected_roster_revision: roster.revision, disposition: "save_and_return",
+      }));
+      await sendLiveGwtEvent(page, { kind: "terminal_input", id: pmWindow, data: "GWT_PM_FIXTURE_RETURN\r" });
+      await expect.poll(() => actor("pm_switch_reply", pm), { timeout: 60_000 }).toBeTruthy();
+      const request = await actor("pm_switch_reply", pm);
+      expect(request.envelope.ok, JSON.stringify(request.envelope)).toBe(true);
+      await expect.poll(() => actor("awaiting_normal_n2", source.gwt_session_id), { timeout: 60_000 }).toBeTruthy();
+      const ack = await actor("checkpoint_acked", source.gwt_session_id);
+      const checkpoint = fixture.savedSource(source.cwd);
+      expect(checkpoint).toMatchObject({ head: ack.head, remoteHead: ack.head, porcelain: "" });
+      const acknowledged = await savedIntent();
+      expect(acknowledged).toMatchObject({ stage: "checkpoint_verified", source_agent_id: "codex", checkpoint: {
+        verified_head: ack.head, work_id: ack.work_id, board_entry_id: ack.board_entry_id,
+      }, resume_condition: resumeCondition, runtime_stop: {
+        issue_number: sourceIssue, session_id: source.gwt_session_id, execution_identity: { session_id: source.gwt_session_id },
+        runtime_incarnation: expect.any(Number), child_pid: expect.any(Number),
+      } });
+      expect((await preferences()).monitor_runtime_stop_requests ?? []).toEqual([]);
+      expect(fixture.processAlive(source.pid)).toBe(true);
+      expect(fixture.processAlive(idle.tree_child_pid)).toBe(true);
+      expect(await workerIssues()).toEqual([sourceIssue]);
+      expect(await assignments(projectKey)).toEqual([expect.objectContaining({ session_id: source.gwt_session_id })]);
+
+      const gate = join(fixture.home, `normal-n2-${sourceOperation}.json`);
+      await writeFile(`${gate}.tmp`, JSON.stringify({ operation: sourceOperation }));
+      await rename(`${gate}.tmp`, gate);
+      await expect.poll(savedIntent, { timeout: 120_000 }).toMatchObject({
+        stage: "returned", runtime_exit_confirmed: true, runtime_stop: acknowledged.runtime_stop,
+      });
+      expect(fixture.processAlive(source.pid)).toBe(false);
+      expect(fixture.processAlive(idle.tree_child_pid)).toBe(false);
+      expect(await session(source.gwt_session_id!)).toMatch(/^status\s*=\s*"(?:Stopped|Interrupted)"/m);
+      expect(await assignments(projectKey)).toEqual([]);
+      expect((await fixture.workItems()).work_items.find((work: any) => work.id === ack.work_id)).toMatchObject({
+        owner: "Issue #43", status_category: "idle", board_refs: expect.arrayContaining([ack.board_entry_id]),
+      });
+      await expect.poll(workerIssues, { timeout: 180_000, message: "B is admitted by its ordinary Monitor" }).toEqual([sourceIssue, otherIssue]);
+      const [, other] = await workers();
+      await expect.poll(() => assignments(fixture.second.key)).toEqual([expect.objectContaining({
+        issue_number: otherIssue, session_id: other.gwt_session_id,
+      })]);
+      await expect.poll(() => windowId(secondPage, other.gwt_session_id!), { timeout: 60_000 }).toBeTruthy();
+      const otherWindow = await windowId(secondPage, other.gwt_session_id!);
+      expect(fixture.processAlive(other.pid)).toBe(true);
+
+      const beforeClosure = (await preferences()).last_scan_at;
+      await fixture.updateIssue(blocker, { state: "CLOSED" });
+      await expect.poll(async () => (await preferences()).closure_records?.find((record: any) =>
+        record.issue_number === blocker)?.state, { timeout: 120_000, message: "A observes the dependency close while B holds the slot" }).toBe("closed");
+      await waitForScan(beforeClosure, "ordinary Monitor scans A while B holds the only slot");
+      expect((await savedIntent()).stage).toBe("returned");
+      expect(await workerIssues()).toEqual([sourceIssue, otherIssue]);
+      expect(await assignments(projectKey)).toEqual([]);
+      expect(fixture.processAlive(other.pid)).toBe(true);
+      await page.locator('.op-rail__surface[data-surface="agents"]').click();
+      const agents = page.getByRole("region", { name: "Main pane", exact: true })
+        .locator(".agents-surface:not(.agents-surface--preview)");
+      await agents.locator(`.roster-row[data-member-id="${member.agent_member_id}"]`).click();
+      const progress = agents.locator(".roster-switch-status");
+      const refresh = agents.getByRole("button", { name: "Refresh plans", exact: true });
+      await refresh.click();
+      await expect(progress).toHaveText("#43 · Slot returned. Waiting to resume…", { timeout: 30_000 });
+      await expect(progress).not.toContainText("Next issue");
+      await info.attach(`shared-save-return-pending-${theme}`, { body: await page.screenshot(), contentType: "image/png" });
+
+      await sendLiveGwtEvent(secondPage, { kind: "terminal_input", id: otherWindow, data: "GWT_FIXTURE_EXIT\r" });
+      await expect.poll(() => fixture.processAlive(other.pid), { timeout: 60_000 }).toBe(false);
+      await expect.poll(() => session(other.gwt_session_id!), { timeout: 60_000 }).toMatch(/^status\s*=\s*"(?:Stopped|Interrupted)"/m);
+      await expect.poll(() => assignments(fixture.second.key), { timeout: 60_000 }).toEqual([]);
+      await expect.poll(async () => {
+        const failed = (await preferences()).failed_issues?.find((entry: any) => entry.issue_number === sourceIssue);
+        if (failed) throw new Error(`Saved Work continuation failed: ${failed.message}`);
+        return workerIssues();
+      }, { timeout: 180_000, message: "A resumes without an explicit launch or requeue" }).toEqual([sourceIssue, otherIssue, sourceIssue]);
+      const [, , resumed] = await workers();
+      expect(resumed.pid).not.toBe(source.pid);
+      expect(await realpath(resumed.cwd)).toBe(await realpath(source.cwd));
+      expect(await readFile(join(resumed.cwd, "checkpoint-source.txt"), "utf8")).toContain(sourceOperation);
+      await expect.poll(savedIntent, { timeout: 60_000 }).toMatchObject({ stage: "completed" });
+      await expect.poll(async () => (await readCanonicalRoster(page)).members.find((candidate: any) =>
+        candidate.agent_member_id === member.agent_member_id)?.assignment).toMatchObject({ session_id: resumed.gwt_session_id });
+      const resumeEvents = async () => (await fixture.workItems()).work_items
+        .find((work: any) => work.id === ack.work_id)?.events.filter((event: any) => event.kind === "resume");
+      await expect.poll(resumeEvents, { timeout: 60_000, message: "the exact checkpointed Work records one resume" })
+        .toEqual([expect.objectContaining({ agent_session_id: resumed.gwt_session_id })]);
+      await expect.poll(async () => (await fixture.actorEvents()).find((event: any) =>
+        event.pid === resumed.pid && event.stage === "idle"), { timeout: 60_000 }).toBeTruthy();
+      expect(fixture.processAlive(resumed.pid)).toBe(true);
+      await waitForScan((await preferences()).last_scan_at, "a later coordinator scan does not replay continuation");
+      expect(await workerIssues()).toEqual([sourceIssue, otherIssue, sourceIssue]);
+      expect(await resumeEvents()).toHaveLength(1);
+      expect((await fixture.actorEvents()).filter((event: any) => event.stage === "checkpoint_acked")).toHaveLength(1);
+      expect((await fixture.actorEvents()).filter((event: any) => event.stage === "actor_failed")).toEqual([]);
+      await refresh.click();
+      await expect(progress).toContainText("#43 · Saved work resumed", { timeout: 30_000 });
+      await info.attach(`shared-save-return-completed-${theme}`, { body: await page.screenshot(), contentType: "image/png" });
+      await info.attach("shared-save-return-evidence", { body: JSON.stringify({ source, other, resumed, ack, checkpoint,
+        intent: await savedIntent(), launches: await workerIssues() }, null, 2), contentType: "application/json" });
+    } catch (error) {
+      await info.attach("shared-save-return-failure", { body: JSON.stringify({ launches: await fixture.launches(),
+        actors: await fixture.actorEvents(), switchIntent: await savedIntent(), errors }, null, 2), contentType: "application/json" })
+        .catch(() => {});
+      throw error;
+    } finally {
+      try { await secondPage.close(); await page.close(); } finally { await fixture.stop(); }
     }
     expect(errors, "zero console/page errors including owned fixture cleanup").toEqual([]);
   });

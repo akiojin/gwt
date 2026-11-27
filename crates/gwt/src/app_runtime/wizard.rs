@@ -573,6 +573,7 @@ type IssueMonitorResumeHandoff = Result<Option<gwt::AutonomousHandoffResumption>
 #[derive(Debug, Clone)]
 struct PreparedIssueMonitorResume {
     session: gwt_agent::Session,
+    saved_switch: bool,
     autonomous_handoff: Option<gwt::AutonomousHandoffResumption>,
     session_record: Result<Vec<u8>, std::io::ErrorKind>,
     config: gwt_agent::LaunchConfig,
@@ -1079,6 +1080,7 @@ fn prepare_issue_monitor_answer(
         sessions_dir,
         cache,
         profile_config_path,
+        None,
         Ok(Some(handoff)),
     )?
     .resume
@@ -1218,6 +1220,7 @@ fn prepare_issue_monitor_launch(
             sessions_dir,
             cache,
             profile_config_path,
+            request.delivery_id.as_deref(),
             handoff,
         )
     } else {
@@ -6526,11 +6529,13 @@ impl AppRuntime {
                 &self.sessions_dir,
                 &self.launch_wizard_cache,
                 &self.profile_config_path(),
+                delivery_id.as_deref(),
                 issue_monitor_resume_handoff(project_root, issue_number),
             )?,
         };
         let Some(PreparedIssueMonitorResume {
             session,
+            saved_switch,
             autonomous_handoff,
             mut config,
             workspace_resume_context,
@@ -6545,6 +6550,9 @@ impl AppRuntime {
         };
         if let Some(holder_window_id) = self.issue_monitor_native_conversation_holder(&session) {
             let Some(handoff) = autonomous_handoff.as_ref() else {
+                if saved_switch {
+                    return Err("Saved Work still has a live conversation holder".into());
+                }
                 return Ok((
                     None,
                     Some(format!(
@@ -6644,6 +6652,9 @@ impl AppRuntime {
         // execution.continue requires execution.reopen first. Preserve native
         // writer/answer handling above, then use the normal fresh-launch path.
         if execution_blocked {
+            if saved_switch {
+                return Err("Saved Work execution is blocked".into());
+            }
             if autonomous_handoff.is_some() {
                 return Err(
                     "answered autonomous handoff requires execution.reopen before Resume"
@@ -6660,6 +6671,9 @@ impl AppRuntime {
             && gwt::continuation_requires_new_session(project_root, &session)
                 .map_err(|error| format!("failed to inspect Monitor resume Work: {error}"))?
         {
+            if saved_switch {
+                return Err("Saved Work became terminal before continuing".into());
+            }
             if autonomous_handoff.is_some() {
                 return Err(
                     "answered autonomous handoff requires a fresh Session because its Work is terminal"
@@ -6674,7 +6688,7 @@ impl AppRuntime {
         if !worktree_exists {
             config.working_dir = None;
         }
-        if config.session_mode != gwt_agent::SessionMode::Resume {
+        if config.session_mode != gwt_agent::SessionMode::Resume && !saved_switch {
             return Ok((
                 None,
                 Some("the stored Session has no exact resume handle".to_string()),
@@ -6723,7 +6737,12 @@ impl AppRuntime {
                 notification_transition: None,
                 notification_transition_id: None,
                 level: "info".to_string(),
-                message: "Issues resumed existing session".to_string(),
+                message: if saved_switch {
+                    "Issues continued saved work"
+                } else {
+                    "Issues resumed existing session"
+                }
+                .to_string(),
                 issue_number: Some(issue_number),
             },
         ));
@@ -9555,10 +9574,30 @@ fn prepare_issue_monitor_resume(
     sessions_dir: &Path,
     cache: &LaunchWizardMemoryCache,
     profile_config_path: &Result<PathBuf, String>,
+    delivery_id: Option<&str>,
     autonomous_handoff: Result<Option<gwt::AutonomousHandoffResumption>, String>,
 ) -> Result<PreparedIssueMonitorResumeAttempt, String> {
     let autonomous_handoff = autonomous_handoff?;
-    let session = if let Some(handoff) = autonomous_handoff.as_ref() {
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(project_root);
+    let prefs = gwt::load_issue_monitor_prefs(&prefs_path);
+    let saved_source = if autonomous_handoff.is_none() && delivery_id.is_some() {
+        gwt::issue_monitor::load_switch_resume_source(
+            prefs.as_ref().map_err(|error| error.to_string())?,
+            project_root,
+            sessions_dir,
+            issue_number,
+            delivery_id,
+        )?
+    } else {
+        None
+    };
+    let saved_switch = saved_source.is_some();
+    let session = if let Some(source) = saved_source {
+        if normalize_branch_name(&source.branch) != normalize_branch_name(target_branch) {
+            return Err("Saved Work source branch changed before continuing".into());
+        }
+        source
+    } else if let Some(handoff) = autonomous_handoff.as_ref() {
         let session =
             gwt_agent::Session::load(&sessions_dir.join(format!("{}.toml", handoff.session_id)))
                 .ok()
@@ -9597,6 +9636,9 @@ fn prepare_issue_monitor_resume(
         .command()
         .eq_ignore_ascii_case(profile_agent_id.trim())
     {
+        if saved_switch {
+            return Err("Saved Work source provider does not match the Monitor profile".into());
+        }
         if autonomous_handoff.is_some() {
             return Err(
                 "answered autonomous handoff provider does not match the Monitor profile"
@@ -9611,6 +9653,9 @@ fn prepare_issue_monitor_resume(
         });
     }
     if !session_exact_resume_materializable(project_root, &session) {
+        if saved_switch {
+            return Err("Saved Work source can no longer be materialized".into());
+        }
         if autonomous_handoff.is_some() {
             return Err(
                 "answered autonomous handoff Session can no longer be materialized".to_string(),
@@ -9621,53 +9666,80 @@ fn prepare_issue_monitor_resume(
             ..Default::default()
         });
     }
-    let provider_availability = if session.agent_id == gwt_agent::AgentId::GrokBuild {
+    let grok_home = if session.agent_id == gwt_agent::AgentId::GrokBuild {
         let (effective_env, _) = gwt_agent::LaunchEnvironment::from_active_profile(
             &profile_config_path.clone()?,
             session.runtime_target,
         )?
         .into_parts();
-        let grok_home =
-            gwt_core::usage::grok::grok_home_from_env(&effective_env, &session.worktree_path);
-        provider_conversation_availability_with_grok_home(&session, grok_home.as_deref())
+        gwt_core::usage::grok::grok_home_from_env(&effective_env, &session.worktree_path)
     } else {
-        provider_conversation_availability(&session)
+        None
     };
-    if provider_availability != ProviderConversationAvailability::Present {
-        if autonomous_handoff.is_some() {
-            return Err(
-                "answered autonomous handoff native conversation is unavailable or foreign"
-                    .to_string(),
-            );
-        }
-        let reason = match provider_availability {
-            ProviderConversationAvailability::Missing => "native conversation is missing",
-            ProviderConversationAvailability::Foreign => {
-                "native conversation ownership does not match this worktree"
-            }
-            ProviderConversationAvailability::Unknown => {
-                "native conversation could not be verified"
-            }
-            ProviderConversationAvailability::Present => unreachable!(),
-        };
-        return Ok(PreparedIssueMonitorResumeAttempt {
-            fresh_reason: Some(reason),
-            ..Default::default()
-        });
-    }
-    // Building a resume config resolves its working directory's Git remote and runner.
-    // Keep that work with the other launch facts, before returning to the GUI.
     let mut config = super::launch_config_from_persisted_session(&session);
-    if autonomous_handoff.is_none() && linked_issue_kind == gwt::LinkedIssueKind::Issue {
+    if saved_switch {
+        gwt::project_runtime::continuation::configure_provider_continuation_with_grok_home(
+            &mut config,
+            &session,
+            grok_home.as_deref(),
+        );
+        // Preserve the exact source for inherited member admission even when
+        // Continue Work must open a fresh provider conversation.
+        config.predecessor_session_id = Some(session.id.clone());
+    } else {
+        let provider_availability = if session.agent_id == gwt_agent::AgentId::GrokBuild {
+            provider_conversation_availability_with_grok_home(&session, grok_home.as_deref())
+        } else {
+            provider_conversation_availability(&session)
+        };
+        if provider_availability != ProviderConversationAvailability::Present {
+            if autonomous_handoff.is_some() {
+                return Err(
+                    "answered autonomous handoff native conversation is unavailable or foreign"
+                        .to_string(),
+                );
+            }
+            let reason = match provider_availability {
+                ProviderConversationAvailability::Missing => "native conversation is missing",
+                ProviderConversationAvailability::Foreign => {
+                    "native conversation ownership does not match this worktree"
+                }
+                ProviderConversationAvailability::Unknown => {
+                    "native conversation could not be verified"
+                }
+                ProviderConversationAvailability::Present => unreachable!(),
+            };
+            return Ok(PreparedIssueMonitorResumeAttempt {
+                fresh_reason: Some(reason),
+                ..Default::default()
+            });
+        }
+    }
+    if autonomous_handoff.is_none()
+        && (saved_switch || linked_issue_kind == gwt::LinkedIssueKind::Issue)
+    {
         let base_branch =
             gwt::issue_monitor::issue_monitor_implementation_base_branch(project_root)?;
         let delivery =
             gwt::issue_monitor_owner_branch_delivery(project_root, &base_branch, target_branch);
-        config.args.push(gwt::issue_monitor_launch_prompt_for_base(
+        let prompt = gwt::issue_monitor_launch_prompt_for_base(
             linked_issue_kind,
             issue_number,
             &base_branch,
             delivery,
+        );
+        let requeue_reason = saved_switch
+            .then(|| {
+                gwt::issue_monitor_launch_delivery_requeue_reason(
+                    &prefs_path,
+                    issue_number,
+                    delivery_id,
+                )
+            })
+            .flatten();
+        config.args.push(gwt::append_issue_monitor_requeue_reason(
+            prompt,
+            requeue_reason.as_deref(),
         ));
     }
     let workspace_resume_context = workspace_resume_context_for_work_item(
@@ -9683,13 +9755,11 @@ fn prepare_issue_monitor_resume(
                     && record.status == gwt::cli::execution_state::ExecutionControlStatus::Blocked
             });
     let worktree_exists = session.worktree_path.exists();
-    let autonomous_mode =
-        gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(project_root))
-            .map(|prefs| prefs.autonomous_mode)
-            .unwrap_or(false);
+    let autonomous_mode = prefs.map(|prefs| prefs.autonomous_mode).unwrap_or(false);
     Ok(PreparedIssueMonitorResumeAttempt {
         resume: Some(PreparedIssueMonitorResume {
             session,
+            saved_switch,
             autonomous_handoff,
             session_record,
             config,

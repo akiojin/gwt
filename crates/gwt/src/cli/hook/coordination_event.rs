@@ -161,6 +161,8 @@ fn suppress_ready_for_saved_switch(session: &Session, entry: &BoardEntry) -> boo
                 AgentSwitchStage::CheckpointVerified
                     | AgentSwitchStage::StoppingCurrent
                     | AgentSwitchStage::LaunchingNext
+                    | AgentSwitchStage::Returned
+                    | AgentSwitchStage::Resuming
                     | AgentSwitchStage::Unknown
             )
             && intent.source.assignment.session_id.as_deref() == Some(session.id.as_str())
@@ -604,7 +606,7 @@ mod tests {
 
     #[test]
     fn saved_switch_stop_preserves_pause_and_foreign_or_cancelled_sessions_still_report() {
-        use crate::issue_monitor::AgentSwitchStage;
+        use crate::issue_monitor::{AgentSwitchDisposition, AgentSwitchStage};
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -649,6 +651,16 @@ mod tests {
         assert!(
             load_snapshot(dir.path()).unwrap().board.entries.is_empty(),
             "saved source waits for Host without a new Active Work event"
+        );
+        let saved = prefs.agent_switch_intents.get_mut(operation).unwrap();
+        saved.request.disposition = AgentSwitchDisposition::SaveAndReturn;
+        saved.request.target_issue_number = None;
+        saved.stage = AgentSwitchStage::Returned;
+        crate::save_issue_monitor_prefs(&path, &prefs).unwrap();
+        sync_coordination_for_session_with_paths(&session, "Stop", &cache_root, None).unwrap();
+        assert!(
+            load_snapshot(dir.path()).unwrap().board.entries.is_empty(),
+            "late ready notice cannot reactivate returned Work"
         );
         sync_coordination_for_session_with_paths(&session, "SessionStart", &cache_root, None)
             .unwrap();

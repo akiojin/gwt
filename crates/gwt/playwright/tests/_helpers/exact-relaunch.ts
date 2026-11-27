@@ -117,7 +117,8 @@ export type ExactRelaunchSetup = {
   exitNotice?: string;
   freshNativeIds?: boolean;
   terminalConvergence?: boolean;
-  switching?: { sourceIssueNumber: number; positive: boolean };
+  switching?: { sourceIssueNumber: number; positive: boolean;
+    resumeCondition?: { blocker_numbers: number[]; reason: string; next_action: string } };
   prepare?: (context: { home: string; bin: string; project: string; env: NodeJS.ProcessEnv }) => Promise<void>;
   monitorPreferences?: Record<string, unknown>;
   restoreDiagnostics?: boolean;
@@ -235,6 +236,10 @@ const observe = async (read, description) => {
   throw new Error('Source observation timed out: '+description);
 };
 const actorReady = (async () => {
+  if (switching.resumeCondition && process.env.GWT_PM_PROFILE_REVISION) {
+    actorEvent('pm_ready');
+    return;
+  }
   startupEvent('execution_status_begin');
   const owner = sourceOperation('execution.status').owner_number;
   startupEvent('execution_status_returned');
@@ -265,6 +270,12 @@ const rawMonitorProbe = async () => {
   actorEvent('raw_accepted',observedRuntime());
   nativeHook('Stop');
   actorEvent('raw_successor',observedRuntime());
+};
+const pmSwitchRequest = () => {
+  const request = JSON.parse(fs.readFileSync(path.join(process.env.HOME, 'switch-request.json'), 'utf8'));
+  const result = cp.spawnSync(process.env.GWT_BIN_PATH, [], {cwd:sourceDirectory,env:process.env,
+    encoding:'utf8',timeout:60000,input:JSON.stringify({schema_version:1,operation:'issue.monitor.switch.request',params:request})});
+  actorEvent('pm_switch_reply', {operation:request.operation_id, exit_status:result.status, envelope:JSON.parse(result.stdout)});
 };
 const checkpointed = new Set();
 const checkpoint = async line => {
@@ -301,7 +312,8 @@ const checkpoint = async line => {
   git('-c','user.name=Switch fixture','-c','user.email=switch@example.invalid','commit','-m','fixture: saved source checkpoint '+operation);
   git('push','-u','origin','HEAD');
   const head = git('rev-parse','HEAD');
-  sourceOperation('issue.monitor.switch.ack',{operation_id:operation,head,work_id:work.id,board_entry_id:entry.id});
+  sourceOperation('issue.monitor.switch.ack',{operation_id:operation,head,work_id:work.id,board_entry_id:entry.id,
+    ...(switching.resumeCondition ? {resume_condition:switching.resumeCondition} : {})});
   actorEvent('checkpoint_acked',{operation,head,work_id:work.id,board_entry_id:entry.id});
   sourceOperation('issue.monitor.wait',{number:switching.sourceIssueNumber,reason:'Saved checkpoint awaits switch',resume_condition:'Switch cancelled or saved work resumed'});
   if (switching.positive) {
@@ -459,7 +471,9 @@ startupEvent('session_start_returned');
 ${switchActor}
 ${terminalActor}
 console.log('GWT_FAKE_PROVIDER_READY ' + native);
+${setup.switching?.resumeCondition && process.platform === "darwin" ? "process.stdin.setRawMode(true);" : ""}
 readline.createInterface({input:process.stdin}).on('line', line => {
+  ${setup.switching?.resumeCondition ? "if (line.trim() === 'GWT_PM_FIXTURE_RETURN') { try { pmSwitchRequest(); } catch(error) { actorEvent('actor_failed',{message:error.message}); } return; }" : ""}
   ${setup.switching ? "if (line.trim() === 'GWT_RAW_MONITOR_PROBE') { rawMonitorProbe().catch(error=>actorEvent('actor_failed',{message:error.message})); return; }" : ""}
   ${setup.switching ? "if (line.includes('GWT checkpoint request ')) { checkpoint(line).catch(error=>actorEvent('actor_failed',{message:error.message})); return; }" : ""}
   if (line.trim() === 'GWT_FIXTURE_EXIT') {

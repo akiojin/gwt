@@ -1,4 +1,5 @@
 //! Host-side checkpoint observations. None of these observations stops a runtime.
+use super::{AgentSwitchStage, IssueMonitorPrefs};
 use std::{
     io,
     path::{Path, PathBuf},
@@ -174,22 +175,6 @@ pub fn verify_switch_continuation(
         return Err(invalid());
     }
     let owner = target.owner.as_deref().ok_or_else(invalid)?;
-    let owner_number = owner
-        .strip_prefix("Issue #")
-        .or_else(|| owner.strip_prefix("SPEC-"))
-        .ok_or_else(invalid)?;
-    let board =
-        gwt_core::coordination::load_board_entry(&target.project_state_root, board_entry_id)
-            .map_err(io::Error::other)?
-            .ok_or_else(invalid)?;
-    if board.origin_session_id.as_deref() != Some(session_id)
-        || !board.related_owners.iter().any(|candidate| {
-            candidate == owner || candidate.trim_start_matches('#') == owner_number
-        })
-        || !contains_operation(Some(&board.body), operation_id)
-    {
-        return Err(invalid());
-    }
     let works =
         gwt_core::workspace_projection::load_workspace_work_items(&target.project_state_root)
             .map_err(io::Error::other)?
@@ -199,6 +184,46 @@ pub fn verify_switch_continuation(
         .iter()
         .find(|work| work.id == work_id)
         .ok_or_else(invalid)?;
+    verify_switch_work_history(
+        work,
+        &target.project_state_root,
+        &target.work_event_root,
+        session_id,
+        &target.agent_id,
+        owner,
+        operation_id,
+        board_entry_id,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn verify_switch_work_history(
+    work: &gwt_core::workspace_projection::WorkItem,
+    project_root: &Path,
+    work_event_root: &Path,
+    session_id: &str,
+    agent_id: &str,
+    owner: &str,
+    operation_id: &str,
+    board_entry_id: &str,
+) -> io::Result<()> {
+    let invalid =
+        || io::Error::other("checkpoint continuation does not match the source Work and operation");
+    let owner_number = owner
+        .strip_prefix("Issue #")
+        .or_else(|| owner.strip_prefix("SPEC-"))
+        .ok_or_else(invalid)?;
+    let board = gwt_core::coordination::load_board_entry(project_root, board_entry_id)
+        .map_err(io::Error::other)?
+        .ok_or_else(invalid)?;
+    if board.origin_session_id.as_deref() != Some(session_id)
+        || !board.related_owners.iter().any(|candidate| {
+            candidate == owner || candidate.trim_start_matches('#') == owner_number
+        })
+        || !contains_operation(Some(&board.body), operation_id)
+    {
+        return Err(invalid());
+    }
     if work.status_category != gwt_core::workspace_projection::WorkspaceStatusCategory::Idle
         || !work.board_refs.iter().any(|id| id == board_entry_id)
     {
@@ -211,7 +236,7 @@ pub fn verify_switch_continuation(
         .find(|event| {
             event.agent_session_id.as_deref() == Some(session_id)
                 && event.owner.as_deref() == Some(owner)
-                && event.agent_id.as_deref() == Some(target.agent_id.as_str())
+                && event.agent_id.as_deref() == Some(agent_id)
                 && contains_operation(event.summary.as_deref(), operation_id)
                 && event
                     .progress_summary
@@ -223,15 +248,142 @@ pub fn verify_switch_continuation(
                     .is_some_and(|value| !value.trim().is_empty())
         })
         .ok_or_else(invalid)?;
-    if !gwt_core::workspace_projection::workspace_work_event_shard_matches(
-        &target.work_event_root,
-        event,
-    )
-    .map_err(io::Error::other)?
+    if !gwt_core::workspace_projection::workspace_work_event_shard_matches(work_event_root, event)
+        .map_err(io::Error::other)?
     {
         return Err(invalid());
     }
     Ok(())
+}
+
+/// Read the exact terminal Session for an admitted saved Work delivery.
+pub fn load_switch_resume_source(
+    prefs: &IssueMonitorPrefs,
+    project_root: &Path,
+    sessions: &Path,
+    owner: u64,
+    delivery_id: Option<&str>,
+) -> Result<Option<gwt_agent::Session>, String> {
+    let Some(intent) = prefs.saved_switch_resume(owner) else {
+        return Ok(None);
+    };
+    let proof = intent
+        .runtime_stop
+        .as_ref()
+        .filter(|proof| proof.issue_number == owner && intent.runtime_exit_confirmed)
+        .ok_or("Saved Work return has no confirmed source exit")?;
+    let checkpoint = intent
+        .checkpoint
+        .as_ref()
+        .ok_or("Saved Work return has no checkpoint")?;
+    let delivery_id = delivery_id
+        .filter(|id| !id.is_empty())
+        .ok_or("Saved Work return requires its current Issues delivery")?;
+    if !prefs.pending_launch_deliveries.iter().any(|delivery| {
+        delivery.issue_number == owner
+            && delivery.delivery_id == delivery_id
+            && delivery.agent_member_id.as_deref() == Some(&intent.request.member_id)
+    }) || (intent.stage == AgentSwitchStage::Resuming
+        && intent.resume_delivery_id.as_deref() != Some(delivery_id))
+    {
+        return Err("Saved Work resume delivery changed before materialization".into());
+    }
+    gwt_agent::validate_session_id_path_component(&proof.session_id)?;
+    let session = gwt_agent::Session::load(&sessions.join(format!("{}.toml", proof.session_id)))
+        .map_err(|error| format!("Saved Work source Session could not be read: {error}"))?;
+    if gwt_agent::SessionExecutionIdentity::from_session(&session)?.as_ref()
+        != Some(&proof.execution_identity)
+        || !crate::project_runtime::continuation::session_matches_project_state(
+            &session,
+            project_root,
+        )
+        || intent.source_agent_id.as_deref() != Some(session.agent_id.command())
+        || crate::agent_names::registered_session_member_id(&session)?.as_deref()
+            != Some(intent.request.member_id.as_str())
+        || !matches!(
+            session.status,
+            gwt_agent::AgentStatus::Stopped | gwt_agent::AgentStatus::Interrupted
+        )
+        || session.restore_window_on_startup
+    {
+        return Err("Saved Work source Session identity or terminal status changed".into());
+    }
+    // The physical close removes the active workspace assignment. The
+    // checkpoint must still match the current Work and its immutable history.
+    use crate::cli::execution_state::{ExecutionOwnerKey, ExecutionOwnerKind};
+    use gwt_core::workspace_projection::{current_work_id_for_launch, load_workspace_work_items};
+    let owner_key = ExecutionOwnerKey {
+        number: owner,
+        kind: match proof
+            .execution_identity
+            .execution_binding
+            .owner_kind
+            .as_str()
+        {
+            "issue" => ExecutionOwnerKind::Issue,
+            "spec" => ExecutionOwnerKind::Spec,
+            _ => return Err("Saved Work source owner kind is invalid".into()),
+        },
+    };
+    let owner_label = owner_key.canonical_work_owner_label();
+    let worktree = &session.worktree_path;
+    let branch = crate::launch_runtime::normalize_branch_name(&session.branch);
+    let current_branch =
+        crate::launch_runtime::current_git_branch(worktree).map_err(|error| error.to_string())?;
+    if crate::launch_runtime::normalize_branch_name(current_branch.trim()) != branch
+        || !crate::project_runtime::continuation::worktree_matches_project_state(
+            worktree,
+            project_root,
+        )
+    {
+        return Err("Saved Work worktree or branch changed before continuing".into());
+    }
+    let works = load_workspace_work_items(project_root)
+        .map_err(|error| error.to_string())?
+        .ok_or("Saved Work projection is unavailable")?;
+    if current_work_id_for_launch(
+        &works,
+        project_root,
+        Some(&branch),
+        Some(worktree),
+        Some(&owner_label),
+    )
+    .map_err(|error| error.to_string())?
+    .as_deref()
+        != Some(checkpoint.work_id.as_str())
+    {
+        return Err("Saved Work is no longer the current Work for this branch".into());
+    }
+    let work = works
+        .work_items
+        .iter()
+        .find(|work| work.id == checkpoint.work_id)
+        .filter(|work| !work.discarded && !work.is_terminal())
+        .ok_or("Saved Work is no longer available to continue")?;
+    if !crate::project_runtime::continuation::projection_continue_authority_matches(
+        work,
+        project_root,
+        owner_key,
+        worktree,
+        &branch,
+        &session.agent_id,
+        Some(&session.id),
+        true,
+    ) {
+        return Err("Saved Work container or agent authority changed before continuing".into());
+    }
+    verify_switch_work_history(
+        work,
+        project_root,
+        worktree,
+        &session.id,
+        session.agent_id.command(),
+        &owner_label,
+        &intent.request.operation_id,
+        &checkpoint.board_entry_id,
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(Some(session))
 }
 
 fn git(worktree: &Path, args: &[&str]) -> io::Result<String> {
