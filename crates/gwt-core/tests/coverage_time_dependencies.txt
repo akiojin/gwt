@@ -33,7 +33,6 @@ crates/gwt-core/src/process_console/spawn.rs|deadline_cleanup_does_not_extend_th
 crates/gwt-core/src/process_console/spawn.rs|deadline_covers_descendant_held_output_pipe_without_reader_task_leak|assert!(started.elapsed()<Duration::from_secs(3))|1
 crates/gwt-core/src/process_console/spawn.rs|deadline_evidence_rejects_cleanup_that_exceeds_its_budget_after_reap|spawn_logged_blocking_with_deadline(&ProcessConsoleHub::new(),ProcessKind::IndexRunner,program,&args,SpawnOptions::new(),Instant::now()+crate::deadline_budget::HANG_GUARD,)|1
 crates/gwt-core/src/process_console/spawn.rs|deadline_terminates_and_reaps_child_process_tree|assert!(started.elapsed()<Duration::from_secs(3))|1
-crates/gwt-core/src/process_console/spawn.rs|readiness_hook_survives_a_failed_spawn_before_retry|spawn_logged_blocking_with_deadline(&hub,ProcessKind::Docker,program,&[,],SpawnOptions::new().forward_output(false),Instant::now()+QUICK_PROCESS_FIXTURE_BUDGET,)|1
 crates/gwt-core/src/process_console/spawn.rs|spawn_logged_blocking_stops_finite_sleep_at_scoped_deadline|assert!(started.elapsed()<FINITE_SLEEP_TERMINATION_BOUND,,started.elapsed())|1
 crates/gwt-core/src/process_console/spawn.rs|spawn_logged_deadline_succeeds_before_expiry|letout=spawn_logged_with_deadline(&hub,ProcessKind::Git,cmd,&args,SpawnOptions::new(),std::time::Instant::now()+QUICK_PROCESS_FIXTURE_BUDGET,).await.expect()|1
 crates/gwt-core/src/process_console/spawn.rs|spawn_logged_inner|Some(Instant::now()+budget)|1
