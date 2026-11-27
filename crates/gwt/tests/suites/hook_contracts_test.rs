@@ -16,6 +16,8 @@ mod hook_diagnostics_test;
 mod hook_exit_codes_test;
 #[path = "../hook_health_test.rs"]
 mod hook_health_test;
+#[path = "../hook_payload_fixtures_test.rs"]
+mod hook_payload_fixtures_test;
 #[path = "../hook_runtime_state_test.rs"]
 mod hook_runtime_state_test;
 #[path = "../hook_types_test.rs"]
