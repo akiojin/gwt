@@ -26,13 +26,10 @@ const PM_SHARED_SKILLS: &[&str] = &[
     "gwt-coordination",
     "gwt-discussion",
     "gwt-feedback",
-    "gwt-issue-search",
     "gwt-plan-spec",
-    "gwt-project-search",
     "gwt-register-issue",
     "gwt-register-spec",
     "gwt-search",
-    "gwt-spec-search",
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -989,14 +986,12 @@ mod tests {
     }
 
     #[test]
-    fn distribute_creates_canonical_project_search_skills() {
+    fn distribute_creates_canonical_search_skills() {
         let dir = tempfile::tempdir().unwrap();
         distribute_to_worktree(dir.path()).unwrap();
 
-        let claude_skill = dir
-            .path()
-            .join(".claude/skills/gwt-project-search/SKILL.md");
-        let codex_skill = dir.path().join(".codex/skills/gwt-project-search/SKILL.md");
+        let claude_skill = dir.path().join(".claude/skills/gwt-search/SKILL.md");
+        let codex_skill = dir.path().join(".codex/skills/gwt-search/SKILL.md");
 
         assert!(claude_skill.exists(), "expected {}", claude_skill.display());
         assert!(codex_skill.exists(), "expected {}", codex_skill.display());
@@ -1021,15 +1016,15 @@ mod tests {
     }
 
     #[test]
-    fn distribute_creates_canonical_project_search_command() {
+    fn distribute_creates_canonical_search_command() {
         let dir = tempfile::tempdir().unwrap();
         distribute_to_worktree(dir.path()).unwrap();
 
-        let command = dir.path().join(".claude/commands/gwt-project-search.md");
+        let command = dir.path().join(".claude/commands/gwt-search.md");
         assert!(command.exists(), "expected {}", command.display());
 
         let content = fs::read_to_string(&command).unwrap();
-        assert!(content.contains(".claude/skills/gwt-project-search/SKILL.md"));
+        assert!(content.contains(".claude/skills/gwt-search/SKILL.md"));
         assert!(!content.contains("gwt-file-search"));
     }
 
@@ -1060,7 +1055,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
 
         let stale_skill = dir.path().join(".codex/skills/gwt-agent-read");
-        let stale_command = dir.path().join(".claude/commands/gwt-issue-search.md");
+        let stale_command = dir.path().join(".claude/commands/gwt-retired-search.md");
         let stale_hook = dir
             .path()
             .join(".claude/hooks/scripts/gwt-legacy-hook.retired");
@@ -1096,7 +1091,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         init_git_repo(dir.path());
 
-        let tracked_command = dir.path().join(".claude/commands/gwt-issue-search.md");
+        let tracked_command = dir.path().join(".claude/commands/gwt-retired-search.md");
         let tracked_hook = dir
             .path()
             .join(".codex/hooks/scripts/gwt-legacy-hook.retired");
@@ -1106,7 +1101,7 @@ mod tests {
         fs::write(&tracked_command, "tracked command").unwrap();
         fs::write(&tracked_hook, "tracked hook").unwrap();
 
-        track_path(dir.path(), ".claude/commands/gwt-issue-search.md");
+        track_path(dir.path(), ".claude/commands/gwt-retired-search.md");
         track_path(dir.path(), ".codex/hooks/scripts/gwt-legacy-hook.retired");
 
         distribute_to_worktree(dir.path()).unwrap();
@@ -1247,7 +1242,7 @@ mod tests {
     fn prune_stale_gwt_assets_removes_extras_without_materializing_bundle() {
         let dir = tempfile::tempdir().unwrap();
 
-        let stale_command = dir.path().join(".claude/commands/gwt-issue-search.md");
+        let stale_command = dir.path().join(".claude/commands/gwt-retired-search.md");
         let stale_skill = dir.path().join(".codex/skills/gwt-agent-read/SKILL.md");
         let stale_hook = dir
             .path()

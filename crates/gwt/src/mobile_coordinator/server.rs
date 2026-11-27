@@ -2428,10 +2428,34 @@ mod tests {
         bounded(host.close(None)).await.unwrap();
         wait_until_closed(&sessions).await;
 
-        // The Host client reports the reconnect and stays registered.
-        let authority = Arc::new(RwLock::new(
-            MobileAuthorization::load_bound(&fixture.home.join("devices.json"), &binding).unwrap(),
-        ));
+        // The Host client reports only an approved device's reconnect, bound
+        // to that device, and stays registered.
+        let mut approved =
+            MobileAuthorization::load_bound(&fixture.home.join("devices.json"), &binding).unwrap();
+        approved.enable();
+        let key = {
+            use ring::signature::{EcdsaKeyPair, ECDSA_P256_SHA256_FIXED_SIGNING};
+            let rng = ring::rand::SystemRandom::new();
+            let pkcs8 =
+                EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &rng).unwrap();
+            EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, pkcs8.as_ref(), &rng)
+                .unwrap()
+        };
+        let pending = approved
+            .request_pairing(
+                "Phone",
+                ring::signature::KeyPair::public_key(&key).as_ref(),
+                ProjectKey::parse(PROJECT).unwrap(),
+                wall,
+            )
+            .unwrap();
+        let approved_device: Uuid = approved
+            .approve(&pending.id, wall)
+            .unwrap()
+            .id()
+            .parse()
+            .unwrap();
+        let authority = Arc::new(RwLock::new(approved));
         let client_host = credential.identity().host_id;
         let (stop, stopping) = watch::channel(false);
         let (events, mut connections) = mpsc::channel(8);
@@ -2453,6 +2477,13 @@ mod tests {
                 .await
             })
         };
+        // The first renewal enables the Host; until then a reconnect is closed.
+        bounded(async {
+            while !authority.read().unwrap().is_enabled() {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        })
+        .await;
         let mut browser = bounded(async {
             loop {
                 let mut browser = open_path(&fixture, addr, BROWSER_RECONNECT_PATH, &origin)
@@ -2467,16 +2498,49 @@ mod tests {
             }
         })
         .await;
+        // A device this Host never approved: the connection is closed and
+        // only its close is reported.
+        assert!(closed(&mut browser).await);
+        assert!(matches!(
+            bounded(connections.recv()).await,
+            Some(ConnectionEvent::Closed { .. })
+        ));
+        let mut browser = open_path(&fixture, addr, BROWSER_RECONNECT_PATH, &origin)
+            .await
+            .unwrap();
+        let text = request(client_host, PROJECT, approved_device);
+        bounded(browser.send(Message::text(text))).await.unwrap();
+        assert_eq!(
+            next_json(&mut browser).await,
+            json!({"type":"reconnect_routed"})
+        );
         let connection_id = match bounded(connections.recv()).await.unwrap() {
             ConnectionEvent::Reconnect {
                 connection_id,
                 device_id,
             } => {
-                assert_eq!(device_id, device);
+                assert_eq!(device_id, approved_device);
                 connection_id
             }
             other => panic!("{other:?}"),
         };
+        let peer = crate::mobile_connection::PeerBinding::new(
+            binding.clone(),
+            connection_id,
+            [1; 32],
+            [2; 32],
+        )
+        .unwrap();
+        assert!(authority
+            .write()
+            .unwrap()
+            .challenge_peer_bound(
+                &approved_device.to_string(),
+                &ProjectKey::parse(PROJECT).unwrap(),
+                &peer,
+                real_wall(),
+            )
+            .is_ok());
         bounded(browser.close(None)).await.unwrap();
         assert_eq!(
             bounded(connections.recv()).await,

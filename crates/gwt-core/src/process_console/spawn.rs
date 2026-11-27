@@ -78,7 +78,17 @@ thread_local! {
 static SPAWN_ID: AtomicU64 = AtomicU64::new(1);
 
 #[cfg(any(test, feature = "test-support"))]
-type SpawnReadyHook = (Duration, Box<dyn FnOnce() + Send>);
+type SpawnReadyHook = (ReadyBudget, Box<dyn FnOnce() + Send>);
+
+/// How a readiness hook places the deadline once the fixture is ready.
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Clone, Copy)]
+enum ReadyBudget {
+    /// The production split: collection ends at the cleanup reserve.
+    Shared(Duration),
+    /// Collection expires at readiness; only cleanup gets this window.
+    StopAtReadiness { cleanup: Duration },
+}
 
 #[cfg(any(test, feature = "test-support"))]
 thread_local! {
@@ -94,6 +104,32 @@ pub fn with_spawn_ready_for_tests<T>(
     ready: impl FnOnce() + Send + 'static,
     run: impl FnOnce() -> T,
 ) -> T {
+    with_ready_hook(ReadyBudget::Shared(budget), Box::new(ready), run)
+}
+
+/// Expire the next synchronous deadline spawn as soon as the fixture signals
+/// readiness, giving only the real tree termination and reap `cleanup`.
+/// A reap verdict then reflects termination, not how much of a shared budget
+/// a loaded host left for cleanup.
+#[cfg(any(test, feature = "test-support"))]
+pub fn with_spawn_stopped_at_ready_for_tests<T>(
+    cleanup: Duration,
+    ready: impl FnOnce() + Send + 'static,
+    run: impl FnOnce() -> T,
+) -> T {
+    with_ready_hook(
+        ReadyBudget::StopAtReadiness { cleanup },
+        Box::new(ready),
+        run,
+    )
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn with_ready_hook<T>(
+    budget: ReadyBudget,
+    ready: Box<dyn FnOnce() + Send>,
+    run: impl FnOnce() -> T,
+) -> T {
     struct Restore(Option<SpawnReadyHook>);
     impl Drop for Restore {
         fn drop(&mut self) {
@@ -101,7 +137,7 @@ pub fn with_spawn_ready_for_tests<T>(
         }
     }
     let _restore =
-        Restore(TEST_SPAWN_READY.with(|slot| slot.borrow_mut().replace((budget, Box::new(ready)))));
+        Restore(TEST_SPAWN_READY.with(|slot| slot.borrow_mut().replace((budget, ready))));
     run()
 }
 
@@ -565,17 +601,29 @@ async fn spawn_logged_inner(
     #[cfg(any(test, feature = "test-support"))]
     let ready_hook = deadline.and_then(|_| TEST_SPAWN_READY.with(|slot| slot.borrow_mut().take()));
     #[cfg(any(test, feature = "test-support"))]
+    let mut stopped_at_ready = None;
+    #[cfg(any(test, feature = "test-support"))]
     let deadline = match ready_hook {
-        Some((budget, ready)) => {
+        Some((ReadyBudget::Shared(budget), ready)) => {
             ready();
             Some(Instant::now() + budget)
         }
+        Some((ReadyBudget::StopAtReadiness { cleanup }, ready)) => {
+            ready();
+            let ready_at = Instant::now();
+            stopped_at_ready = Some(ready_at);
+            // test-hygiene: allow-wall-clock-deadline test seam: collection already expired at readiness; the caller's window bounds only real cleanup
+            Some(ready_at + cleanup)
+        }
         None => deadline,
     };
+    #[cfg(not(any(test, feature = "test-support")))]
+    let stopped_at_ready = None;
+    let collection_deadline =
+        stopped_at_ready.or_else(|| deadline.map(deadline_before_cleanup_reserve));
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
     let forward_output = options.forward_output;
-    let collection_deadline = deadline.map(deadline_before_cleanup_reserve);
     let wait_started = Instant::now();
     let collected = {
         let collect = async {
@@ -1630,14 +1678,13 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn cleanup_future_is_abandoned_after_grace() {
-        let completed = tokio::time::timeout(
-            Duration::from_secs(2),
-            run_cleanup_with_grace(Duration::from_millis(20), std::future::pending()),
+        let completed = run_cleanup_with_grace(
+            Duration::from_millis(100),
+            tokio::time::sleep(Duration::from_secs(1)),
         )
-        .await
-        .expect("cleanup grace must bound a stalled cleanup future");
+        .await;
 
         assert!(!completed, "stalled cleanup must report incomplete");
     }
@@ -1662,16 +1709,15 @@ mod tests {
             .stderr(Stdio::null());
         let mut child = command.spawn().expect("spawn cleanup test child");
 
-        let completed = tokio::time::timeout(
-            Duration::from_secs(2),
-            cleanup_child_process_after_tree_termination(
-                Duration::from_millis(20),
-                std::future::pending(),
-                &mut child,
-            ),
+        // Keep the real child setup and reap outside the virtual cleanup window.
+        tokio::time::pause();
+        let completed = cleanup_child_process_after_tree_termination(
+            Duration::from_millis(100),
+            tokio::time::sleep(Duration::from_secs(1)),
+            &mut child,
         )
-        .await
-        .expect("tree termination must be inside the cleanup grace");
+        .await;
+        tokio::time::resume();
 
         assert!(
             !completed.completed,
@@ -2053,51 +2099,49 @@ mod tests {
             .join()
             .unwrap();
             assert!(trace.contents().is_empty());
-            runtime.block_on(async {
-                let (success_program, success_args) = echo_command();
-                spawn_logged(
+            let (success_program, success_args) = echo_command();
+            runtime
+                .block_on(spawn_logged(
                     &supplied_hub,
                     ProcessKind::IndexRunner,
                     success_program,
                     &success_args,
                     SpawnOptions::new("secret label ghp_abcdef0123456789").forward_output(false),
-                )
-                .await
+                ))
                 .expect("silent success");
 
-                let (timeout_program, timeout_args) = if cfg!(windows) {
-                    (
-                        "cmd".to_string(),
-                        vec!["/C".to_string(), "ping -n 4 127.0.0.1 >NUL".to_string()],
-                    )
-                } else {
-                    (
-                        "sh".to_string(),
-                        vec!["-c".to_string(), "sleep 3".to_string()],
-                    )
-                };
-                let timeout = spawn_logged_with_deadline(
-                    &supplied_hub,
-                    ProcessKind::IndexRunner,
-                    timeout_program,
-                    &timeout_args,
-                    SpawnOptions::new("private timeout path C:\\secret").forward_output(false),
-                    Instant::now() + Duration::from_millis(150),
-                )
-                .await
-                .expect_err("silent timeout");
-                assert_eq!(timeout.kind(), std::io::ErrorKind::TimedOut);
+            let (timeout_program, timeout_args): (&str, &[&str]) = if cfg!(windows) {
+                ("ping", &["-t", "127.0.0.1"])
+            } else {
+                ("sh", &["-c", "while :; do sleep 60; done"])
+            };
+            let timeout = with_spawn_stopped_at_ready_for_tests(
+                crate::deadline_budget::HANG_GUARD,
+                || {},
+                || {
+                    runtime.block_on(spawn_logged_with_deadline(
+                        &supplied_hub,
+                        ProcessKind::IndexRunner,
+                        timeout_program,
+                        timeout_args,
+                        SpawnOptions::new("private timeout path C:\\secret").forward_output(false),
+                        Instant::now(),
+                    ))
+                },
+            )
+            .expect_err("silent timeout");
+            assert_eq!(timeout.kind(), std::io::ErrorKind::TimedOut);
+            assert!(deadline_evidence(&timeout).interrupted_child_reaped());
 
-                spawn_logged(
+            runtime
+                .block_on(spawn_logged(
                     &supplied_hub,
                     ProcessKind::IndexRunner,
                     "this-binary-does-not-exist-silent-process-test",
                     &[] as &[&str],
                     SpawnOptions::new("private missing executable").forward_output(false),
-                )
-                .await
+                ))
                 .expect_err("silent spawn failure");
-            });
         });
 
         assert!(
@@ -2282,7 +2326,7 @@ mod tests {
             "sh",
             &args,
             SpawnOptions::new("test expired deadline"),
-            std::time::Instant::now() - Duration::from_millis(1),
+            Instant::now(),
         )
         .await
         .expect_err("expired deadline must fail before spawn");
@@ -2378,10 +2422,11 @@ mod tests {
         let args = vec!["-NoProfile".to_string(), "-Command".to_string(), script];
         let ready_parent = parent_file.clone();
         let ready_descendant = descendant_file.clone();
-        let error = with_spawn_ready_for_tests(
-            // Reserve the full 1s cleanup grace for the positive reap case;
-            // a 1s fixture budget only leaves 250ms on a loaded Windows host.
-            Duration::from_secs(5),
+        // Expire at observed readiness and give termination and reap the hang
+        // guard: the shared budget's 1s cleanup reserve was not enough on a
+        // loaded Windows runner (#4740), and that reserve is not under test here.
+        let error = with_spawn_stopped_at_ready_for_tests(
+            crate::deadline_budget::HANG_GUARD,
             move || {
                 let parent = wait_for_pid_file_windows(&ready_parent);
                 let descendant = wait_for_pid_file_windows(&ready_descendant);

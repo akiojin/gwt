@@ -71,6 +71,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         notificationForTransition,
         monitorDiagnostic,
         monitorNoticeIdentity,
+        projectNoticeTitle,
       } from "/agent-completion-notifications.js";
       import { createReleaseNotesWindow } from "/release-notes-window.js";
 
@@ -1738,7 +1739,8 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         if (windowData?.is_pm) {
           // Issue #3823: only the registered PM's typed operation activity
           // can change its title. Worker purpose, reports and chat stay out.
-          const name = String(windowData?.agent_name || "").trim();
+          // Issue #8012: the PM's name is the ledger's, as in the header.
+          const name = projectPm(rosterModel.read(), windowData).name;
           const activity = {
             __proto__: null,
             starting: "Starting",
@@ -4946,11 +4948,13 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
           applySettingsLabelsFailure({ ...event, project_root: activeProjectTab()?.project_root });
         }
         if (!event) return;
+        // Issue #3922: project pages only receive their own Issues notices; host notices stay unattributed.
+        const projectTitle = title => event.host_notice ? title : projectNoticeTitle(title, activeProjectTab());
         if (event.level === "error") {
           const diagnostic = monitorDiagnostic({ ...event, kind: event.notification_transition });
           if (diagnostic) {
             const transition = notificationForTransition({ source: "monitor", state: event.notification_transition, issueNumber: event.issue_number });
-            const notice = { ...diagnostic, title: `${transition?.title || "Issues"}${event.issue_number ? ` #${event.issue_number}` : ""}`, level: "error", transition: event.notification_transition };
+            const notice = { ...diagnostic, title: projectTitle(`${transition?.title || "Issues"}${event.issue_number ? ` #${event.issue_number}` : ""}`), level: "error", transition: event.notification_transition };
             if (diagnostic.stalled) notificationCenter.recordSurfaceNotice(notice);
             else notificationCenter.recordError(notice);
           }
@@ -4963,7 +4967,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
           notificationCenter.recordSurfaceNotice({
             key: `issue-monitor:launch-requested:${event.issue_number}`,
             level: event.level,
-            title: `Issues #${event.issue_number}`,
+            title: projectTitle(`Issues #${event.issue_number}`),
             message: event.message,
           });
           return;
@@ -4983,7 +4987,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
           kind: "issue-monitor",
           transition: event?.notification_transition,
           level: event?.level,
-          title: monitorNotice?.title || "Issues",
+          title: projectTitle(monitorNotice?.title || "Issues"),
           message: event?.message,
           issueNumber: event?.issue_number,
           identity: monitorNoticeIdentity(event?.message),
@@ -5878,8 +5882,8 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
       rosterModel.subscribe(state => state.revision, syncAppChromePm);
       issueMonitorModel.subscribe(model => model.pmDecisionAttention.count, syncAppChromePm);
       let renderedRosterNames = null;
-      rosterModel.subscribeFrame(state => JSON.stringify(state.members.map(member =>
-        [member.member_id, member.name, member.assignment?.session_id])), names => {
+      rosterModel.subscribeFrame(state => JSON.stringify([state.revision === null, ...state.members.map(member =>
+        [member.member_id, member.name, member.assignment?.session_id, member.pm_project_key])]), names => {
         if (renderedRosterNames !== null) renderWorkspace(activeWorkspace());
         renderedRosterNames = names;
       });

@@ -8,10 +8,10 @@ Detailed logic for Phase 1 of gwt-discussion.
 
 Run these before any creation or routing decision:
 
-1. **gwt-issue-search** with at least 2 semantic queries:
+1. **gwt-search** with `scopes:["issues"]` and at least 2 semantic queries:
    - One using the primary feature keyword
    - One using an alternative phrasing or related concept
-2. **gwt-spec-search** with at least 2 semantic queries:
+2. **gwt-search** with `scopes:["specs"]` and at least 2 semantic queries:
    - Same query strategy as above
 3. **Local SPEC listing** if ownership is still unclear:
 

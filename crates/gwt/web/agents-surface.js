@@ -219,6 +219,7 @@ export function createAgentsSurface({ document, storage, executionModel, executi
   function syncSwitchControls(section, member, current) {
     const switching = switchState(), intent = switching.intents.find(intent => intent.member_id === member.member_id);
     const request = switching.pending?.kind === "request" && switching.pending.member_id === member.member_id ? switching.pending : null;
+    const returning = !request && intent?.disposition === "save_and_return";
     const notice = switching.notice?.member_id === member.member_id ? switching.notice.message : null;
     const host = section.querySelector(".roster-switch");
     let progress = host.querySelector(".roster-switch-status");
@@ -226,11 +227,13 @@ export function createAgentsSurface({ document, storage, executionModel, executi
       if (!progress) { progress = document.createElement("p"); progress.className = "roster-plan-status roster-switch-status"; progress.setAttribute("role", "status"); progress.setAttribute("aria-live", "polite"); host.prepend(progress); }
       const source = request ? pendingSource?.operation_id === request.operation_id ? pendingSource.issue_number : current?.issue_number : intent?.source_issue_number;
       const target = request?.target_issue_number ?? intent?.target_issue_number;
-      const stage = { requested: "Waiting to save current work", checkpointing: "Saving current work…", checkpoint_verified: "Current work saved", stopping_current: "Stopping current work…", launching_next: "Launching next issue…", completed: "Switch completed", cancelled: "Switch cancelled", failed: "Switch failed", unknown: "Unknown. Refresh to check the switch." }[intent?.stage] || "Awaiting switch receipt…";
-      progress.textContent = !request && !switching.error && notice && (!intent || ["completed", "cancelled", "failed"].includes(intent.stage)) ? notice : `${source ? `#${source}` : "Current issue"} → ${target ? `#${target}` : "Next issue"} · ${switching.disconnected ? "Unknown. Reconnect and refresh to check the switch." : switching.error || (request ? "Awaiting switch receipt…" : stage)}${!switching.disconnected && !request && intent?.reason ? ` · ${intent.reason}` : ""}`;
+      const sourceLabel = source ? `#${source}` : "Current issue";
+      const subject = returning ? sourceLabel : `${sourceLabel} → ${target ? `#${target}` : "Next issue"}`;
+      const stage = { requested: "Waiting to save current work", checkpointing: "Saving current work…", checkpoint_verified: "Current work saved", stopping_current: "Stopping current work…", launching_next: "Launching next issue…", returned: "Slot returned. Waiting to resume…", resuming: "Resuming saved work…", completed: returning ? "Saved work resumed" : "Switch completed", cancelled: "Switch cancelled", failed: "Switch failed", unknown: "Unknown. Refresh to check the switch." }[intent?.stage] || "Awaiting switch receipt…";
+      progress.textContent = !request && !switching.error && notice && (!intent || ["completed", "cancelled", "failed"].includes(intent.stage)) ? notice : `${subject} · ${switching.disconnected ? "Unknown. Reconnect and refresh to check the switch." : switching.error || (request ? "Awaiting switch receipt…" : stage)}${!switching.disconnected && !request && intent?.reason ? ` · ${intent.reason}` : ""}`;
     } else progress?.remove();
     let cancel = host.querySelector('[data-action="cancel-switch"]');
-    const cancellable = intent && !switching.disconnected && ["requested", "checkpointing", "checkpoint_verified"].includes(intent.stage);
+    const cancellable = intent && !returning && !switching.disconnected && ["requested", "checkpointing", "checkpoint_verified"].includes(intent.stage);
     if (cancel && (!cancellable || cancel.dataset.operationId !== intent.operation_id)) { cancel.remove(); cancel = null; }
     if (cancellable) {
       if (!cancel) {

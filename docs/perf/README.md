@@ -1,0 +1,88 @@
+# 性能改善の完了契約
+
+gwt 自身の体感経路を速くする改善作業の完了条件と、計測を追加するときの
+自己劣化検証の手順をまとめる。SPEC #3820 の AC-5（FR-005）と AC-7（FR-008）の
+正本であり、`docs/perf/issue-*` には各改善 Issue の計測証跡を置く。
+
+- 体感経路の一覧（経路・起点・終点・現在値・バジェット・担当 Issue）は
+  SPEC #3820 の `inventory` section を参照する。
+- 常時計測基盤、バジェット値、violation 検出は SPEC #3700 が所有する。
+  バジェットの正本は `crates/gwt/src/perf/route.rs`（`PerfRoute::budget_ms`）と
+  `crates/gwt/src/perf/budget.rs` であり、本書は値を複製しない。
+
+## 1. 改善 Issue の完了条件テンプレート
+
+体感経路の所要時間や外部 API 消費量を減らすことを目的とする Issue（以下「改善 Issue」）は、
+受け入れ基準に次の 3 項目を必ず含める。Issue 登録時に欠けていれば追記してから実装に入る。
+
+```markdown
+- [ ] AC-n: 改善前後の実測値を提示する。対象経路 <経路 ID / 名前> の
+  起点 <操作> から終点 <画面反映などの条件> までを、同じ fixture・host・負荷で
+  改善前（control）と改善後（treatment）の両方について測り、下表を Issue と PR に記録する。
+- [ ] AC-n+1: バジェットを達成する。改善後の p95 が #3700 のバジェット
+  <`PerfRoute::<Route>` の budget_ms または #3700 で追加された値> 以下である。
+  外部 API を消費する経路は、1 回の操作あたりの消費量（GraphQL point、REST call、
+  子プロセス起動数など）も予算以下である。
+- [ ] AC-n+2: 回帰を防ぐ。バジェットを満たした経路に CI の perf 回帰テストを追加し、
+  意図的に劣化させた実装で RED になることを確認した結果を記録する。
+```
+
+実測値の表は次の列を持つ。
+
+| 条件 | 対象 SHA / version | host・OS | fixture・負荷 | n | p50 ms | p95 ms | 最悪 ms | 成功/失敗の内訳 | 外部 API 消費量 |
+|---|---|---|---|---:|---:|---:|---:|---|---|
+| control | | | | | | | | | |
+| treatment | | | | | | | | | |
+
+### 完了と見なさない条件
+
+次のいずれかに当てはまる改善は完了と見なさない。該当する AC をチェックせず、
+Issue を close せず、PR 本文には「未達」または「未測定（理由）」と書く。
+
+- 改善前または改善後の実測値が無い。改善前の値を測らずに着手した場合も含む（FR-004）。
+- 改善後の p95 がバジェットを超えている。平均値や単発の最良値だけで達成を主張している。
+- 測定の起点・終点が経路の定義と違う。例: handler の所要時間を描画 frame の値として扱う、
+  Monitor status API の所要時間を scan 全体の値として扱う。
+- control と treatment で fixture、host、負荷、binary の出自が揃っていない。
+- バジェットが #3700 に存在しない。この場合は Issue や本書で独自の値を決めず、
+  PM に #3700 へのバジェット追加を依頼し、バジェット達成の AC は未チェックのまま残す。
+
+改善の source だけを先に配送することはできる。その場合も上の AC が揃うまで Issue は open のまま残す。
+
+## 2. 計測を追加するときの自己劣化検証
+
+Issue #3264 では、監視処理そのものが GUI event loop を飽和させた。
+新しい route・phase・metric・probe を追加する変更は、計測が経路を遅くしていないことを次の手順で確かめる。
+
+### 現在の収集器の前提
+
+- `crate::perf` の記録関数（`record_route` / `record_route_phase` / `record_route_metric` /
+  `record_operation` / `RouteTimer` / `RoutePhaseClock`）は fail-open で、
+  `[perf] enabled = false` で無効になる。
+- self-budget governor（`crates/gwt/src/perf/self_budget.rs`、既定 CPU 1%）は
+  サンプルを間引くだけで、記録 1 回のコストは下げない。
+- 記録 1 回ごとに、process 全体で共有する Mutex を取得し、日次 JSONL へ呼び出し元の thread で同期的に追記する。
+- 収集器自身のコストは `crates/gwt/tests/perf_regression_test.rs` が CI で検証している。
+  呼び出し箇所の頻度と配置はこの test では検出できないため、下の手順で確かめる。
+
+### 手順
+
+1. **配置を確認する。** 記録は経路の境界または phase の区切りで、ユーザー操作 1 回につき
+   定数回に収める。frame ごと、PTY 出力の chunk ごと、byte・行・Work 行ごとの loop の中に置かない。
+2. **計測のための追加処理を GUI thread に置かない。** 記録関数の呼び出し以外に、
+   計測目的の同期 I/O、Git / gh の起動、lock 待ち、timer thread を GUI event loop に追加しない。
+   I/O を伴う probe は worker で行い、結果だけを記録する。独自のログファイルや集計 thread は作らず、
+   `crate::perf` を経由する。
+3. **待機中の記録量を確認する。** 操作をしていない状態で 5 分以上動かし、
+   追加した target のサンプルが増えないことを `perf.summary` で確認する。
+   周期処理を計測する場合は、増加数が周期回数と一致し、時間や画面更新回数に比例して増えないことを確認する。
+4. **対照測定をする。** 同じ binary・fixture・host で、`[perf] enabled = false`（control）と
+   `true`（treatment）を各 5 回以上実行し、対象経路の所要時間を perf log の外側から測る
+   （headed E2E の timing、既存の nightly fixture など）。control では perf log が出力されないので、
+   計測対象自身の記録は比較に使えない。
+5. **判定する。** treatment の p95 が control の最悪値以下であれば合格とする。
+   超えた場合は記録の頻度か配置を直し、手順 3〜4 をやり直す。同じ条件で再現した超過を
+   ばらつきとして扱って配送しない。
+6. **記録する。** 手順 3〜5 の条件、n、p50 / p95 / 最悪値、待機中のサンプル増加数を PR 本文に記録する。
+   既存の記録関数を同じ頻度で呼ぶだけの変更（例: 既存 route への phase 追加）は手順 4〜5 を省略できるが、
+   省略した理由を PR 本文に書く。

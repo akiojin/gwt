@@ -16,6 +16,7 @@ import { parseHTML } from "linkedom";
 
 import { shouldShowWindowWorktreeBadge } from "../window-worktree-form.js";
 import { createUiStateStore } from "../ui-state-store.js";
+import { projectPm } from "../app-chrome.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const html = readFileSync(resolve(here, "../index.html"), "utf8");
@@ -26,8 +27,9 @@ const appJs = readFileSync(resolve(here, "../app.js"), "utf8");
 test("Issue #3823: PM titles use only their own typed operation activity", () => {
   const definitions = ["windowDisplayTitle", "windowTitleTooltip"].map(name =>
     appJs.match(new RegExp(`      function ${name}\\([^]*?\\n      \\}`))[0]).join("\n");
-  const { title, tooltip } = new Function("PM_WINDOW_TITLE", `${definitions};
-    return { title: windowDisplayTitle, tooltip: windowTitleTooltip };`)("Project Manager");
+  let roster = { project_key: "p1", revision: "1", members: [] };
+  const { title, tooltip } = new Function("PM_WINDOW_TITLE", "projectPm", "rosterModel", `${definitions};
+    return { title: windowDisplayTitle, tooltip: windowTitleTooltip };`)("Project Manager", projectPm, { read: () => roster });
   const foreign = {
     is_pm: true, agent_name: "Maple", title: "Another agent failed",
     dynamic_title: "Board: workspace.ensure refused", purpose_title: "Fix worker",
@@ -46,6 +48,12 @@ test("Issue #3823: PM titles use only their own typed operation activity", () =>
   assert.equal(title({ ...foreign, pm_activity: "Other agent's failure", agent_name: null }), "Project Manager — Starting");
   assert.equal(title({ ...foreign, pm_activity: "reconciling", status: "idle" }),
     title({ ...foreign, pm_activity: "reconciling", status: "running" }), "runtime state belongs to badges");
+  // Issue #8012: the ledger's PM names the pane, and nothing names it before
+  // the ledger loads, so a reload never paints the window's catalog name.
+  roster = { ...roster, members: [{ member_id: "o", name: "Ozawa", pm_project_key: "p1" }] };
+  assert.equal(title({ ...foreign, pm_activity: "reconciling" }), "Project Manager · Ozawa — Reconciling");
+  roster = { project_key: "p1", revision: null, members: [] };
+  assert.equal(title({ ...foreign, pm_activity: "reconciling" }), "Project Manager — Reconciling");
 });
 
 function doc() {

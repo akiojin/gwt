@@ -1,0 +1,10 @@
+{
+  "session_id": "00000000-0000-0000-0000-000000000004",
+  "turn_id": "00000000-0000-0000-0000-000000000005",
+  "transcript_path": "/redacted/capture.jsonl",
+  "cwd": "/redacted/scratch",
+  "hook_event_name": "UserPromptSubmit",
+  "model": "gpt-6.2-sol",
+  "permission_mode": "bypassPermissions",
+  "prompt": "Use the shell tool once to read probe.txt, then report its sole line."
+}

@@ -1,0 +1,26 @@
+{
+  "hookEventName": "pre_tool_use",
+  "sessionId": "00000000-0000-0000-0000-000000000007",
+  "cwd": "/redacted/grok-capture",
+  "workspaceRoot": "/redacted/grok-capture/",
+  "timestamp": "2026-09-29T05:00:23.158101+00:00",
+  "transcriptPath": "/redacted/updates.jsonl",
+  "permissionMode": "bypassPermissions",
+  "toolName": "run_terminal_command",
+  "toolUseId": "00000000-0000-0000-0000-000000000008",
+  "toolInput": {
+    "command": "echo hi",
+    "description": "Print hi to the terminal"
+  },
+  "toolInputTruncated": false,
+  "hook_event_name": "PreToolUse",
+  "session_id": "00000000-0000-0000-0000-000000000007",
+  "transcript_path": "/redacted/updates.jsonl",
+  "permission_mode": "bypassPermissions",
+  "tool_name": "run_terminal_command",
+  "tool_input": {
+    "command": "echo hi",
+    "description": "Print hi to the terminal"
+  },
+  "tool_use_id": "00000000-0000-0000-0000-000000000008"
+}

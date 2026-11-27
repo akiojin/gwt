@@ -6,6 +6,7 @@ import { createUiStateStore } from "../ui-state-store.js";
 import { createPmSettingsPanel } from "../pm-settings-panel.js";
 import { installSettingsOpenHandler } from "../settings-surface.js";
 import { createAgentsSurface } from "../agents-surface.js";
+import { projectPm } from "../app-chrome.js";
 import { createAgentRosterModel, createMemberTuningModel } from "../agent-activity-model.js";
 
 const source = readFileSync(new URL("../agents-surface.js", import.meta.url), "utf8");
@@ -129,8 +130,8 @@ test("Project window titles follow current member names only for an exact assign
   const app = readFileSync(new URL("../app.js", import.meta.url), "utf8");
   const definition = app.match(/      function windowDisplayTitle\(windowData\) \{[\s\S]*?\n      \}/)[0];
   const member = { member_id: "m1", name: "Maple", assignment: { session_id: "s1" } };
-  const rosterModel = { read: () => ({ members: [member] }) };
-  const title = new Function("rosterModel", "isAgentWindowPreset", "PM_WINDOW_TITLE", `${definition}; return windowDisplayTitle;`)(rosterModel, preset => preset === "agent", "Project Manager");
+  const rosterModel = { read: () => ({ project_key: "p1", revision: "1", members: [member] }) };
+  const title = new Function("rosterModel", "isAgentWindowPreset", "PM_WINDOW_TITLE", "projectPm", `${definition}; return windowDisplayTitle;`)(rosterModel, preset => preset === "agent", "Project Manager", projectPm);
   const data = { preset: "agent", session_id: "s1", agent_name: "Historical name", dynamic_title: "Current issue" };
   assert.equal(title(data), "Maple — Current issue");
   assert.equal(title({ ...data, session_id: "s2", agent_member_id: "m1" }), "Historical name — Current issue");

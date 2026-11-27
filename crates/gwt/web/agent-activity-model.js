@@ -40,7 +40,7 @@ export function createAgentScheduleModel(projectKey) {
     clearAgentSchedule: () => { pendingMutationRevision = null; model.update(empty); } };
 }
 
-const switchStages = ["requested", "checkpointing", "checkpoint_verified", "stopping_current", "launching_next", "completed", "cancelled", "failed", "unknown"];
+const switchStages = ["requested", "checkpointing", "checkpoint_verified", "stopping_current", "launching_next", "returned", "resuming", "completed", "cancelled", "failed", "unknown"];
 const switchTerminal = stage => ["completed", "cancelled", "failed"].includes(stage);
 
 export function createAgentSwitchModel(projectKey) {
@@ -62,7 +62,7 @@ export function createAgentSwitchModel(projectKey) {
       currentOperations.set(action.member_id, action.operation_id);
     } else if (action?.kind === "cancel") {
       const intent = state.intents.find(intent => intent.operation_id === action.operation_id);
-      if (!intent || !["requested", "checkpointing", "checkpoint_verified"].includes(intent.stage)) return false;
+      if (!intent || intent.disposition === "save_and_return" || !["requested", "checkpointing", "checkpoint_verified"].includes(intent.stage)) return false;
     } else return false;
     pendingRead = null;
     model.update(current => ({ ...current, pending: action, error: null, notice: null }));
@@ -95,14 +95,15 @@ export function createAgentSwitchModel(projectKey) {
       const intents = state.intents.filter(intent => !absent || intent.operation_id !== state.pending.operation_id);
       for (const intent of Object.values(byMember)) {
         const index = intents.findIndex(current => current.member_id === intent.member_id), previous = intents[index];
+        const retryReturn = intent.disposition === "save_and_return" && previous?.stage === "resuming" && intent.stage === "returned";
         if (previous?.operation_id === intent.operation_id && (switchTerminal(previous.stage) ||
             previous.stage === "unknown" && intent.stage !== "unknown" && !switchTerminal(intent.stage) ||
-            previous.stage !== "unknown" && intent.stage !== "unknown" && switchStages.indexOf(intent.stage) < switchStages.indexOf(previous.stage))) continue;
+            !retryReturn && previous.stage !== "unknown" && intent.stage !== "unknown" && switchStages.indexOf(intent.stage) < switchStages.indexOf(previous.stage))) continue;
         currentOperations.set(intent.member_id, intent.operation_id);
         if (index < 0) intents.push(intent); else intents[index] = intent;
       }
       const receipt = intents.find(intent => intent.operation_id === state.pending?.operation_id);
-      const acknowledged = receipt && (state.pending.kind === "request" || switchTerminal(receipt.stage) || ["stopping_current", "launching_next"].includes(receipt.stage));
+      const acknowledged = receipt && (state.pending.kind === "request" || switchTerminal(receipt.stage) || ["stopping_current", "launching_next", "returned", "resuming"].includes(receipt.stage));
       return { snapshot, intents, pending: acknowledged || absent ? null : state.pending, error: null,
         disconnected: !absent && state.pending && !acknowledged ? state.disconnected : false,
         notice: absent ? { member_id: absentMember, message: "No saved request was observed. Request again to recheck the current member." } : state.notice };

@@ -6,6 +6,7 @@ import { dirname, resolve } from "node:path";
 import { parseHTML } from "linkedom";
 import { createUiStateStore } from "../ui-state-store.js";
 import { mapAgentTelemetryState } from "../window-runtime-state.js";
+import { projectPm } from "../app-chrome.js";
 
 test("Issue #5531: Profile resync reloads a lost read while preserving the draft and save", () => {
   const source = readFileSync(new URL("../profile-window-surface.js", import.meta.url), "utf8");
@@ -1056,8 +1057,9 @@ test("Agent window chrome resolves dynamic purpose titles before legacy titles",
 });
 
 test("Agent window title starts with assigned identity before its current purpose", () => {
-  const displayTitle = new Function("windowData", "isAgentWindowPreset", "PM_WINDOW_TITLE",
-    extractFunctionBody(appSource, "windowDisplayTitle"));
+  const rosterModel = { read: () => ({ project_key: "p1", revision: "1", members: [] }) };
+  const displayTitle = (windowData, isAgentWindowPreset, title) => new Function("windowData", "isAgentWindowPreset", "PM_WINDOW_TITLE", "projectPm", "rosterModel",
+    extractFunctionBody(appSource, "windowDisplayTitle"))(windowData, isAgentWindowPreset, title, projectPm, rosterModel);
   const agentPreset = preset => ["agent", "claude", "codex"].includes(preset);
   const data = { preset: "agent", agent_id: "codex", title: "Codex", purpose_title: "Initial task", dynamic_title: "Fix cache" };
   assert.equal(displayTitle({ ...data, agent_name: "Lumen" }, agentPreset, "Project Manager"), "Lumen — Fix cache");

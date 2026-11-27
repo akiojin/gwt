@@ -398,6 +398,7 @@ fn backend_issue_monitor_inbox_and_toast_are_serializable() {
     let inbox = serde_json::to_value(BackendEvent::IssueMonitorInbox { items: vec![item] })
         .expect("serialize inbox");
     let toast = serde_json::to_value(BackendEvent::IssueMonitorToast {
+        host_notice: false,
         notification_transition: None,
         notification_transition_id: None,
         level: "info".to_string(),

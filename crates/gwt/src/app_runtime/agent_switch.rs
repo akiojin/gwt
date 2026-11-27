@@ -1,6 +1,6 @@
 //! Switch requests and read projections; the project owner controls its PTYs.
 use super::*;
-use gwt::issue_monitor::{AgentSwitchAction, AgentSwitchStage};
+use gwt::issue_monitor::{AgentSwitchAction, AgentSwitchDisposition, AgentSwitchStage};
 
 impl AppRuntime {
     pub(crate) fn agent_switch_events(
@@ -20,20 +20,38 @@ impl AppRuntime {
             .into_iter()
             .filter(|context| seen.insert(context.project_root.clone()))
         {
-            let pending = gwt::load_issue_monitor_prefs(
+            let Ok(prefs) = gwt::load_issue_monitor_prefs(
                 &gwt::issue_monitor_prefs_path_for_repo_path(&context.project_root),
-            )
-            .is_ok_and(|prefs| {
-                prefs.agent_switch_intents.values().any(|intent| {
-                    matches!(
-                        intent.stage,
-                        AgentSwitchStage::Requested
-                            | AgentSwitchStage::Checkpointing
-                            | AgentSwitchStage::CheckpointVerified
-                            | AgentSwitchStage::StoppingCurrent
-                            | AgentSwitchStage::LaunchingNext
-                    )
-                })
+            ) else {
+                continue;
+            };
+            if let Some(state) = self.project_states.get_mut(&context.project_key) {
+                // Return and resume receipts can advance without an owner
+                // Switch job. Publish changes from the same durable view.
+                if state.agent_switch_snapshot.is_some()
+                    || prefs.agent_switch_intents.values().any(|intent| {
+                        intent.request.disposition == AgentSwitchDisposition::SaveAndReturn
+                    })
+                {
+                    let snapshot = prefs.agent_switch_snapshot(context.project_key.as_str());
+                    if state.agent_switch_snapshot.as_ref() != Some(&snapshot) {
+                        state.agent_switch_snapshot = Some(snapshot.clone());
+                        events.push(OutboundEvent::project(
+                            context.project_key.clone(),
+                            BackendEvent::AgentSwitch { snapshot },
+                        ));
+                    }
+                }
+            }
+            let pending = prefs.agent_switch_intents.values().any(|intent| {
+                matches!(
+                    intent.stage,
+                    AgentSwitchStage::Requested
+                        | AgentSwitchStage::Checkpointing
+                        | AgentSwitchStage::CheckpointVerified
+                        | AgentSwitchStage::StoppingCurrent
+                        | AgentSwitchStage::LaunchingNext
+                )
             });
             if pending {
                 events.extend(self.queue_owner_switch(&context, None, None));

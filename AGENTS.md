@@ -85,11 +85,18 @@
 2. **process 全体の状態は施錠して触る。** テスト関数内の `env::set_var` /
    `env::remove_var` / `env::set_current_dir` は、同じ関数内で
    `gwt_core::test_support::env_lock()` / `env_test_lock()` を取得するか、
-   `ScopedEnvVar` / `ScopedGwtHome` で包む。
+   `ScopedEnvVar` / `ScopedGwtHome` で包む（env 変数の書き込み自体は 4 により新規禁止）。
 3. **正当な例外は理由付きで宣言する。** 違反行またはその直前行に
    `// test-hygiene: allow-short-duration <理由>` もしくは
    `// test-hygiene: allow-unlocked-env <理由>` を置く。理由本文が空なら通らない。
-4. **`test_hygiene_baseline.txt` に行を足さない。** これは SPEC #4551 導入時点の
+4. **テストで process env を書かない（SPEC #4072）。** `env::set_var` /
+   `remove_var` / `ScopedEnvVar::set|unset` は lock 下でも不可。値は
+   `gwt_core::test_support::ScopedEnvOverride`（HOME は `ScopedGwtHome`）で
+   thread-local に固定し、production は `gwt_core::env::var` / `var_os` で読む。
+   子プロセスへは `Command::env` で渡す。既存箇所は
+   `crates/gwt-core/tests/process_env_baseline.txt`（縮む一方の台帳）に据え置き、
+   正当な例外は `// test-hygiene: allow-process-env #<Issue> <理由>` で宣言する。
+5. **`test_hygiene_baseline.txt` に行を足さない。** これは SPEC #4551 導入時点の
    既存違反を据え置いた一覧で、縮む一方の台帳である。違反を直したら該当行を削除する
    （残っているとゲートが落ちる）。一括整理の後は
    `cargo test -p gwt-core --test test_hygiene_test -- --ignored regenerate_the_baseline`
@@ -135,6 +142,10 @@
 - develop ブランチへの直接コミット / push は許可する。ただし共有ブランチなので、`origin/develop` を取り込んだ上で fast-forward を維持し、履歴を壊さないこと
 - SPEC 策定・ブレインストーミングは develop 上のエージェントで行える。必要に応じて feature ブランチを使ってもよいが、develop でのコミット / push も禁止しない
 
+### Hook ペイロード契約
+
+- 新しいプロバイダーを launch candidate pool に追加するときは、対応する各 Hook イベントについて実セッションから採取した JSON を `crates/gwt/tests/fixtures/hook_payloads/<provider>/<version>/` に追加し、パーサー入口の契約テストで検証する。セッション ID・絶対パス・トークンなどの秘匿値は採取時に置換する。
+
 ### 📝 設計ガイドライン
 
 - 設計に関するドキュメントには、ソースコードを書かないこと
@@ -147,6 +158,7 @@
 - 変更対象に応じた検証（テスト / lint / 型チェック）を実行し、成功を確認してから完了とする。
 - 実行不能な検証がある場合は、未実施理由・代替確認・残リスクを明示する。未検証のまま「完了」と報告しない。
 - カバレッジの判定・測定義務・報告は、下記「カバレッジの判定と報告」に従う。
+- 体感経路の所要時間や外部 API 消費量を減らす改善は、[`docs/perf/README.md`](docs/perf/README.md) の完了条件（改善前後の実測値・バジェット達成・回帰テスト）を満たすまで完了としない。性能計測を追加する変更は、同書の自己劣化検証を行い、結果を PR に記録する。
 - **GUI / フロントエンドに影響する変更では、必ず Headed ブラウザ（実 Chromium）による E2E テストを実施すること。** 同じ PR の必須 WebView CI が生成した証跡、または `browser-check` の隔離起動（checkout の `target/debug/gwt` + fresh HOME）で、dark / light 両テーマ、変更した挙動、console / page error ゼロを確認する。
 - **完了報告前のセルフチェックリスト（必須）:**
   - [ ] 対象の SPEC (GitHub Issue `gwt-spec` label) が最新状態に更新されているか
@@ -225,7 +237,7 @@ GitHub merge queue は organization 所有のリポジトリに限定され、Us
 ##### Step 3: 既存 SPEC が見つからない場合のみ → 新規 SPEC を作成する
 
 - `gwt-discussion` を使って investigation-first で議論し、必要なら DDD ベースで SPEC 設計まで進める（調査 → ドメイン分析 → SPEC 登録/更新 → 仕様明確化）
-- SPEC 登録は **`gwt-register-issue` の design-required 登録モード**で行う。gwt-discussion の Action Bundle で `Register Spec` を選択し、title + body file を渡せば、validation → JSON operation `issue.spec.create` → `issue.spec.edit` → roundtrip 検証を安全に実行する。`gwt-register-spec` は 1 release cycle の alias として残す。legacy create-body transport を直接使うと section マーカー漏れで空 SPEC が作成される（SPEC #2780 で発生、work-notes memory 参照）
+- SPEC 登録は **`gwt-register-issue` の design-required 登録モード**で行う。gwt-discussion の Action Bundle で `Register Spec` を選択し、title + body file を渡せば、validation → JSON operation `issue.spec.create` → `issue.spec.edit` → roundtrip 検証を安全に実行する。`gwt-register-spec` は `gwt-register-issue` へ転送する alias として残す。legacy create-body transport を直接使うと section マーカー漏れで空 SPEC が作成される（SPEC #2780 で発生、work-notes memory 参照）
 - GitHub Issue (`gwt-spec` label) として作成する `spec` section には最低限以下を含める（design-required 登録 validation が強制する 8 セクション）:
   - 背景 / ユビキタス言語
   - ユーザーシナリオと受け入れシナリオ
@@ -271,7 +283,7 @@ GitHub merge queue は organization 所有のリポジトリに限定され、Us
 - 中規模以上の作業では `tasks/todo.md` をローカル作業ログとして使用する。存在しない場合は作成し、Plan と進捗チェックボックスを管理する。
 - `tasks/todo.md` には「背景」「実装ステップ」「検証結果」を残し、作業に合わせて更新する。ただし `tasks/todo.md` は version 管理しない。恒久的に残すべき内容は GitHub Issue / PR / README 等へ転記する。
 - 再発防止に値する失敗、レビュー指摘、設計判断、agent workflow correction は JSON operation `memory.add` でマシンローカルの work-notes memory に `Type` / `Context` / `Learning` / `Future Action` の形式で記録する。legacy lessons alias も同じ work-notes memory に追記される。
-- 同種の作業を始める前に work-notes memory を確認し、既知の失敗を繰り返さない。発見導線として `gwt-search` の JSON payload `scopes:["memory"]` または `/gwt:gwt-memory-search "<query>"` を使い、関連 memory が見つかった場合はその再発防止策を再利用する（SPEC #2805）。
+- 同種の作業を始める前に work-notes memory を確認し、既知の失敗を繰り返さない。発見導線として `gwt-search` の JSON payload `scopes:["memory"]` を使い、関連 memory が見つかった場合はその再発防止策を再利用する（SPEC #2805）。
 
 ### サブエージェント活用（並列化）
 

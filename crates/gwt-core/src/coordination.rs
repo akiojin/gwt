@@ -4605,6 +4605,7 @@ mod tests {
         let delays = replace_retry_delays(Duration::from_millis(500)).collect::<Vec<_>>();
         assert_eq!(
             delays.first().copied(),
+            // test-hygiene: allow-short-duration retry schedule arithmetic input; nothing waits on it
             Some(Duration::from_millis(1)),
             "the first retry must not cost more than the operation it retries"
         );
@@ -4638,6 +4639,7 @@ mod tests {
     fn replace_retry_schedule_fits_a_prompt_sized_budget() {
         // The UserPromptSubmit deadline leaves far less than 500ms by the time
         // the reminder sidecar is written; the schedule must not overrun it.
+        // test-hygiene: allow-short-duration retry schedule arithmetic input; nothing waits on it
         let budget = Duration::from_millis(40);
         let delays = replace_retry_delays(budget).collect::<Vec<_>>();
         assert!(!delays.is_empty(), "a 40ms budget still allows retries");

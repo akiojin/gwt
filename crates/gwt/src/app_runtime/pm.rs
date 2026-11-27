@@ -2975,6 +2975,7 @@ impl AppRuntime {
         vec![OutboundEvent::project(
             context.project_key.clone(),
             BackendEvent::IssueMonitorToast {
+                host_notice: false,
                 notification_transition: None,
                 notification_transition_id: None,
                 level: "error".to_string(),

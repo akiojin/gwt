@@ -225,6 +225,7 @@ pub enum IssueCommand {
         head: String,
         work_id: String,
         board_entry_id: String,
+        resume_condition: Option<crate::issue_monitor::AgentSwitchResumeCondition>,
     },
     MonitorQueuePush {
         project_root: Option<std::path::PathBuf>,

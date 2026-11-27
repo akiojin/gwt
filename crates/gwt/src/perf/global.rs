@@ -381,6 +381,7 @@ mod tests {
         let mut runtime =
             PerfRuntime::from_config(&PerfConfig::default()).expect("create perf runtime");
 
+        // test-hygiene: allow-short-duration synthetic measurement value recorded as data; nothing waits on it
         runtime.record_route(PerfRoute::ProjectSwitch, Duration::from_millis(12));
 
         let records = read_all();
@@ -398,7 +399,9 @@ mod tests {
         let mut runtime =
             PerfRuntime::from_config(&PerfConfig::default()).expect("create perf runtime");
 
+        // test-hygiene: allow-short-duration synthetic measurement value recorded as data; nothing waits on it
         runtime.record_operation("issue.view", Duration::from_millis(5), true);
+        // test-hygiene: allow-short-duration synthetic measurement value recorded as data; nothing waits on it
         runtime.record_operation("pr.create", Duration::from_millis(5), false);
 
         let records = read_all();
@@ -601,7 +604,9 @@ mod tests {
         let mut runtime = PerfRuntime::appending_to_established_log(&PerfConfig::default())
             .expect("perf runtime");
 
+        // test-hygiene: allow-short-duration synthetic measurement value recorded as data; nothing waits on it
         runtime.record_operation("workspace.update", Duration::from_millis(35), false);
+        // test-hygiene: allow-short-duration synthetic measurement value recorded as data; nothing waits on it
         runtime.record_route(PerfRoute::ProjectSwitch, Duration::from_millis(12));
 
         assert!(!runtime.is_enabled());
@@ -621,6 +626,7 @@ mod tests {
         let mut runtime = PerfRuntime::appending_to_established_log(&PerfConfig::default())
             .expect("perf runtime");
 
+        // test-hygiene: allow-short-duration synthetic measurement value recorded as data; nothing waits on it
         runtime.record_operation("issue.view", Duration::from_millis(9), true);
 
         assert!(runtime.is_enabled());
@@ -641,6 +647,7 @@ mod tests {
         .expect("create disabled perf runtime");
 
         runtime.record_route(PerfRoute::Startup, Duration::from_millis(900));
+        // test-hygiene: allow-short-duration synthetic measurement value recorded as data; nothing waits on it
         runtime.record_operation("issue.view", Duration::from_millis(5), true);
 
         assert!(!runtime.is_enabled());
@@ -656,6 +663,7 @@ mod tests {
         let mut runtime = PerfRuntime::from_config(&config).expect("create perf runtime");
 
         for _ in 0..3 {
+            // test-hygiene: allow-short-duration synthetic measurement value recorded as data; nothing waits on it
             runtime.record_route(PerfRoute::ProjectSwitch, Duration::from_millis(50));
         }
 

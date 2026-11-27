@@ -95,13 +95,22 @@ fn distribute_to_worktree_materializes_claude_and_codex_skill_bundles() {
     let report = distribute_to_worktree(dir.path()).expect("distribute bundle");
 
     assert!(report.files_written > 0, "bundle must write files");
-    for skill in [
-        "gwt-execute",
-        "gwt-verify",
-        "gwt-manage-pr",
-        "gwt-build-spec",
-        "gwt-fix-issue",
-    ] {
+    // Issue #4741: the legacy aliases only forward; the delivery contract
+    // lives in gwt-execute.
+    for alias in ["gwt-build-spec", "gwt-fix-issue"] {
+        let relative = format!("skills/{alias}/SKILL.md");
+        let claude = fs::read_to_string(dir.path().join(".claude").join(&relative)).unwrap();
+        let codex = fs::read_to_string(dir.path().join(".codex").join(&relative)).unwrap();
+        assert_eq!(
+            claude, codex,
+            "{alias} must have identical delivered aliases"
+        );
+        assert!(
+            claude.contains("Alias for [gwt-execute](../gwt-execute/SKILL.md)"),
+            "{alias} must forward to gwt-execute"
+        );
+    }
+    for skill in ["gwt-execute", "gwt-verify", "gwt-manage-pr"] {
         let relative = format!("skills/{skill}/SKILL.md");
         let claude =
             skill_contract_text(dir.path().join(".claude").join(&relative).parent().unwrap());
@@ -1445,22 +1454,18 @@ fn build_complete_guidance_names_the_delivered_pr() {
 
     for provider in [".claude", ".codex"] {
         let skills = dir.path().join(provider).join("skills");
-        for reference in [
-            "gwt-execute/references/lifecycle-recovery.md",
-            "gwt-build-spec/references/entry-lifecycle.md",
-        ] {
-            let text = fs::read_to_string(skills.join(reference)).expect("lifecycle reference");
-            let line = text
-                .lines()
-                .find(|line| line.contains("`build.complete`") && line.contains("`params.spec"))
-                .unwrap_or_else(|| panic!("{provider}/{reference}: no build.complete step"));
-            let step = &text[text.find(line).unwrap()..];
-            let step = &step[..step.find("\n- ").unwrap_or(step.len())];
-            assert!(
-                step.contains("`params.pr:<number>`"),
-                "{provider}/{reference}: build.complete step must name the delivered PR: {step}"
-            );
-        }
+        let reference = "gwt-execute/references/lifecycle-recovery.md";
+        let text = fs::read_to_string(skills.join(reference)).expect("lifecycle reference");
+        let line = text
+            .lines()
+            .find(|line| line.contains("`build.complete`") && line.contains("`params.spec"))
+            .unwrap_or_else(|| panic!("{provider}/{reference}: no build.complete step"));
+        let step = &text[text.find(line).unwrap()..];
+        let step = &step[..step.find("\n- ").unwrap_or(step.len())];
+        assert!(
+            step.contains("`params.pr:<number>`"),
+            "{provider}/{reference}: build.complete step must name the delivered PR: {step}"
+        );
     }
 }
 

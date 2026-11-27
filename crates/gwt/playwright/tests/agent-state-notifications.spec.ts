@@ -114,6 +114,28 @@ test("windowless NeedsHuman uses one notification history entry, never the inbox
   await page.screenshot({ path: testInfo.outputPath("needs-human-history.png"), fullPage: true });
 });
 
+test("Issue #3922: Issues notices name their project; host notices stay unattributed", async ({ page }, testInfo) => {
+  const inject = (detail: Record<string, unknown>) => page.evaluate((payload) => {
+    window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: payload }));
+  }, detail);
+  await inject({ kind: "issue_monitor_toast", level: "info", issue_number: 3752, message: "Issues launch requested" });
+  await inject({ kind: "issue_monitor_toast", level: "warn", issue_number: 3752, message: "Process exited with status 1" });
+  await inject({ kind: "issue_monitor_toast", level: "warn", issue_number: 3752,
+    notification_transition: "needs_human", message: "Issue #3752 needs human attention." });
+  await inject({ kind: "issue_monitor_toast", level: "info", host_notice: true, message: "Host update ready" });
+  await page.locator("#op-notifications-button").click();
+  const titles = page.locator("#notification-center .notification-center__item .notification-center__title");
+  await expect(titles).toHaveCount(4);
+  const projectRows = page.locator("#notification-center .notification-center__item", { hasNotText: "Host update ready" });
+  await expect(projectRows).toHaveCount(3);
+  for (const title of await projectRows.locator(".notification-center__title").allInnerTexts()) {
+    expect(title).toMatch(/^\[Notification project\] /);
+  }
+  const host = page.locator("#notification-center .notification-center__item", { hasText: "Host update ready" });
+  await expect(host.locator(".notification-center__title")).not.toContainText("[Notification project]");
+  await page.screenshot({ path: testInfo.outputPath("project-named-notices.png"), fullPage: true });
+});
+
 test("Issue #4923: review launch failure appears once in notification history", async ({ page }, testInfo) => {
   const message = "independent review for PR #99 at abc123 failed (attempt 1/3): review window launch failure: Process exited with status 1";
   const inject = (detail: Record<string, unknown>) => page.evaluate((payload) => {

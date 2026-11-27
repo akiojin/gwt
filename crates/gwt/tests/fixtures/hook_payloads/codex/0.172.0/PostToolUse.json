@@ -1,0 +1,15 @@
+{
+  "session_id": "00000000-0000-0000-0000-000000000004",
+  "turn_id": "00000000-0000-0000-0000-000000000005",
+  "transcript_path": "/redacted/capture.jsonl",
+  "cwd": "/redacted/scratch",
+  "hook_event_name": "PostToolUse",
+  "model": "gpt-6.2-sol",
+  "permission_mode": "bypassPermissions",
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "cat probe.txt"
+  },
+  "tool_response": "fixture capture probe\n",
+  "tool_use_id": "00000000-0000-0000-0000-000000000006"
+}

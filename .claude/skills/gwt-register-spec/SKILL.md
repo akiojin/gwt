@@ -5,13 +5,14 @@ description: Use when a completed discussion design is ready for SPEC registrati
 
 ## When to use
 
-Compatibility entrypoint for design-required registration through [gwt-register-issue](../gwt-register-issue/SKILL.md). A finished design and authorized Register Spec action are prerequisites.
+Alias for [gwt-register-issue](../gwt-register-issue/SKILL.md): a `gwt-discussion` Register Spec action bundle continues through its design-required registration. This alias carries no workflow of its own and does not create another execution lifetime.
 
 ## Completion
 
-Validate, create, edit, and roundtrip-read the same SPEC Issue through canonical operations. Report partial/orphan creation explicitly; never retry by creating a duplicate owner.
+Completion is defined entirely by `gwt-register-issue`.
+
+`references/body-template.md` stays as the embedded SPEC body template used by the gwt runtime.
 
 ## References
 
-- For registration inputs, structural validation, partial-failure recovery, and lifecycle: [workflow](references/workflow.md).
-- For the constraint review: [router audit](references/router-audit.md).
+- For the alias constraint: [router audit](references/router-audit.md).

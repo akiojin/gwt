@@ -1756,6 +1756,8 @@ pub(crate) struct ProjectRuntimeState {
     pub(crate) workspace_state_notice: Option<gwt::WorkspaceStateNoticeView>,
     /// Direct roster requests and receipts invalidate older background views.
     pub(crate) agent_roster_foreground: Arc<()>,
+    /// Last published view of saved-work Switches advanced by the Monitor.
+    agent_switch_snapshot: Option<gwt::issue_monitor::AgentSwitchSnapshot>,
     /// Authoritative PM publications fence older roster status snapshots.
     pm_status_epoch: std::sync::atomic::AtomicU64,
     pub(crate) project_owner_health: Option<gwt::protocol::ProjectOwnerHealthView>,
@@ -1873,6 +1875,7 @@ pub(crate) fn initial_project_states(
                 ProjectRuntimeState {
                     workspace_state_notice: None,
                     agent_roster_foreground: Arc::new(()),
+                    agent_switch_snapshot: None,
                     pm_status_epoch: std::sync::atomic::AtomicU64::new(0),
                     project_owner_health: None,
                     project_owner_connection_id: 0,
@@ -4944,6 +4947,7 @@ impl AppRuntime {
                 .or_insert_with(|| ProjectRuntimeState {
                     workspace_state_notice: None,
                     agent_roster_foreground: Arc::new(()),
+                    agent_switch_snapshot: None,
                     pm_status_epoch: std::sync::atomic::AtomicU64::new(0),
                     project_owner_health: None,
                     project_owner_connection_id: 0,
@@ -6344,6 +6348,7 @@ impl AppRuntime {
         self.issue_monitor_project_notification(
             Some(&delivery.project_root),
             BackendEvent::IssueMonitorToast {
+                host_notice: false,
                 notification_transition: None,
                 notification_transition_id: None,
                 level: level.into(),
@@ -6826,6 +6831,7 @@ impl AppRuntime {
             events.extend(self.issue_monitor_project_notification(
                 project_root,
                 BackendEvent::IssueMonitorToast {
+                    host_notice: false,
                     notification_transition: None,
                     notification_transition_id: None,
                     level: "error".to_string(),
@@ -7653,6 +7659,7 @@ impl AppRuntime {
         events.extend(self.issue_monitor_project_notification(
             Some(project_root),
             BackendEvent::IssueMonitorToast {
+                host_notice: false,
                 notification_transition: None,
                 notification_transition_id: None,
                 level: "error".to_string(),
@@ -7822,6 +7829,7 @@ impl AppRuntime {
                         OutboundEvent::project(
                             context.project_key.clone(),
                             BackendEvent::IssueMonitorToast {
+                                host_notice: false,
                                 notification_transition: None,
                                 notification_transition_id: None,
                                 level: "error".to_string(),
@@ -7979,6 +7987,7 @@ impl AppRuntime {
                 events.extend(self.issue_monitor_project_notification(
                     Some(&context.project_root),
                     BackendEvent::IssueMonitorToast {
+                        host_notice: false,
                         notification_transition: None,
                         notification_transition_id: None,
                         level: "error".to_string(),
@@ -8589,6 +8598,7 @@ impl AppRuntime {
         // Keep the last authoritative snapshot; an empty reconstructed monitor
         // would overwrite live queue/active counts with zeros (Issue #4273).
         let toast = BackendEvent::IssueMonitorToast {
+            host_notice: false,
             notification_transition: None,
             notification_transition_id: None,
             level: "error".to_string(),
@@ -8640,6 +8650,7 @@ impl AppRuntime {
             return vec![OutboundEvent::reply(
                 client_id,
                 BackendEvent::IssueMonitorToast {
+                    host_notice: false,
                     notification_transition: None,
                     notification_transition_id: None,
                     level: "error".to_string(),
@@ -8658,6 +8669,7 @@ impl AppRuntime {
                     return vec![OutboundEvent::reply(
                         client_id,
                         BackendEvent::IssueMonitorToast {
+                            host_notice: false,
                             notification_transition: None,
                             notification_transition_id: None,
                             level: "error".to_string(),
@@ -8675,6 +8687,7 @@ impl AppRuntime {
                 return vec![OutboundEvent::reply(
                     client_id,
                     BackendEvent::IssueMonitorToast {
+                        host_notice: false,
                         notification_transition: None,
                         notification_transition_id: None,
                         level: "error".to_string(),
@@ -8693,6 +8706,7 @@ impl AppRuntime {
                 return vec![OutboundEvent::reply(
                     client_id,
                     BackendEvent::IssueMonitorToast {
+                        host_notice: false,
                         notification_transition: None,
                         notification_transition_id: None,
                         level: "error".to_string(),
@@ -8713,6 +8727,7 @@ impl AppRuntime {
                 OutboundEvent::reply(
                     client_id,
                     BackendEvent::IssueMonitorToast {
+                        host_notice: false,
                         notification_transition: None,
                         notification_transition_id: None,
                         level: "error".to_string(),
@@ -8730,6 +8745,7 @@ impl AppRuntime {
         events.push(OutboundEvent::reply(
             client_id,
             BackendEvent::IssueMonitorToast {
+                host_notice: false,
                 notification_transition: None,
                 notification_transition_id: None,
                 level: "info".to_string(),
@@ -9239,6 +9255,7 @@ impl AppRuntime {
                     events.extend(self.issue_monitor_project_notification(
                         Some(&project_root),
                         BackendEvent::IssueMonitorToast {
+                            host_notice: false,
                             notification_transition: None,
                             notification_transition_id: None,
                             level: "error".to_string(),
@@ -9773,6 +9790,7 @@ impl AppRuntime {
             events.extend(self.issue_monitor_project_notification(
                 Some(&project_root),
                 BackendEvent::IssueMonitorToast {
+                    host_notice: false,
                     notification_transition: None,
                     notification_transition_id: None,
                     level: "error".to_string(),
@@ -10055,6 +10073,7 @@ impl AppRuntime {
         vec![OutboundEvent::project(
             context.project_key,
             BackendEvent::IssueMonitorToast {
+                host_notice: false,
                 notification_transition: None,
                 notification_transition_id: None,
                 level: "error".to_string(),
@@ -12466,6 +12485,7 @@ impl AppRuntime {
                     return vec![OutboundEvent::reply(
                         client_id,
                         BackendEvent::IssueMonitorToast {
+                            host_notice: false,
                             notification_transition: None,
                             notification_transition_id: None,
                             level: "error".into(),
@@ -12487,6 +12507,7 @@ impl AppRuntime {
                         Err(error) => ("error", format!("Daemon restart: {error}")),
                     };
                     proxy.send(UserEvent::Dispatch(vec![OutboundEvent::reply(client_id, BackendEvent::IssueMonitorToast {
+                        host_notice: false,
                         notification_transition: None, notification_transition_id: None,
                         level: level.into(), message, issue_number: None,
                     })]));
@@ -13643,8 +13664,21 @@ impl AppRuntime {
     /// elevation checks. Hydrate it as ready on every connection, including
     /// a fresh process whose release poll is suppressed by that manifest.
     fn staged_update_sync_events(&mut self, client_id: &str) -> Vec<OutboundEvent> {
+        let current_exe = std::env::current_exe().ok();
+        self.staged_update_sync_events_for_exe(client_id, current_exe.as_deref())
+    }
+
+    /// Issue #3807 (AC-1): `current_exe` locates the installed bundle whose
+    /// version decides whether the staged release is still an update.
+    fn staged_update_sync_events_for_exe(
+        &mut self,
+        client_id: &str,
+        current_exe: Option<&std::path::Path>,
+    ) -> Vec<OutboundEvent> {
+        let current_version =
+            gwt_core::update::effective_current_version_for(env!("CARGO_PKG_VERSION"), current_exe);
         let Some(manifest) = gwt_core::update::load_pending_update_manifest().filter(|manifest| {
-            gwt_core::update::pending_version_is_newer(&manifest.version, env!("CARGO_PKG_VERSION"))
+            gwt_core::update::pending_version_is_newer(&manifest.version, &current_version)
                 && !matches!(&self.pending_update,
                     Some(gwt_core::update::UpdateState::Available { latest, .. })
                         if gwt_core::update::pending_version_is_newer(latest, &manifest.version))
@@ -13652,7 +13686,7 @@ impl AppRuntime {
             return Vec::new();
         };
         let state = gwt_core::update::UpdateState::Available {
-            current: env!("CARGO_PKG_VERSION").into(),
+            current: current_version,
             latest: manifest.version.clone(),
             release_url: manifest.asset_url.clone(),
             asset_url: Some(manifest.asset_url.clone()),
@@ -13669,8 +13703,8 @@ impl AppRuntime {
             ),
         ];
         if manifest.origin == gwt_core::update::PendingUpdateOrigin::Automatic
-            && std::env::current_exe().map_or(true, |exe| {
-                gwt_core::update::prepared_payload_requires_elevation(&manifest.payload, &exe)
+            && current_exe.is_none_or(|exe| {
+                gwt_core::update::prepared_payload_requires_elevation(&manifest.payload, exe)
             })
         {
             events.push(OutboundEvent::reply(
@@ -15952,6 +15986,7 @@ impl AppRuntime {
             } => vec![OutboundEvent::project(
                 context.project_key.clone(),
                 BackendEvent::IssueMonitorToast {
+                    host_notice: false,
                     level,
                     message,
                     issue_number,
@@ -17031,6 +17066,7 @@ impl AppRuntime {
                         notification.push(OutboundEvent::project(
                             context.project_key.clone(),
                             BackendEvent::IssueMonitorToast {
+                                host_notice: false,
                                 notification_transition: None,
                                 notification_transition_id: None,
                                 level: "info".into(),
@@ -17288,6 +17324,7 @@ impl AppRuntime {
             events.push(OutboundEvent::project(
                 context.project_key.clone(),
                 BackendEvent::IssueMonitorToast {
+                    host_notice: false,
                     level: "error".into(),
                     message,
                     issue_number: Some(issue_number),
