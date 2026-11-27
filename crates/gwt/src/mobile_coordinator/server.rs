@@ -1280,7 +1280,7 @@ mod tests {
         use crate::mobile_host::registration_client::{
             ConnectionEvent, InviteOutcome, InviteRejection, InviteRequest, OutboundSignal,
         };
-        use crate::mobile_host::signal::BrowserSignal;
+        use crate::mobile_host::signal::{BrowserSignal, HostSignal};
         use std::sync::RwLock;
         use tokio::sync::{mpsc, watch};
         let mut fixture = Fixture::new();
@@ -1386,15 +1386,20 @@ mod tests {
                     }
                 })
             );
-            // The Host's signal reaches this browser.
+            // The Host's answer reaches this browser on the fixed wire.
             let answer = OutboundSignal {
                 connection_id,
-                payload: "answer".to_string(),
+                signal: HostSignal::Answer {
+                    sdp: "v=0".to_string(),
+                },
             };
             bounded(signals.send(answer)).await.ok().unwrap();
+            let relayed = next_json(&mut browser).await;
+            assert_eq!(relayed["type"], json!("signal"));
             assert_eq!(
-                next_json(&mut browser).await,
-                json!({"type":"signal","payload":"answer"})
+                serde_json::from_str::<serde_json::Value>(relayed["payload"].as_str().unwrap())
+                    .unwrap(),
+                json!({"type":"answer","sdp":"v=0"})
             );
             bounded(browser.close(None)).await.unwrap();
             assert_eq!(
@@ -1463,9 +1468,51 @@ mod tests {
             };
             let oversized = OutboundSignal {
                 connection_id,
-                payload: "x".repeat(64 * 1024),
+                signal: HostSignal::Answer {
+                    sdp: "x".repeat(64 * 1024),
+                },
             };
             bounded(signals.send(oversized)).await.ok().unwrap();
+            assert!(matches!(
+                bounded(browser.next()).await,
+                None | Some(Err(_)) | Some(Ok(Message::Close(_)))
+            ));
+            assert_eq!(
+                bounded(connections.recv()).await,
+                Some(ConnectionEvent::Closed { connection_id })
+            );
+        }
+        assert!(host.read().unwrap().is_enabled());
+        assert_eq!(live(&sessions), 1);
+
+        // A Host signal outside the Host wire (an answer before the browser's
+        // offer) is never sent: its connection is closed and the registration
+        // stays live.
+        {
+            use futures_util::{SinkExt as _, StreamExt as _};
+            use tokio_tungstenite::tungstenite::Message;
+            let issued = issued_invite(&host, &invites).await;
+            let origin = [("origin", "https://coordinator.example".to_string())];
+            let mut browser = open_path(&fixture, addr, BROWSER_CLAIM_PATH, &origin)
+                .await
+                .unwrap();
+            let claim =
+                json!({"type":"claim_invite","secret":hex::encode(issued.secret.as_slice())})
+                    .to_string();
+            bounded(browser.send(Message::text(claim))).await.unwrap();
+            assert_eq!(next_json(&mut browser).await, json!({"type":"claimed"}));
+            let ConnectionEvent::Claimed { connection_id, .. } =
+                bounded(connections.recv()).await.unwrap()
+            else {
+                panic!("the first connection event must be the claim");
+            };
+            let early = OutboundSignal {
+                connection_id,
+                signal: HostSignal::Answer {
+                    sdp: "v=0".to_string(),
+                },
+            };
+            bounded(signals.send(early)).await.ok().unwrap();
             assert!(matches!(
                 bounded(browser.next()).await,
                 None | Some(Err(_)) | Some(Ok(Message::Close(_)))
@@ -2173,6 +2220,7 @@ mod tests {
     #[tokio::test]
     async fn host_client_paces_its_signals_to_the_announced_host_rate() {
         use crate::mobile_host::registration_client::{ConnectionEvent, OutboundSignal};
+        use crate::mobile_host::signal::HostSignal;
         use futures_util::SinkExt as _;
         use std::sync::RwLock;
         use tokio::sync::{mpsc, watch};
@@ -2227,19 +2275,47 @@ mod tests {
             panic!("the first connection event must be the claim");
         };
 
+        let offer = json!({"type":"offer","sdp":"v=0"}).to_string();
+        let offer = json!({"type":"signal","payload":offer}).to_string();
+        bounded(browser.send(Message::text(offer))).await.unwrap();
+        assert!(matches!(
+            bounded(connections.recv()).await,
+            Some(ConnectionEvent::Signal { .. })
+        ));
+
         // More signals at once than the coordinator's burst allows: the client
         // holds them to the announced rate instead of losing the registration.
+        let wire = |index: usize| {
+            if index == 0 {
+                HostSignal::Answer {
+                    sdp: "v=0".to_string(),
+                }
+            } else {
+                HostSignal::Candidate {
+                    candidate: format!("candidate-{index}"),
+                    sdp_mid: None,
+                    sdp_m_line_index: None,
+                }
+            }
+        };
         for index in 0..6 {
             let signal = OutboundSignal {
                 connection_id,
-                payload: format!("candidate-{index}"),
+                signal: wire(index),
             };
             bounded(signals.send(signal)).await.ok().unwrap();
         }
         for index in 0..6 {
+            let relayed = next_json(&mut browser).await;
+            let expected = if index == 0 {
+                json!({"type":"answer","sdp":"v=0"})
+            } else {
+                json!({"type":"candidate","candidate":format!("candidate-{index}")})
+            };
             assert_eq!(
-                next_json(&mut browser).await,
-                json!({"type":"signal","payload":format!("candidate-{index}")})
+                serde_json::from_str::<serde_json::Value>(relayed["payload"].as_str().unwrap())
+                    .unwrap(),
+                expected
             );
         }
         assert!(host.read().unwrap().is_enabled());
