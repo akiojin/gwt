@@ -567,16 +567,14 @@ fn failed_update_reset_events(app: &mut AppRuntime, version: &str) -> Vec<Outbou
         version,
         app_runtime::UpdateAutoApplyRelease::PreviousFailure,
     );
+    let current = gwt_core::update::effective_current_version();
     let replacement = gwt_core::update::load_pending_update_manifest().filter(|manifest| {
         manifest.version != version
-            && gwt_core::update::pending_version_is_newer(
-                &manifest.version,
-                env!("CARGO_PKG_VERSION"),
-            )
+            && gwt_core::update::pending_version_is_newer(&manifest.version, &current)
     });
     let state = match &replacement {
         Some(manifest) => gwt_core::update::UpdateState::Available {
-            current: env!("CARGO_PKG_VERSION").into(),
+            current,
             latest: manifest.version.clone(),
             release_url: manifest.asset_url.clone(),
             asset_url: Some(manifest.asset_url.clone()),
