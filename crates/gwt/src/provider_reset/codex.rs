@@ -155,7 +155,7 @@ fn app_server_request(
         "LANG",
         "LC_ALL",
     ] {
-        if let Some(value) = std::env::var_os(key) {
+        if let Some(value) = gwt_core::env::var_os(key) {
             request = request.env(key, value);
         }
     }

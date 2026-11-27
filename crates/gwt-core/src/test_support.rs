@@ -195,6 +195,7 @@ pub struct ScopedEnvVar {
 impl ScopedEnvVar {
     /// Sets `key` to `value`, remembering the previous value for restore.
     pub fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+        // home-seam: allow this guard saves and restores the process env itself
         let previous = std::env::var_os(key);
         std::env::set_var(key, value);
         Self { key, previous }
@@ -202,6 +203,7 @@ impl ScopedEnvVar {
 
     /// Removes `key`, remembering the previous value for restore.
     pub fn unset(key: &'static str) -> Self {
+        // home-seam: allow this guard saves and restores the process env itself
         let previous = std::env::var_os(key);
         std::env::remove_var(key);
         Self { key, previous }

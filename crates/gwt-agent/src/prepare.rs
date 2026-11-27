@@ -1503,7 +1503,7 @@ fn runner_probe_environment(
     let mut environment = ALLOWLIST
         .iter()
         .filter_map(|key| {
-            std::env::var(key)
+            gwt_core::env::var(key)
                 .ok()
                 .map(|value| ((*key).to_string(), value))
         })
