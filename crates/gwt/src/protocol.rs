@@ -448,6 +448,24 @@ fn deserialize_roster_revision<'de, D: serde::Deserializer<'de>>(
     })
 }
 
+fn deserialize_agent_switch_action<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<crate::issue_monitor::AgentSwitchAction, D::Error> {
+    use crate::issue_monitor::AgentSwitchAction;
+
+    let action = AgentSwitchAction::deserialize(deserializer)?;
+    match &action {
+        AgentSwitchAction::Request {
+            disposition,
+            target_issue_number,
+            ..
+        } if !disposition.permits_target(*target_issue_number) => Err(serde::de::Error::custom(
+            "Agent switch target does not match its disposition",
+        )),
+        _ => Ok(action),
+    }
+}
+
 /// A browser can reopen or cancel tracking, but cannot supply actor or provenance.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -563,6 +581,7 @@ pub enum FrontendEvent {
         action: crate::issue_monitor::AgentScheduleAction,
     },
     AgentSwitch {
+        #[serde(deserialize_with = "deserialize_agent_switch_action")]
         action: crate::issue_monitor::AgentSwitchAction,
     },
     StartupAutoResumeReady {},
