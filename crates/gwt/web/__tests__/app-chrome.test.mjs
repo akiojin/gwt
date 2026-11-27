@@ -219,7 +219,7 @@ test("the PM entry draws an uploaded avatar image", () => {
 // window, and follow a reassignment.
 test("the project's PM is the ledger's designation, ahead of the running window", async () => {
   const { projectPm } = await import("../app-chrome.js");
-  const roster = { project_key: "p1", members: [
+  const roster = { project_key: "p1", revision: "1", members: [
     { member_id: "a", name: "Aoi", avatar: { kind: "preset", preset: "owl" } },
     { member_id: "h", name: "Hikari", pm_project_key: "p1" },
     { member_id: "o", name: "Other", pm_project_key: "p2" },
@@ -227,7 +227,15 @@ test("the project's PM is the ledger's designation, ahead of the running window"
   assert.deepEqual(projectPm(roster, { agent_name: "Aoi" }), { name: "Hikari", avatar: undefined });
   const reassigned = { ...roster, members: roster.members.map(member => ({ ...member, pm_project_key: member.member_id === "a" ? "p1" : member.pm_project_key === "p1" ? undefined : member.pm_project_key })) };
   assert.deepEqual(projectPm(reassigned, { agent_name: "Hikari" }), { name: "Aoi", avatar: { kind: "preset", preset: "owl" } });
-  // Before the ledger loads, the running PM window still names the PM.
-  assert.deepEqual(projectPm({ project_key: "p1", members: [] }, { agent_name: "Aoi" }), { name: "Aoi", avatar: null });
-  assert.deepEqual(projectPm({ project_key: "p1", members: [] }, null), { name: "", avatar: null });
+  // A loaded ledger without a designation falls back to the running PM window.
+  assert.deepEqual(projectPm({ project_key: "p1", revision: "1", members: [] }, { agent_name: "Aoi" }), { name: "Aoi", avatar: null });
+  assert.deepEqual(projectPm({ project_key: "p1", revision: "1", members: [] }, null), { name: "", avatar: null });
+});
+
+// Issue #8012: on reload the PM window's catalog name painted first and the
+// ledger's PM replaced it later. Until the ledger loads, the PM stays unnamed.
+test("the PM stays unnamed until the ledger loads", async () => {
+  const { projectPm } = await import("../app-chrome.js");
+  assert.deepEqual(projectPm({ project_key: "p1", revision: null, members: [] }, { agent_name: "Hikari" }), { name: "", avatar: null });
+  assert.deepEqual(projectPm(null, { agent_name: "Hikari" }), { name: "", avatar: null });
 });
