@@ -794,6 +794,9 @@ pub struct MobileAuthorization {
     devices: HashMap<String, DeviceRecord>,
     pending: HashMap<String, Pairing>,
     invites: HashMap<[u8; 32], Invite>,
+    /// Connections the coordinator announced as an approved device's
+    /// reconnect, by connection ID: the only device each may authenticate.
+    reconnects: HashMap<Uuid, String>,
     challenges: HashMap<String, Challenge>,
     native_connections: Mutex<Vec<(String, Weak<NativeRevocation>)>>,
 }
@@ -810,6 +813,7 @@ impl Default for MobileAuthorization {
             devices: HashMap::new(),
             pending: HashMap::new(),
             invites: HashMap::new(),
+            reconnects: HashMap::new(),
             challenges: HashMap::new(),
             native_connections: Mutex::default(),
         }
@@ -834,6 +838,7 @@ impl MobileAuthorization {
             .disable();
         self.pending.clear();
         self.invites.clear();
+        self.reconnects.clear();
         self.challenges.clear();
     }
 
@@ -1394,8 +1399,39 @@ impl MobileAuthorization {
         Ok(device)
     }
 
-    /// Drop unapproved pairing bound to a closed connection (terminal close).
+    /// Bind a connection the coordinator announces as an approved device's
+    /// reconnect to that one device, so that only this device may be
+    /// challenged on it ([`Self::challenge_peer_bound`]). The browser named the
+    /// device: this is not proof of its key, only the gate to proving it.
+    pub fn claim_reconnect(
+        &mut self,
+        device_id: &str,
+        connection_id: Uuid,
+        now: u64,
+    ) -> Result<(), AuthorizationError> {
+        self.check_enabled_at(now)?;
+        let device = self
+            .devices
+            .get(device_id)
+            .ok_or(AuthorizationError::UnknownDevice)?;
+        if device.revoked {
+            return Err(AuthorizationError::Revoked);
+        }
+        check_time(device.issued_at, device.expires_at, now)?;
+        if connection_id.is_nil() || self.reconnects.contains_key(&connection_id) {
+            return Err(AuthorizationError::WrongPeer);
+        }
+        if self.reconnects.len() >= MAX_CHALLENGES {
+            return Err(AuthorizationError::Capacity);
+        }
+        self.reconnects.insert(connection_id, device_id.to_string());
+        Ok(())
+    }
+
+    /// Drop unapproved pairing and the reconnect binding of a closed
+    /// connection (terminal close).
     pub fn close_pairing_connection(&mut self, connection_id: Uuid) {
+        self.reconnects.remove(&connection_id);
         self.pending.retain(|_, pending| {
             pending
                 .peer
@@ -1467,7 +1503,10 @@ impl MobileAuthorization {
             .lock()
             .map_err(|_| AuthorizationError::Unavailable)?
             .host_epoch;
-        if peer.is_some_and(|peer| self.host_binding.as_ref() != Some(&peer.host)) {
+        if peer.is_some_and(|peer| {
+            self.host_binding.as_ref() != Some(&peer.host)
+                || self.reconnects.get(&peer.connection_id).map(String::as_str) != Some(device_id)
+        }) {
             return Err(AuthorizationError::WrongPeer);
         }
         let device = self
@@ -1920,6 +1959,10 @@ mod tests {
         device: &DeviceRecord,
         key: &EcdsaKeyPair,
     ) -> AuthenticatedSession {
+        if !auth.reconnects.contains_key(&peer.connection_id) {
+            auth.claim_reconnect(&device.id, peer.connection_id, NOW)
+                .unwrap();
+        }
         let challenge = auth
             .challenge_peer_bound(&device.id, &project(), peer, NOW)
             .unwrap();
@@ -1935,6 +1978,8 @@ mod tests {
         let (mut auth, peer) = bound_authority();
         let key = key();
         let device = paired(&mut auth, &key);
+        auth.claim_reconnect(&device.id, peer.connection_id, NOW)
+            .unwrap();
         let challenge = auth
             .challenge_peer_bound(&device.id, &project(), &peer, NOW)
             .unwrap();
@@ -1977,6 +2022,8 @@ mod tests {
         next_peer.connection_id = Uuid::new_v4();
         next_peer.host_fingerprint = [3; 32];
         next_peer.mobile_fingerprint = [4; 32];
+        auth.claim_reconnect(&device.id, next_peer.connection_id, NOW)
+            .unwrap();
         let next = auth
             .challenge_peer_bound(&device.id, &project(), &next_peer, NOW)
             .unwrap();
@@ -1997,6 +2044,8 @@ mod tests {
         let (mut auth, peer) = bound_authority();
         let key = key();
         let device = paired(&mut auth, &key);
+        auth.claim_reconnect(&device.id, peer.connection_id, NOW)
+            .unwrap();
         let mut foreign = peer.clone();
         foreign.host =
             HostBinding::new(&Uuid::new_v4().to_string(), "https://mobile.example").unwrap();
@@ -2088,6 +2137,8 @@ mod tests {
         let (mut auth, peer) = bound_authority();
         let key = key();
         let device = paired(&mut auth, &key);
+        auth.claim_reconnect(&device.id, peer.connection_id, NOW)
+            .unwrap();
         let old = auth.challenge(&device.id, &project(), NOW).unwrap();
         for _ in 0..3 {
             auth.challenge_peer_bound(&device.id, &project(), &peer, NOW)
@@ -2122,6 +2173,76 @@ mod tests {
         );
         assert!(PeerBinding::new(peer.host.clone(), Uuid::nil(), [1; 32], [2; 32]).is_err());
         assert!(PeerBinding::new(peer.host, Uuid::new_v4(), [0; 32], [2; 32]).is_err());
+    }
+
+    #[test]
+    fn reconnect_binds_one_connection_to_one_approved_device_before_its_challenge() {
+        let (mut auth, peer) = bound_authority();
+        let other = paired(&mut auth, &key());
+        let key = key();
+        let device = paired(&mut auth, &key);
+        let connection = peer.connection_id;
+        // A connection the coordinator did not announce as this device's
+        // reconnect gets no challenge.
+        assert_eq!(
+            auth.challenge_peer_bound(&device.id, &project(), &peer, NOW)
+                .unwrap_err(),
+            AuthorizationError::WrongPeer
+        );
+        assert_eq!(
+            auth.claim_reconnect(&Uuid::new_v4().to_string(), connection, NOW),
+            Err(AuthorizationError::UnknownDevice)
+        );
+        assert_eq!(
+            auth.claim_reconnect(&device.id, Uuid::nil(), NOW),
+            Err(AuthorizationError::WrongPeer)
+        );
+        assert_eq!(auth.claim_reconnect(&device.id, connection, NOW), Ok(()));
+        assert_eq!(
+            auth.claim_reconnect(&other.id, connection, NOW),
+            Err(AuthorizationError::WrongPeer)
+        );
+        // The connection authenticates only the device it reconnected.
+        assert_eq!(
+            auth.challenge_peer_bound(&other.id, &project(), &peer, NOW)
+                .unwrap_err(),
+            AuthorizationError::WrongPeer
+        );
+        let mut session = peer_session(&mut auth, &peer, &device, &key);
+        assert_eq!(auth.dispatch(&mut session, &project(), 0, NOW, || 7), Ok(7));
+        // Its close forgets the binding.
+        auth.close_pairing_connection(connection);
+        assert_eq!(
+            auth.challenge_peer_bound(&device.id, &project(), &peer, NOW)
+                .unwrap_err(),
+            AuthorizationError::WrongPeer
+        );
+        // Expired and revoked devices cannot reconnect.
+        assert_eq!(
+            auth.claim_reconnect(&device.id, connection, NOW + DEVICE_TTL_SECS),
+            Err(AuthorizationError::Expired)
+        );
+        auth.revoke(&other.id).unwrap();
+        assert_eq!(
+            auth.claim_reconnect(&other.id, connection, NOW),
+            Err(AuthorizationError::Revoked)
+        );
+        // Bindings are bounded, and a disable forgets them all.
+        for _ in 0..MAX_CHALLENGES {
+            auth.claim_reconnect(&device.id, Uuid::new_v4(), NOW)
+                .unwrap();
+        }
+        assert_eq!(
+            auth.claim_reconnect(&device.id, connection, NOW),
+            Err(AuthorizationError::Capacity)
+        );
+        auth.disable();
+        assert_eq!(
+            auth.claim_reconnect(&device.id, connection, NOW),
+            Err(AuthorizationError::Disabled)
+        );
+        auth.enable();
+        assert_eq!(auth.claim_reconnect(&device.id, connection, NOW), Ok(()));
     }
 
     #[test]

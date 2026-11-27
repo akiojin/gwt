@@ -1709,16 +1709,15 @@ mod tests {
             .stderr(Stdio::null());
         let mut child = command.spawn().expect("spawn cleanup test child");
 
-        let completed = tokio::time::timeout(
-            Duration::from_secs(2),
-            cleanup_child_process_after_tree_termination(
-                Duration::from_millis(20),
-                std::future::pending(),
-                &mut child,
-            ),
+        // Keep the real child setup and reap outside the virtual cleanup window.
+        tokio::time::pause();
+        let completed = cleanup_child_process_after_tree_termination(
+            Duration::from_millis(100),
+            tokio::time::sleep(Duration::from_secs(1)),
+            &mut child,
         )
-        .await
-        .expect("tree termination must be inside the cleanup grace");
+        .await;
+        tokio::time::resume();
 
         assert!(
             !completed.completed,

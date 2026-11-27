@@ -12,9 +12,9 @@ use gwt_github::client::{
         HttpResponse, HttpTransport, ReqwestTransport,
     },
     ApiError, CommentId, CommitComparisonStatus, CreateRepositoryIssue, FetchResult, IssueClient,
-    IssueNumber, IssueState, OwnerMutationError, OwnerRepositoryClient, RepositoryActorType,
-    RepositoryAuthorAssociation, RepositoryIdentity, RepositoryIssueKind, ResolutionDeadline,
-    SpecListFilter, UpdatedAt,
+    IssueCloseReason, IssueNumber, IssueState, OwnerMutationError, OwnerRepositoryClient,
+    RepositoryActorType, RepositoryAuthorAssociation, RepositoryIdentity, RepositoryIssueKind,
+    ResolutionDeadline, SpecListFilter, UpdatedAt,
 };
 use std::{
     ffi::{OsStr, OsString},
@@ -442,24 +442,28 @@ fn red_57_set_labels_patches_labels_only() {
 #[test]
 fn red_58_set_state_closed_sends_state_field() {
     let transport = FakeTransport::new();
-    transport.enqueue(ok_body(
-        r#"{"number":5,"title":"T","body":"B","state":"closed","updated_at":"t","labels":[]}"#,
-    ));
     let client = client_with(transport);
-    let snap = client
-        .set_state(
-            IssueNumber(5),
-            IssueState::Closed,
-            Some(gwt_github::IssueCloseReason::NotPlanned),
-        )
-        .unwrap();
-
-    let reqs = client.transport().recorded();
-    let payload: serde_json::Value =
-        serde_json::from_str(reqs[0].body.as_deref().unwrap()).unwrap();
-    assert_eq!(payload["state"], "closed");
-    assert_eq!(payload["state_reason"], "not_planned");
-    assert_eq!(snap.state, IssueState::Closed);
+    for (reason, expected) in [
+        (IssueCloseReason::Completed, "completed"),
+        (IssueCloseReason::NotPlanned, "not_planned"),
+    ] {
+        client.transport().enqueue(ok_body(
+            r#"{"number":5,"title":"T","body":"B","state":"closed","updated_at":"t","labels":[]}"#,
+        ));
+        let snap = client
+            .set_state(IssueNumber(5), IssueState::Closed, Some(reason))
+            .unwrap();
+        let requests = client.transport().recorded();
+        let request = requests.last().unwrap();
+        assert_eq!(request.method, HttpMethod::Patch);
+        let payload: serde_json::Value =
+            serde_json::from_str(request.body.as_deref().unwrap()).unwrap();
+        assert_eq!(
+            payload,
+            serde_json::json!({"state": "closed", "state_reason": expected})
+        );
+        assert_eq!(snap.state, IssueState::Closed);
+    }
 
     client.transport().enqueue(ok_body(
         r#"{"number":5,"title":"T","body":"B","state":"open","updated_at":"t","labels":[]}"#,
@@ -469,10 +473,56 @@ fn red_58_set_state_closed_sends_state_field() {
         .unwrap();
     let requests = client.transport().recorded();
     let payload: serde_json::Value =
-        serde_json::from_str(requests[1].body.as_deref().unwrap()).unwrap();
-    assert_eq!(payload["state"], "open");
-    assert!(payload.get("state_reason").is_none());
+        serde_json::from_str(requests[2].body.as_deref().unwrap()).unwrap();
+    assert_eq!(payload, serde_json::json!({"state": "open"}));
     assert_eq!(reopened.state, IssueState::Open);
+}
+
+#[test]
+fn set_state_duplicate_sends_resolved_issue_id() {
+    let transport = FakeTransport::new();
+    transport.enqueue(ok_body(r#"{"number":9,"id":5488322131}"#));
+    transport.enqueue(ok_body(r#"{"number":5,"state":"closed"}"#));
+    let client = client_with(transport);
+    let snap = client
+        .set_state(
+            IssueNumber(5),
+            IssueState::Closed,
+            Some(IssueCloseReason::Duplicate(IssueNumber(9))),
+        )
+        .unwrap();
+
+    let requests = client.transport().recorded();
+    let [lookup, patch] = requests.as_slice() else {
+        panic!("expected one lookup and one PATCH, got {requests:?}");
+    };
+    assert_eq!(lookup.method, HttpMethod::Get);
+    assert!(lookup.url.ends_with("/repos/octo/gwt/issues/9"));
+    assert_eq!(patch.method, HttpMethod::Patch);
+    assert!(patch.url.ends_with("/repos/octo/gwt/issues/5"));
+    let payload: serde_json::Value = serde_json::from_str(patch.body.as_deref().unwrap()).unwrap();
+    assert_eq!(
+        payload,
+        serde_json::json!({"state": "closed", "state_reason": "duplicate", "duplicate_issue_id": 5_488_322_131_u64})
+    );
+    assert_eq!(snap.state, IssueState::Closed);
+}
+
+#[test]
+fn set_state_duplicate_refuses_unresolved_issue_id_before_patch() {
+    let transport = FakeTransport::new();
+    transport.enqueue(ok_body(r#"{"number":9}"#));
+    let client = client_with(transport);
+    assert!(client
+        .set_state(
+            IssueNumber(5),
+            IssueState::Closed,
+            Some(IssueCloseReason::Duplicate(IssueNumber(9))),
+        )
+        .is_err());
+    let requests = client.transport().recorded();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].method, HttpMethod::Get);
 }
 
 // -----------------------------------------------------------------------

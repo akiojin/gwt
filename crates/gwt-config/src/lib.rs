@@ -8,6 +8,7 @@ pub mod ai_settings;
 pub mod atomic;
 pub mod board_config;
 pub mod build_artifact_gc_config;
+pub mod env;
 pub mod error;
 pub mod github_budget_config;
 pub mod home;

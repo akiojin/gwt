@@ -38,8 +38,9 @@ sysinfo = { workspace = true }
 tempfile = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-core-foundation = "0.10"
-fsevent-sys = "5.2"
+dispatch2 = { version = "0.3", default-features = false, features = ["std"] }
+objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFArray", "CFString"] }
+objc2-core-services = { version = "0.3", default-features = false, features = ["std", "FSEvents", "dispatch2"] }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = [

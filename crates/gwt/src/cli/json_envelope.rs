@@ -967,11 +967,14 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 .transpose()?,
         }),
         "issue.label" => issue_label(params)?,
-        "issue.close" => CliCommand::Issue(IssueCommand::Close {
-            number: required_u64(params, "number")?,
-            reason: issue_close_reason(params)?,
-            comment: optional_string(params, "comment")?,
-        }),
+        "issue.close" => {
+            let number = required_u64(params, "number")?;
+            CliCommand::Issue(IssueCommand::Close {
+                number,
+                reason: issue_close_reason(params, number)?,
+                comment: optional_string(params, "comment")?,
+            })
+        }
         "issue.reopen" => CliCommand::Issue(IssueCommand::Reopen {
             number: required_u64(params, "number")?,
             comment: optional_string(params, "comment")?,
@@ -3460,18 +3463,39 @@ fn issue_monitor_priority_position(
 /// because a dropped reason closes the Issue with the wrong rationale.
 fn issue_close_reason(
     params: &Map<String, Value>,
+    number: u64,
 ) -> Result<Option<gwt_github::client::IssueCloseReason>, CliParseError> {
-    let Some(raw) = optional_string(params, "reason")? else {
+    use gwt_github::client::{IssueCloseReason, IssueNumber};
+
+    let raw = optional_string(params, "reason")?;
+    let duplicate_issue_number = optional_u64(params, "duplicate_issue_number")?;
+    if raw
+        .as_deref()
+        .is_some_and(|reason| reason.trim().eq_ignore_ascii_case("duplicate"))
+    {
+        let target = duplicate_issue_number
+            .filter(|target| *target != 0 && *target != number)
+            .ok_or(CliParseError::InvalidValue {
+                flag: "duplicate_issue_number",
+                reason: "required for reason duplicate and must identify a different issue",
+            })?;
+        return Ok(Some(IssueCloseReason::Duplicate(IssueNumber(target))));
+    }
+    if duplicate_issue_number.is_some() {
+        return Err(CliParseError::InvalidValue {
+            flag: "duplicate_issue_number",
+            reason: "only accepted with reason duplicate",
+        });
+    }
+    let Some(raw) = raw else {
         return Ok(None);
     };
-    gwt_github::client::IssueCloseReason::parse(&raw)
-        .map(Some)
-        .ok_or_else(|| {
-            CliParseError::InvalidJson(format!(
-                "reason must be one of {:?}",
-                gwt_github::client::IssueCloseReason::ACCEPTED
-            ))
-        })
+    IssueCloseReason::parse(&raw).map(Some).ok_or_else(|| {
+        CliParseError::InvalidJson(format!(
+            "reason must be one of {:?}",
+            IssueCloseReason::ACCEPTED
+        ))
+    })
 }
 
 /// Issue #4037 AC-5 / #3906 AC-3: `update_drain` is the operator bool or the
@@ -8098,11 +8122,31 @@ mod tests {
                 "{reason}"
             );
         }
-        // Duplicate closure needs a canonical issue ID; tracked in #4489.
+        let duplicate = ok(
+            "issue.close",
+            json!({"number": 7, "reason": "duplicate", "duplicate_issue_number": 9}),
+        );
         assert!(matches!(
-            err("issue.close", json!({"number": 7, "reason": "duplicate"})),
-            CliParseError::InvalidJson(_)
+            duplicate,
+            CliCommand::Issue(IssueCommand::Close {
+                reason: Some(gwt_github::client::IssueCloseReason::Duplicate(
+                    gwt_github::client::IssueNumber(9)
+                )),
+                ..
+            })
         ));
+        for params in [
+            json!({"number": 7, "reason": "duplicate"}),
+            json!({"number": 7, "reason": "duplicate", "duplicate_issue_number": 0}),
+            json!({"number": 7, "reason": "duplicate", "duplicate_issue_number": 7}),
+            json!({"number": 7, "reason": "completed", "duplicate_issue_number": 9}),
+        ] {
+            let error = err("issue.close", params);
+            assert!(
+                error.to_string().contains("duplicate_issue_number"),
+                "{error}"
+            );
+        }
         match err("issue.close", json!({"number": 7, "reason": "wontfix"})) {
             CliParseError::InvalidJson(message) => {
                 assert!(message.contains("not_planned"), "{message}")

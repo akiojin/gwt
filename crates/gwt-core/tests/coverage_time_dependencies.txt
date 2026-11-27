@@ -38,7 +38,6 @@ crates/gwt-core/src/process_console/spawn.rs|readiness_hook_survives_a_failed_sp
 crates/gwt-core/src/process_console/spawn.rs|spawn_logged_blocking_stops_finite_sleep_at_scoped_deadline|assert!(started.elapsed()<FINITE_SLEEP_TERMINATION_BOUND,,started.elapsed())|1
 crates/gwt-core/src/process_console/spawn.rs|spawn_logged_deadline_succeeds_before_expiry|letout=spawn_logged_with_deadline(&hub,ProcessKind::Git,cmd,&args,SpawnOptions::new(),std::time::Instant::now()+QUICK_PROCESS_FIXTURE_BUDGET,).await.expect()|1
 crates/gwt-core/src/process_console/spawn.rs|spawn_logged_inner|Some(Instant::now()+budget)|1
-crates/gwt-core/src/process_console/spawn.rs|stalled_tree_termination_uses_cleanup_grace|letcompleted=tokio::time::timeout(Duration::from_secs(2),cleanup_child_process_after_tree_termination(Duration::from_millis(20),std::future::pending(),&mutchild,),).await.expect()|1
 crates/gwt-core/src/process_console/spawn.rs|successful_deadline_spawn_releases_job_without_killing_detached_descendant|letoutput=spawn_logged_with_deadline(&ProcessConsoleHub::new(),ProcessKind::IndexRunner,,&args,SpawnOptions::new().capture(false,false).forward_output(false).current_dir(directory.path()),Instant::now()+crate::deadline_budget::HANG_GUARD,).await.expect()|1
 crates/gwt-core/src/process_console/spawn.rs|wait_for_pid_file_windows|letdeadline=Instant::now()+crate::deadline_budget::HANG_GUARD|1
 crates/gwt-core/src/process_console/spawn.rs|wait_for_pid_file_windows|whilestd::time::Instant::now()<deadline|1
