@@ -12363,6 +12363,7 @@ fn main() -> std::io::Result<()> {
                     restart_args: update_front_door::current_restart_args(),
                     projects: app.update_resume_projects(),
                     attempt: 1,
+                    helper_pid: None,
                 };
                 let roots = app.tabs.iter()
                     .filter(|tab| tab.kind == gwt::ProjectKind::Git)

@@ -148,7 +148,7 @@ impl UpdateCliOps for FakeUpdateCliOps {
         current_exe: &Path,
         payload: &Path,
         args_file: &Path,
-    ) -> Result<(), String> {
+    ) -> Result<u32, String> {
         assert!(update::load_update_resume_marker().is_some());
         self.apply_calls.push((
             helper_exe.to_path_buf(),
@@ -157,7 +157,7 @@ impl UpdateCliOps for FakeUpdateCliOps {
             payload.to_path_buf(),
             args_file.to_path_buf(),
         ));
-        self.spawn_apply_result.clone()
+        self.spawn_apply_result.clone().map(|()| std::process::id())
     }
 
     fn spawn_internal_run_installer(
@@ -168,7 +168,7 @@ impl UpdateCliOps for FakeUpdateCliOps {
         installer: &Path,
         kind: InstallerKind,
         args_file: &Path,
-    ) -> Result<(), String> {
+    ) -> Result<u32, String> {
         assert!(update::load_update_resume_marker().is_some());
         self.installer_calls.push((
             helper_exe.to_path_buf(),
@@ -178,7 +178,9 @@ impl UpdateCliOps for FakeUpdateCliOps {
             kind,
             args_file.to_path_buf(),
         ));
-        self.spawn_installer_result.clone()
+        self.spawn_installer_result
+            .clone()
+            .map(|()| std::process::id())
     }
 }
 
@@ -481,8 +483,14 @@ fn run_with_covers_helper_copy_and_spawn_paths() {
     }
     assert_eq!(apply.apply_calls.len(), 1);
     assert!(apply.stdout.contains("restarting"));
-    let marker = gwt_core::update::load_update_resume_marker().expect("portable apply marker");
+    let mut marker = update::load_update_resume_marker().expect("portable apply marker");
     assert_eq!(marker.to_version, "1.1.0");
+    assert_eq!(marker.helper_pid, Some(std::process::id()));
+    assert!(update::settle_cli_update_resume_marker("1.0.0", UtcTimestamp::now()).is_none());
+    assert_eq!(update::load_update_resume_marker(), Some(marker.clone()));
+    assert!(update::load_update_apply_result().is_none());
+    marker.helper_pid = None;
+    update::persist_update_resume_marker(&marker).unwrap();
     let settled = update::settle_cli_update_resume_marker("1.1.0", UtcTimestamp::now()).unwrap();
     assert_eq!(settled.result.outcome, UpdateApplyOutcome::Success);
     assert_eq!(update::load_update_apply_result(), Some(settled.result));
@@ -525,8 +533,11 @@ fn run_with_covers_helper_copy_and_spawn_paths() {
         RunOutcome::ExitSuccess
     ));
     assert_eq!(installer.installer_calls.len(), 1);
-    let marker = gwt_core::update::load_update_resume_marker().expect("installer apply marker");
+    let mut marker = update::load_update_resume_marker().expect("installer apply marker");
     assert_eq!(marker.to_version, "1.1.0");
+    assert_eq!(marker.helper_pid, Some(std::process::id()));
+    marker.helper_pid = None;
+    update::persist_update_resume_marker(&marker).unwrap();
     let settled = update::settle_cli_update_resume_marker("1.0.0", UtcTimestamp::now()).unwrap();
     assert_eq!(settled.result.outcome, UpdateApplyOutcome::Failure);
     assert_eq!(update::load_update_apply_result(), Some(settled.result));

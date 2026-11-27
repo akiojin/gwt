@@ -1673,6 +1673,7 @@ fn bootstrap_reports_a_failed_update_already_settled_by_the_cli() {
         restart_args: vec!["update".into()],
         projects: Vec::new(),
         attempt: 1,
+        helper_pid: None,
     };
     gwt_core::update::persist_update_resume_marker(&marker).unwrap();
     let cli_result = gwt_core::update::settle_cli_update_resume_marker(

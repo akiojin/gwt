@@ -52,6 +52,9 @@ enum RunOutcome {
     ExitSuccess,
 }
 
+const UPDATE_AWAITING_RESTART: &str =
+    "An update is already awaiting restart. Let it finish before applying another update.\n";
+
 /// Parse `gwtd update [--check]` arguments.
 pub fn parse_args(args: &[String]) -> UpdateRunMode {
     if args.iter().any(|a| a == "--check") {
@@ -162,7 +165,7 @@ fn run_with(ops: &mut impl UpdateCliOps, cmd: UpdateRunMode) -> RunOutcome {
                     }
                 };
             if update::load_update_resume_marker().is_some() {
-                ops.write_stderr("An update is already awaiting restart. Let it finish before applying another update.\n");
+                ops.write_stderr(UPDATE_AWAITING_RESTART);
                 return RunOutcome::Code(1);
             }
 
@@ -184,20 +187,21 @@ fn run_with(ops: &mut impl UpdateCliOps, cmd: UpdateRunMode) -> RunOutcome {
                 current_exe.clone()
             };
 
-            let marker = UpdateResumeMarker {
+            let old_pid = std::process::id();
+            let mut marker = UpdateResumeMarker {
                 from_version: current,
                 to_version: latest.clone(),
                 started_at: UtcTimestamp::now().to_rfc3339(),
                 restart_args,
                 projects: Vec::new(),
                 attempt: 1,
+                helper_pid: Some(old_pid),
             };
             if let Err(error) = update::persist_update_resume_marker(&marker) {
                 ops.write_stderr(&format!("Failed to apply update: {error}\n"));
                 return RunOutcome::Code(1);
             }
 
-            let old_pid = std::process::id();
             let result = match payload {
                 PreparedPayload::PortableBinary { path } => ops.spawn_internal_apply_update(
                     &helper_exe,
@@ -217,7 +221,13 @@ fn run_with(ops: &mut impl UpdateCliOps, cmd: UpdateRunMode) -> RunOutcome {
             };
 
             match result {
-                Ok(()) => {
+                Ok(helper_pid) => {
+                    marker.helper_pid = Some(helper_pid);
+                    // The helper refuses to apply until the parent has published its PID.
+                    if let Err(error) = update::persist_update_resume_marker(&marker) {
+                        ops.write_stderr(&format!("Failed to track update helper: {error}\n"));
+                        return RunOutcome::Code(1);
+                    }
                     ops.write_stdout(&format!("Updating to v{latest}... restarting.\n"));
                     RunOutcome::ExitSuccess
                 }
@@ -238,26 +248,26 @@ fn run_with(ops: &mut impl UpdateCliOps, cmd: UpdateRunMode) -> RunOutcome {
 /// Returns the process exit code (0 = success, non-zero = error).
 pub fn run(cmd: UpdateRunMode) -> i32 {
     let mut ops = RealUpdateCliOps::default();
-    let settlement = if ops.is_ci() {
-        None
-    } else {
-        update::settle_cli_update_resume_marker(env!("CARGO_PKG_VERSION"), UtcTimestamp::now())
-    };
-    if let Some(settlement) = settlement {
-        let result = settlement.result;
-        let message = format!("{}\n", result.notice());
-        let code = match result.outcome {
-            UpdateApplyOutcome::Success => {
-                ops.write_stdout(&message);
-                0
-            }
-            UpdateApplyOutcome::Failure => {
-                ops.write_stderr(&message);
-                1
-            }
-        };
-        if cmd == UpdateRunMode::Apply {
-            return code;
+    if cmd == UpdateRunMode::Apply && !ops.is_ci() {
+        if let Some(settlement) =
+            update::settle_cli_update_resume_marker(env!("CARGO_PKG_VERSION"), UtcTimestamp::now())
+        {
+            let result = settlement.result;
+            let message = format!("{}\n", result.notice());
+            return match result.outcome {
+                UpdateApplyOutcome::Success => {
+                    ops.write_stdout(&message);
+                    0
+                }
+                UpdateApplyOutcome::Failure => {
+                    ops.write_stderr(&message);
+                    1
+                }
+            };
+        }
+        if update::load_update_resume_marker().is_some() {
+            ops.write_stderr(UPDATE_AWAITING_RESTART);
+            return 1;
         }
     }
     match run_with(&mut ops, cmd) {

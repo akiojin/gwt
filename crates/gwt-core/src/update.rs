@@ -471,6 +471,9 @@ pub struct UpdateResumeMarker {
     /// How many restarts have tried to settle this marker (starts at 1).
     #[serde(default = "default_update_resume_attempt")]
     pub attempt: u32,
+    /// The CLI parent during handoff, then the helper until the payload is applied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub helper_pid: Option<u32>,
 }
 
 fn default_update_resume_attempt() -> u32 {
@@ -816,7 +819,14 @@ fn settle_update_resume_marker_for_startup(
     cli_startup: bool,
 ) -> Option<UpdateResumeSettlement> {
     let marker = load_update_resume_marker_in(resume_dir)?;
-    if cli_startup && marker.restart_args.first().map(String::as_str) != Some("update") {
+    if cli_startup && !is_cli_update_restart(&marker.restart_args) {
+        return None;
+    }
+    if marker.helper_pid.is_some_and(|pid| {
+        SystemProcessExecutor
+            .run(process_probe_request(pid, cfg!(windows)))
+            .map_or(true, |output| output.success)
+    }) {
         return None;
     }
     let normalize = |v: &str| v.trim().trim_start_matches('v').to_string();
@@ -1674,7 +1684,7 @@ impl UpdateManager {
         target_exe: &Path,
         new_exe: &Path,
         args_file: &Path,
-    ) -> Result<(), String> {
+    ) -> Result<u32, String> {
         self.spawn_internal_apply_update_with_executor(
             helper_exe,
             old_pid,
@@ -1682,7 +1692,8 @@ impl UpdateManager {
             new_exe,
             args_file,
             &SystemProcessExecutor,
-        )
+        )?
+        .ok_or_else(|| "Update helper spawn did not return a process ID".to_string())
     }
 
     /// SPEC-3014 FR-002: executor-injectable variant of
@@ -1695,7 +1706,7 @@ impl UpdateManager {
         new_exe: &Path,
         args_file: &Path,
         executor: &dyn ProcessExecutor,
-    ) -> Result<(), String> {
+    ) -> Result<Option<u32>, String> {
         let request = ProcessRequest::new(helper_exe)
             .arg("__internal")
             .arg("apply-update")
@@ -1710,8 +1721,8 @@ impl UpdateManager {
             .mode(ExecutionMode::Spawn);
         executor
             .run(request)
-            .map_err(|e| format!("Failed to spawn update helper: {e}"))?;
-        Ok(())
+            .map(|output| output.spawned_pid)
+            .map_err(|e| format!("Failed to spawn update helper: {e}"))
     }
 
     pub fn spawn_internal_run_installer(
@@ -1722,7 +1733,7 @@ impl UpdateManager {
         installer: &Path,
         installer_kind: InstallerKind,
         args_file: &Path,
-    ) -> Result<(), String> {
+    ) -> Result<u32, String> {
         self.spawn_internal_run_installer_with_executor(
             helper_exe,
             old_pid,
@@ -1731,7 +1742,8 @@ impl UpdateManager {
             installer_kind,
             args_file,
             &SystemProcessExecutor,
-        )
+        )?
+        .ok_or_else(|| "Installer helper spawn did not return a process ID".to_string())
     }
 
     /// SPEC-3014 FR-002: executor-injectable variant of
@@ -1746,7 +1758,7 @@ impl UpdateManager {
         installer_kind: InstallerKind,
         args_file: &Path,
         executor: &dyn ProcessExecutor,
-    ) -> Result<(), String> {
+    ) -> Result<Option<u32>, String> {
         let request = ProcessRequest::new(helper_exe)
             .arg("__internal")
             .arg("run-installer")
@@ -1767,8 +1779,8 @@ impl UpdateManager {
             .mode(ExecutionMode::Spawn);
         executor
             .run(request)
-            .map_err(|e| format!("Failed to spawn installer helper: {e}"))?;
-        Ok(())
+            .map(|output| output.spawned_pid)
+            .map_err(|e| format!("Failed to spawn installer helper: {e}"))
     }
 
     pub fn make_helper_copy(&self, current_exe: &Path, latest: &str) -> Result<PathBuf, String> {
@@ -2074,7 +2086,9 @@ pub fn internal_apply_update_with_executor(
 ) -> Result<(), String> {
     wait_for_pid_exit(old_pid, Duration::from_secs(300), executor)?;
     let args = UpdateManager::read_restart_args_file(args_file)?;
+    let cli_marker = owned_cli_update_marker(&args)?;
     replace_bundle_executables(target_exe, source_exe)?;
+    finish_cli_update_apply(cli_marker)?;
 
     executor
         .run(
@@ -2118,6 +2132,7 @@ pub fn internal_run_installer_with_executor(
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     {
         let restart = UpdateManager::read_restart_args_file_config(args_file)?;
+        let cli_marker = owned_cli_update_marker(&restart.args)?;
         let automatic_refusal = prepared_payload_automatic_apply_refusal(
             &PreparedPayload::Installer {
                 path: installer.to_path_buf(),
@@ -2182,6 +2197,7 @@ pub fn internal_run_installer_with_executor(
         };
 
         let restart_exe = fs::canonicalize(&restart_exe).unwrap_or(restart_exe);
+        finish_cli_update_apply(cli_marker)?;
         executor
             .run(
                 ProcessRequest::new(&restart_exe)
@@ -2197,6 +2213,38 @@ pub fn internal_run_installer_with_executor(
         let _ = (target_exe, installer, installer_kind, args_file);
         Err("installer updates are not supported on this platform".to_string())
     }
+}
+
+fn is_cli_update_restart(args: &[String]) -> bool {
+    args.first().map(String::as_str) == Some("update")
+}
+
+fn owned_cli_update_marker(args: &[String]) -> Result<Option<UpdateResumeMarker>, String> {
+    if !is_cli_update_restart(args) {
+        return Ok(None);
+    }
+    // The helper waits for its parent to exit before reading the marker.
+    // If the parent could not save our PID, stop before touching the payload.
+    load_update_resume_marker()
+        .filter(|marker| {
+            is_cli_update_restart(&marker.restart_args)
+                && marker.helper_pid == Some(std::process::id())
+        })
+        .map(Some)
+        .ok_or_else(|| "The CLI update helper does not own the resume marker".to_string())
+}
+
+fn finish_cli_update_apply(marker: Option<UpdateResumeMarker>) -> Result<(), String> {
+    let Some(mut marker) = marker else {
+        return Ok(());
+    };
+    let _lock = wait_for_pending_update_manifest_lock(&pending_update_dir())?;
+    if load_update_resume_marker().as_ref() != Some(&marker) {
+        return Err("The CLI update resume marker changed while applying the payload".to_string());
+    }
+    // The restarted binary can now settle even if this helper is still exiting.
+    marker.helper_pid = None;
+    persist_update_resume_marker(&marker)
 }
 
 /// File name for the self-copy spawned to apply an update (#3018).
@@ -4518,8 +4566,15 @@ mod tests {
     #[test]
     fn internal_apply_update_with_executor_replaces_binaries_and_restarts() {
         let temp = tempfile::tempdir().unwrap();
+        let _home = crate::test_support::ScopedGwtHome::set(temp.path());
+        let marker = UpdateResumeMarker {
+            restart_args: vec!["update".to_string()],
+            helper_pid: Some(std::process::id()),
+            ..sample_resume_marker()
+        };
+        persist_update_resume_marker(&marker).unwrap();
         let target_dir = temp.path().join("install");
-        let source_dir = temp.path().join("staged");
+        let source_dir = crate::paths::gwt_updates_dir().join(format!("v{}", marker.to_version));
         fs::create_dir_all(&target_dir).unwrap();
         fs::create_dir_all(&source_dir).unwrap();
         let target_exe = target_dir.join("gwt");
@@ -4535,12 +4590,17 @@ mod tests {
         write_json_atomic(
             &args_file,
             &RestartArgsFile {
-                args: vec!["--restored".to_string()],
+                args: marker.restart_args.clone(),
                 cwd: String::new(),
                 allow_elevation: true,
             },
         )
         .unwrap();
+
+        // A concurrent GUI launch must not delete the CLI helper's payload.
+        assert!(settle_update_resume_marker(&marker.from_version, UtcTimestamp::now()).is_none());
+        assert_eq!(load_update_resume_marker(), Some(marker.clone()));
+        assert!(source_exe.exists());
 
         let mock = MockProcessExecutor::new();
         // PID probe: report "already exited" for either platform's probe.
@@ -4554,10 +4614,11 @@ mod tests {
 
         assert_eq!(fs::read(&target_exe).unwrap(), b"new-gwt");
         assert_eq!(fs::read(&target_daemon).unwrap(), b"new-gwtd");
+        assert_eq!(load_update_resume_marker().unwrap().helper_pid, None);
         let restart = mock.requests().into_iter().last().expect("restart spawn");
         assert_eq!(restart.program, target_exe.as_os_str());
         assert_eq!(restart.mode, ExecutionMode::Spawn);
-        assert_eq!(restart.args_lossy(), vec!["--restored"]);
+        assert_eq!(restart.args_lossy(), vec!["update"]);
     }
 
     #[test]
@@ -6304,6 +6365,7 @@ mod tests {
                 update_drain: true,
             }],
             attempt: 1,
+            helper_pid: None,
         }
     }
 

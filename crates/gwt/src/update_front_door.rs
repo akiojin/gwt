@@ -427,6 +427,7 @@ impl UpdateApplyOps for RealUpdateApplyOps {
     ) -> Result<(), String> {
         self.mgr
             .spawn_internal_apply_update(helper_exe, old_pid, current_exe, payload, args_file)
+            .map(|_| ())
     }
 
     fn spawn_internal_run_installer(
@@ -438,14 +439,16 @@ impl UpdateApplyOps for RealUpdateApplyOps {
         kind: gwt_core::update::InstallerKind,
         args_file: &Path,
     ) -> Result<(), String> {
-        self.mgr.spawn_internal_run_installer(
-            helper_exe,
-            old_pid,
-            current_exe,
-            installer,
-            kind,
-            args_file,
-        )
+        self.mgr
+            .spawn_internal_run_installer(
+                helper_exe,
+                old_pid,
+                current_exe,
+                installer,
+                kind,
+                args_file,
+            )
+            .map(|_| ())
     }
 }
 
@@ -826,6 +829,7 @@ fn apply_pending_manifest_and_exit(
         restart_args: current_restart_args(),
         projects: Vec::new(),
         attempt: 1,
+        helper_pid: None,
     };
     stage_graceful_update_apply(manifest, &marker, true, || {
         retirement.retire(|| {}, || false)
@@ -1376,6 +1380,7 @@ mod poll_state_tests {
                 update_drain: false,
             }],
             attempt: 1,
+            helper_pid: None,
         }
     }
 
