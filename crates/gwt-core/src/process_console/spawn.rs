@@ -2326,7 +2326,7 @@ mod tests {
             "sh",
             &args,
             SpawnOptions::new("test expired deadline"),
-            std::time::Instant::now() - Duration::from_millis(1),
+            Instant::now(),
         )
         .await
         .expect_err("expired deadline must fail before spawn");
