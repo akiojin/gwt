@@ -1496,7 +1496,6 @@ dependencies = [
 name = "gwt-git"
 version = "9.178.0"
 dependencies = [
- "dirs 7.0.0",
  "gwt-core",
  "libc",
  "notify",
