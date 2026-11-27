@@ -18,6 +18,7 @@ export const UPDATE_APPLY_FAILURE_STAGES = Object.freeze([
   "Replace staged update",
   "Download asset",
   "Persist pending",
+  "Cancel download",
   "Apply update",
   "Restart now",
   "Apply after agents finish",
@@ -71,12 +72,18 @@ export function createUpdateCtaController({
   const modalId = "update-modal";
   let latestVersion = null;
   let pendingVersion = null;
+  let cancelledDownloadVersion = null;
+  let waitingForDownloadCancel = false;
   let pendingReadyReason = null;
   let status = "idle";
   let autoApplyTimer;
   const availabilityModel = createUiStateStore(null);
   availabilityModel.subscribe(value => value, available => {
     if (available) renderUpdateState(available);
+  });
+  const downloadStatusModel = createUiStateStore(null);
+  downloadStatusModel.subscribe(value => value, download => {
+    if (download) renderUpdateDownloadStatus(download);
   });
   const autoApplyModel = createUiStateStore(null);
   autoApplyModel.subscribe(value => value, autoApply => {
@@ -420,6 +427,7 @@ export function createUpdateCtaController({
   function handleIssueMonitorStatus(monitorStatus) {
     const drain = monitorStatus?.update_drain;
     if (drain && drain.version) {
+      if (drain.version === cancelledDownloadVersion) return;
       if (status === "applying") {
         // Issue #4076 AC-2 (2026-09-07 01:52Z): the drain is raised the
         // moment the download is persisted, while the ready modal is still
@@ -502,12 +510,12 @@ export function createUpdateCtaController({
   }
 
   function handleUpdateProgress(payload) {
-    if (!payload) return;
+    if (!payload || (payload.version && payload.version === cancelledDownloadVersion)) return;
     progressModel.update(() => payload);
   }
 
   function handleUpdateReady(payload) {
-    if (!payload || !payload.version) return;
+    if (!payload?.version || payload.version === cancelledDownloadVersion) return;
     stagedModel.update(() => ({ version: payload.version, phase: "downloaded" }));
   }
 
@@ -527,7 +535,7 @@ export function createUpdateCtaController({
 
   // Only the backend can withdraw the grace window or start the restart.
   function handleUpdateAutoApply(payload) {
-    if (!payload?.version) return;
+    if (!payload?.version || payload.version === cancelledDownloadVersion) return;
     autoApplyModel.update(() => ({
       version: payload.version,
       phase: payload.phase,
@@ -609,7 +617,7 @@ export function createUpdateCtaController({
   }
 
   function handleUpdateApplyPendingPersisted(payload) {
-    if (!payload || !payload.version) return;
+    if (!payload?.version || payload.version === cancelledDownloadVersion) return;
     stagedModel.update(() => ({ version: payload.version, phase: "persisted" }));
   }
 
@@ -977,12 +985,43 @@ export function createUpdateCtaController({
     }
   }
 
-  function onCancelDownload() {
-    send({ kind: "cancel_update_download" });
+  function clearCancelledDownload(version) {
+    cancelledDownloadVersion = version;
+    pendingVersion = null;
+    pendingReadyReason = null;
+    clearTimeout(autoApplyTimer);
+    stagedModel.update(() => null);
+    autoApplyModel.update(() => null);
     progressModel.update(() => null);
     closeModal();
-    if (latestVersion) {
-      showAvailable(latestVersion);
+    showAvailable(version);
+  }
+
+  function onCancelDownload() {
+    const version = latestVersion;
+    if (!version) return;
+    waitingForDownloadCancel = true;
+    clearCancelledDownload(version);
+    send({ kind: "cancel_update_download", version });
+  }
+
+  function handleUpdateDownloadStatus({ version, cancelled }) {
+    if (!version) return;
+    downloadStatusModel.update(() => ({ version, cancelled }));
+  }
+
+  function renderUpdateDownloadStatus({ version, cancelled }) {
+    if (!cancelled) {
+      if (version === cancelledDownloadVersion && !waitingForDownloadCancel) {
+        cancelledDownloadVersion = null;
+      }
+      return;
+    }
+    if (version === cancelledDownloadVersion) {
+      waitingForDownloadCancel = false;
+    } else if (version === latestVersion || version === pendingVersion) {
+      waitingForDownloadCancel = false;
+      clearCancelledDownload(version);
     }
   }
 
@@ -1160,6 +1199,7 @@ export function createUpdateCtaController({
     handleUpdateState,
     handleUpdateProgress,
     handleUpdateReady,
+    handleUpdateDownloadStatus,
     handleUpdateApplyError,
     handleUpdateApplyPendingPersisted,
     handleIssueMonitorStatus,

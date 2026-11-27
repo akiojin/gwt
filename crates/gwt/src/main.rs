@@ -354,6 +354,14 @@ fn admit_update_download(
         return (false, Vec::new());
     }
     if app.update_download_in_flight.is_some() {
+        if app
+            .update_download_cancel
+            .as_ref()
+            .is_some_and(|cancel| *cancel.borrow())
+        {
+            app.update_download_retry = Some((state.clone(), client_id.to_string()));
+            return (false, Vec::new());
+        }
         let same_version = matches!(
             (app.pending_update.as_ref(), state),
             (Some(gwt_core::update::UpdateState::Available { latest: active, .. }),
@@ -382,10 +390,90 @@ fn admit_update_download(
     )
 }
 
+fn start_update_download(
+    app: &mut AppRuntime,
+    state: gwt_core::update::UpdateState,
+    client_id: ClientId,
+) -> Vec<OutboundEvent> {
+    let (admitted, mut events) = admit_update_download(app, &state, &client_id);
+    if !admitted {
+        return events;
+    }
+    let (cancel, cancelled) = tokio::sync::watch::channel(false);
+    app.update_download_cancel = Some(cancel);
+    let apply_proxy = app.proxy.clone();
+    let version_for_progress = match &state {
+        gwt_core::update::UpdateState::Available { latest, .. } => Some(latest.clone()),
+        _ => None,
+    };
+    if let Some(version) = version_for_progress.clone() {
+        events.push(OutboundEvent::broadcast(
+            BackendEvent::UpdateDownloadStatus {
+                version,
+                cancelled: false,
+            },
+        ));
+    }
+    let asset_for_progress = match &state {
+        gwt_core::update::UpdateState::Available {
+            asset_url: Some(url),
+            ..
+        } => gwt_core::update::asset_name_from_url(url),
+        _ => None,
+    };
+    std::thread::spawn(move || {
+        // SPEC-2041 Phase 19 FR-065: log stage transitions so the
+        // failure modal's [Open log] action has something to show
+        // even when the silent path of the apply succeeds.
+        let log_version = version_for_progress.clone().unwrap_or_default();
+        let log_asset = asset_for_progress.clone().unwrap_or_default();
+        gwt_core::update::log_update_event(
+            "download_start",
+            &[("version", &log_version), ("asset", &log_asset)],
+        );
+        // SPEC-2041 Phase 19 FR-054: stream chunk-level progress
+        // back to the modal. Throttle to ~200 ms or the
+        // completion tick (`downloaded >= total`) so the
+        // WebSocket does not see one event per chunk.
+        let throttle_interval = std::time::Duration::from_millis(200);
+        let progress_proxy = apply_proxy.clone();
+        let version_for_closure = version_for_progress.clone();
+        let asset_for_closure = asset_for_progress.clone();
+        let mut last_emit = std::time::Instant::now();
+        let mut emitted_first = false;
+        let mut progress = move |downloaded: u64, total: Option<u64>| {
+            let is_complete = total.map(|t| downloaded >= t).unwrap_or(false);
+            let now = std::time::Instant::now();
+            let should_emit =
+                !emitted_first || is_complete || now.duration_since(last_emit) >= throttle_interval;
+            if should_emit {
+                emitted_first = true;
+                last_emit = now;
+                let _ = progress_proxy.send_event(UserEvent::UpdateDownloadProgress(
+                    OutboundEvent::broadcast(BackendEvent::UpdateProgress {
+                        downloaded,
+                        total,
+                        asset: asset_for_closure.clone(),
+                        version: version_for_closure.clone(),
+                    }),
+                ));
+            }
+        };
+        let result = update_front_door::prepare_update_payload_cancellable(
+            state,
+            &mut progress,
+            Some(cancelled),
+        );
+        let _ = apply_proxy.send_event(UserEvent::UpdateDownloadFinished(result));
+    });
+    events
+}
+
 fn finish_update_download(
     app: &mut AppRuntime,
     failure: Option<OutboundEvent>,
 ) -> Vec<OutboundEvent> {
+    app.update_download_cancel = None;
     app.update_download_in_flight = None;
     let deferred = app.deferred_update_discovery.take();
     let mut events: Vec<_> = failure.into_iter().collect();
@@ -393,6 +481,74 @@ fn finish_update_download(
     // outcome instead of losing the newer release until the next launch.
     if let Some(state) = deferred {
         events.extend(record_update_available(app, state));
+    }
+    events
+}
+
+fn publish_update_download(
+    app: &mut AppRuntime,
+    result: Result<update_front_door::PreparedUpdate, String>,
+) -> Vec<OutboundEvent> {
+    let mut events = Vec::new();
+    if app
+        .update_download_cancel
+        .as_ref()
+        .is_some_and(|cancel| !*cancel.borrow())
+    {
+        let failure = match result {
+            Ok(prepared) => {
+                let asset_path = prepared.payload_path().to_string_lossy().into_owned();
+                let manifest = gwt_core::update::PendingUpdateManifest {
+                    version: prepared.latest,
+                    asset_url: prepared.asset_url,
+                    payload: prepared.payload,
+                    downloaded_at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
+                    origin: if app.update_download_in_flight.as_deref()
+                        == Some(app_runtime::UPDATE_AUTO_APPLY_CLIENT_ID)
+                    {
+                        gwt_core::update::PendingUpdateOrigin::Automatic
+                    } else {
+                        gwt_core::update::PendingUpdateOrigin::ManualLater
+                    },
+                    auto_apply_deferred: false,
+                };
+                gwt_core::update::log_update_event(
+                    "download_complete",
+                    &[("version", &manifest.version)],
+                );
+                match gwt_core::update::persist_pending_update_manifest(&manifest) {
+                    Ok(()) => {
+                        gwt_core::update::log_update_event(
+                            "persist_pending",
+                            &[("version", &manifest.version)],
+                        );
+                        events.push(OutboundEvent::broadcast(BackendEvent::UpdateReady {
+                            version: manifest.version.clone(),
+                            asset_path,
+                        }));
+                        events.extend(app.update_staged_events(&manifest.version));
+                        app.last_download_manifest = Some(manifest);
+                        None
+                    }
+                    Err(error) => Some(("Persist pending", "persist_pending", error)),
+                }
+            }
+            Err(error) => Some(("Download asset", "download_asset", error)),
+        };
+        if let Some((label, stage, error)) = failure {
+            gwt_core::update::log_update_event("fail", &[("stage", stage), ("reason", &error)]);
+            events.push(update_download_failure(
+                label,
+                error,
+                gwt_core::update::update_log_path()
+                    .to_string_lossy()
+                    .into_owned(),
+            ));
+        }
+    }
+    events.extend(finish_update_download(app, None));
+    if let Some((state, client_id)) = app.update_download_retry.take() {
+        events.extend(start_update_download(app, state, client_id));
     }
     events
 }
@@ -2047,7 +2203,7 @@ fn hub_frontend_event_allowed(event: &FrontendEvent) -> bool {
             | FrontendEvent::ApplyUpdate
             | FrontendEvent::CheckForUpdates
             | FrontendEvent::ApplyUpdateStart
-            | FrontendEvent::CancelUpdateDownload
+            | FrontendEvent::CancelUpdateDownload { .. }
             | FrontendEvent::ApplyUpdateLater
             | FrontendEvent::ApplyUpdateRestartNow
             | FrontendEvent::CancelUpdateAutoApply
@@ -2553,15 +2709,23 @@ enum UserEvent {
         client_id: ClientId,
     },
     /// SPEC-2041 Phase 19 (FR-052/056): begin downloading the prepared payload
-    /// without exiting the parent process. On completion, the worker thread
-    /// emits an `UpdatePrepared` event so the dispatcher can broadcast
-    /// `UpdateReady` to all clients.
+    /// without exiting the parent process. The dispatcher publishes the
+    /// completed download only while its request is still active.
     ApplyUpdateStart {
         state: gwt_core::update::UpdateState,
         client_id: ClientId,
     },
-    /// Releases the shared download guard on success or failure.
-    UpdateDownloadFinished(Option<OutboundEvent>),
+    UpdateVersionResolved {
+        client_id: ClientId,
+        version: String,
+        request: Arc<()>,
+        result: Result<gwt_core::update::UpdateState, String>,
+    },
+    CancelUpdateDownload {
+        version: Option<String>,
+    },
+    UpdateDownloadProgress(OutboundEvent),
+    UpdateDownloadFinished(Result<update_front_door::PreparedUpdate, String>),
     /// SPEC-2041 Phase 19 (FR-058): user pressed Restart now. Resolve the
     /// prepared payload (persisted manifest, or download + persist) on a
     /// worker thread, then route through `ApplyUpdateGraceful`.
@@ -2580,13 +2744,6 @@ enum UserEvent {
         version: String,
         client_id: ClientId,
         result: Result<String, String>,
-    },
-    /// SPEC-2041 Phase 19 (FR-056): worker thread completed `prepare_update`
-    /// and the prepared payload is ready on disk. Dispatcher broadcasts
-    /// `UpdateReady` to subscribed clients.
-    UpdatePrepared {
-        version: String,
-        asset_path: std::path::PathBuf,
     },
     /// Issue #3906 AC-2 / #4076 AC-2: the update drain tick found the host
     /// quiescent for two ticks and the cancel grace elapsed. The persisted
@@ -5270,6 +5427,10 @@ mod tests {
             pending_update: None,
             update_check_in_flight: false,
             update_download_in_flight: None,
+            update_download_cancel: None,
+            update_download_retry: None,
+            pending_update_version_resolutions: Default::default(),
+            last_download_manifest: None,
             deferred_update_discovery: None,
             attachment_uploads: AttachmentUploadStore::new(temp_root.join("attachment-uploads")),
             persist_dispatcher,
@@ -5695,6 +5856,83 @@ mod tests {
             super::admit_prepared_update(&mut runtime, &manifest, &mut admission, "manual").0,
             "an explicit manual retry remains available"
         );
+    }
+
+    #[test]
+    fn cancel_update_prevents_bootstrap_before_and_after_download_completion() {
+        let temp = tempdir().unwrap();
+        let _gwt_home = ScopedGwtHome::set(temp.path());
+        let (mut runtime, _) = sample_runtime_with_events(temp.path(), vec![], None);
+        let state = gwt_core::update::UpdateState::Available {
+            current: "9.0.0".into(),
+            latest: "99.0.0".into(),
+            release_url: "https://example.invalid/release".into(),
+            asset_url: Some("https://example.invalid/update.bin".into()),
+            checked_at: gwt_core::timestamp::UtcTimestamp::now(),
+        };
+        let payload = temp.path().join("update.bin");
+        fs::write(&payload, b"update").unwrap();
+        for cancel_before_completion in [true, false] {
+            assert!(super::admit_update_download(&mut runtime, &state, "manual").0);
+            let (cancel, _cancelled) = tokio::sync::watch::channel(false);
+            runtime.update_download_cancel = Some(cancel);
+            if cancel_before_completion {
+                runtime.cancel_update_download(None);
+            }
+            let events = super::publish_update_download(
+                &mut runtime,
+                Ok(crate::update_front_door::PreparedUpdate {
+                    latest: "99.0.0".into(),
+                    asset_url: "https://example.invalid/update.bin".into(),
+                    payload: gwt_core::update::PreparedPayload::PortableBinary {
+                        path: payload.clone(),
+                    },
+                }),
+            );
+            let ready = events
+                .iter()
+                .any(|event| matches!(event.event, BackendEvent::UpdateReady { .. }));
+            assert_eq!(ready, !cancel_before_completion);
+            if !cancel_before_completion {
+                assert!(gwt_core::update::load_pending_update_manifest().is_some());
+                runtime.cancel_update_download(None);
+            }
+            assert!(gwt_core::update::load_pending_update_manifest().is_none());
+            assert!(!crate::update_front_door::try_apply_pending_update_at_bootstrap(temp.path()));
+        }
+    }
+
+    #[test]
+    fn cancel_update_discards_late_release_selection_resolution() {
+        let temp = tempdir().unwrap();
+        let _gwt_home = ScopedGwtHome::set(temp.path());
+        let (mut runtime, _) = sample_runtime_with_events(temp.path(), vec![], None);
+        let key = ("manual".to_string(), "99.0.0".to_string());
+        let cancelled = Arc::new(());
+        runtime
+            .pending_update_version_resolutions
+            .insert(key.clone(), cancelled.clone());
+        runtime.cancel_update_download(Some(key.1.clone()));
+
+        // A new request for the same version can arrive before the old
+        // lookup returns. The old result may neither publish nor consume it.
+        let retry = Arc::new(());
+        runtime
+            .pending_update_version_resolutions
+            .insert(key.clone(), retry.clone());
+        assert!(runtime
+            .finish_update_version_resolution(
+                key.0.clone(),
+                key.1.clone(),
+                &cancelled,
+                Err("late result".into()),
+            )
+            .is_empty());
+        assert!(Arc::ptr_eq(
+            &runtime.pending_update_version_resolutions[&key],
+            &retry
+        ));
+        assert!(runtime.update_download_in_flight.is_none());
     }
 
     #[test]
@@ -12114,155 +12352,21 @@ fn main() -> std::io::Result<()> {
                 );
             }
             Event::UserEvent(UserEvent::ApplyUpdateStart { state, client_id }) => {
-                let (admitted, events) = admit_update_download(app, &state, &client_id);
-                clients.dispatch(events);
-                if !admitted {
-                    return;
+                clients.dispatch(start_update_download(app, state, client_id));
+            }
+            Event::UserEvent(UserEvent::UpdateVersionResolved { client_id, version, request, result }) => {
+                clients.dispatch(app.finish_update_version_resolution(client_id, version, &request, result));
+            }
+            Event::UserEvent(UserEvent::CancelUpdateDownload { version }) => {
+                clients.dispatch(app.cancel_update_download(version));
+            }
+            Event::UserEvent(UserEvent::UpdateDownloadProgress(progress)) => {
+                if app.update_download_cancel.as_ref().is_some_and(|cancel| !*cancel.borrow()) {
+                    clients.dispatch(vec![progress]);
                 }
-                let apply_proxy = proxy.clone();
-                let version_for_progress = match &state {
-                    gwt_core::update::UpdateState::Available { latest, .. } => Some(latest.clone()),
-                    _ => None,
-                };
-                let asset_for_progress = match &state {
-                    gwt_core::update::UpdateState::Available {
-                        asset_url: Some(url),
-                        ..
-                    } => gwt_core::update::asset_name_from_url(url),
-                    _ => None,
-                };
-                std::thread::spawn(move || {
-                    // SPEC-2041 Phase 19 FR-065: log stage transitions so the
-                    // failure modal's [Open log] action has something to show
-                    // even when the silent path of the apply succeeds.
-                    let log_version = version_for_progress.clone().unwrap_or_default();
-                    let log_asset = asset_for_progress.clone().unwrap_or_default();
-                    gwt_core::update::log_update_event(
-                        "download_start",
-                        &[("version", &log_version), ("asset", &log_asset)],
-                    );
-                    // SPEC-2041 Phase 19 FR-054: stream chunk-level progress
-                    // back to the modal. Throttle to ~200 ms or the
-                    // completion tick (`downloaded >= total`) so the
-                    // WebSocket does not see one event per 64 KiB.
-                    let throttle_interval = std::time::Duration::from_millis(200);
-                    let progress_proxy = apply_proxy.clone();
-                    let version_for_closure = version_for_progress.clone();
-                    let asset_for_closure = asset_for_progress.clone();
-                    let mut last_emit = std::time::Instant::now();
-                    let mut emitted_first = false;
-                    let mut progress = move |downloaded: u64, total: Option<u64>| {
-                        let is_complete = total.map(|t| downloaded >= t).unwrap_or(false);
-                        let now = std::time::Instant::now();
-                        let should_emit = !emitted_first
-                            || is_complete
-                            || now.duration_since(last_emit) >= throttle_interval;
-                        if should_emit {
-                            emitted_first = true;
-                            last_emit = now;
-                            let _ = progress_proxy.send_event(UserEvent::Dispatch(vec![
-                                OutboundEvent::broadcast(BackendEvent::UpdateProgress {
-                                    downloaded,
-                                    total,
-                                    asset: asset_for_closure.clone(),
-                                    version: version_for_closure.clone(),
-                                }),
-                            ]));
-                        }
-                    };
-                    let log_path_string = gwt_core::update::update_log_path()
-                        .to_string_lossy()
-                        .to_string();
-                    match update_front_door::prepare_update_payload_with_progress(
-                        state,
-                        &mut progress,
-                    ) {
-                        Ok(prepared) => {
-                            gwt_core::update::log_update_event(
-                                "download_complete",
-                                &[("version", &prepared.latest)],
-                            );
-                            // SPEC-2041 Phase 19 (T-129): persist manifest now
-                            // so that (a) Later doesn't have to round-trip the
-                            // payload back through workspace state, and
-                            // (b) if gwt is killed before user picks
-                            // Later/Restart now, the next launch can still
-                            // apply transparently (T-133).
-                            let manifest = gwt_core::update::PendingUpdateManifest {
-                                version: prepared.latest.clone(),
-                                asset_url: prepared.asset_url.clone(),
-                                payload: prepared.payload.clone(),
-                                downloaded_at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
-                                origin: if client_id == app_runtime::UPDATE_AUTO_APPLY_CLIENT_ID {
-                                    gwt_core::update::PendingUpdateOrigin::Automatic
-                                } else {
-                                    gwt_core::update::PendingUpdateOrigin::ManualLater
-                                },
-                auto_apply_deferred: false,
-                            };
-                            if let Err(message) =
-                                gwt_core::update::persist_pending_update_manifest(&manifest)
-                            {
-                                gwt_core::update::log_update_event(
-                                    "fail",
-                                    &[("stage", "persist_pending"), ("reason", &message)],
-                                );
-                                let _ = apply_proxy.send_event(UserEvent::UpdateDownloadFinished(Some(
-                                    update_download_failure(
-                                        "Persist pending",
-                                        message,
-                                        log_path_string.clone(),
-                                    ),
-                                )));
-                                return;
-                            }
-                            gwt_core::update::log_update_event(
-                                "persist_pending",
-                                &[("version", &prepared.latest)],
-                            );
-
-                            let asset_path = prepared.payload_path();
-                            let version = prepared.latest;
-                            record_update_dispatch_result(
-                                apply_proxy.send_event(UserEvent::UpdatePrepared { version, asset_path }),
-                                "dispatch_update_prepared",
-                            );
-                        }
-                        Err(message) => {
-                            gwt_core::update::log_update_event(
-                                "fail",
-                                &[("stage", "download_asset"), ("reason", &message)],
-                            );
-                            let _ = apply_proxy.send_event(UserEvent::UpdateDownloadFinished(Some(
-                                update_download_failure(
-                                    "Download asset",
-                                    message,
-                                    log_path_string,
-                                ),
-                            )));
-                            return;
-                        }
-                    }
-                    let _ = apply_proxy.send_event(UserEvent::UpdateDownloadFinished(None));
-                });
             }
-            Event::UserEvent(UserEvent::UpdateDownloadFinished(failure))
-                if update_apply_admission.accepts_discovery() =>
-            {
-                clients.dispatch(finish_update_download(app, failure));
-            }
-            Event::UserEvent(UserEvent::UpdatePrepared {
-                version,
-                asset_path,
-            }) => {
-                // Issue #3906 AC-3: the manifest is persisted, so the update
-                // is staged; an unattended monitor now drains new launches.
-                let mut events = vec![OutboundEvent::broadcast(BackendEvent::UpdateReady {
-                    version: version.clone(),
-                    asset_path: asset_path.to_string_lossy().to_string(),
-                })];
-                events.extend(app.update_staged_events(&version));
-                clients.dispatch(events);
+            Event::UserEvent(UserEvent::UpdateDownloadFinished(result)) => {
+                clients.dispatch(publish_update_download(app, result));
             }
             Event::UserEvent(UserEvent::ApplyUpdateDrained { version, automatic }) => {
                 if !update_apply_admission.begin_resolution() {
