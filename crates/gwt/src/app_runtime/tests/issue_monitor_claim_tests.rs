@@ -4914,6 +4914,49 @@ fn issue_5343_reconnect_restores_staged_cta_and_elevation_notice() {
 }
 
 #[test]
+fn issue_3807_reconnect_hides_staged_cta_when_installed_bundle_is_already_newer() {
+    let temp = tempdir().unwrap();
+    let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+    let payload = temp.path().join("update.pkg");
+    fs::write(&payload, "prepared installer").unwrap();
+    gwt_core::update::persist_pending_update_manifest(&gwt_core::update::PendingUpdateManifest {
+        version: "999.0.0".into(),
+        asset_url: "https://example.invalid/update.pkg".into(),
+        payload: gwt_core::update::PreparedPayload::Installer {
+            path: payload,
+            kind: gwt_core::update::InstallerKind::MacPkg,
+        },
+        downloaded_at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
+        origin: gwt_core::update::PendingUpdateOrigin::ManualLater,
+        auto_apply_deferred: false,
+    })
+    .unwrap();
+    // The running process is older, but /Applications already holds v999.0.0.
+    let contents = temp.path().join("GWT.app").join("Contents");
+    fs::create_dir_all(contents.join("MacOS")).unwrap();
+    fs::write(
+        contents.join("Info.plist"),
+        "<plist><dict><key>CFBundleShortVersionString</key><string>999.0.0</string></dict></plist>",
+    )
+    .unwrap();
+    let installed_exe = contents.join("MacOS").join("gwt");
+    let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
+
+    let events = runtime.staged_update_sync_events_for_exe("browser", Some(&installed_exe));
+    assert!(
+        events.is_empty(),
+        "an already-installed staged release must not restore the CTA: {events:?}"
+    );
+
+    let not_installed = temp.path().join("bin").join("gwt");
+    let events = runtime.staged_update_sync_events_for_exe("browser", Some(&not_installed));
+    assert!(events.iter().any(|event| matches!(
+        event.event,
+        BackendEvent::UpdateApplyPendingPersisted { .. }
+    )));
+}
+
+#[test]
 fn issue_5343_unknown_msi_scope_reconnect_names_reason_and_preserves_staged_payload() {
     let temp = tempdir().unwrap();
     let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
