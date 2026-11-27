@@ -1034,7 +1034,7 @@ pub struct UpdateManager {
     api_base_url: String,
     cache_path: PathBuf,
     updates_dir: PathBuf,
-    client: Client,
+    client: reqwest::Client,
     release_client: Client,
 }
 
@@ -1179,12 +1179,12 @@ impl UpdateManager {
             .timeout(REQUEST_TIMEOUT)
             .build()
             .expect("valid release HTTP client configuration");
-        let client = Client::builder()
+        let client = reqwest::Client::builder()
             .default_headers(headers)
             .connect_timeout(CONNECT_TIMEOUT)
             .timeout(REQUEST_TIMEOUT)
             .build()
-            .unwrap_or_else(|_| Client::new());
+            .unwrap_or_else(|_| reqwest::Client::new());
 
         // SPEC-2041 Phase 19 (T-137 enabler): allow Gate 2 mock smokes to
         // redirect the update API to a local fixture by setting
@@ -1353,6 +1353,16 @@ impl UpdateManager {
         asset_url: &str,
         progress: &mut dyn FnMut(u64, Option<u64>),
     ) -> Result<PreparedPayload, String> {
+        self.prepare_update_cancellable(latest, asset_url, progress, None)
+    }
+
+    pub fn prepare_update_cancellable(
+        &self,
+        latest: &str,
+        asset_url: &str,
+        progress: &mut dyn FnMut(u64, Option<u64>),
+        cancelled: Option<tokio::sync::watch::Receiver<bool>>,
+    ) -> Result<PreparedPayload, String> {
         let release = self.fetch_release_by_tag(latest)?;
         let asset = release
             .assets
@@ -1367,7 +1377,7 @@ impl UpdateManager {
         let asset_name = asset_name_from_url(asset_url).unwrap_or_else(|| "gwt-update".to_string());
         let dest = update_dir.join(&asset_name);
 
-        self.download_asset_with_progress(asset, &dest, progress)?;
+        self.download_asset_with_progress(asset, &dest, progress, cancelled)?;
 
         let dest_str = dest.to_string_lossy().to_string();
         if dest_str.ends_with(".tar.gz") || dest_str.ends_with(".zip") {
@@ -1455,7 +1465,7 @@ impl UpdateManager {
         fs::create_dir_all(&update_dir).map_err(|e| format!("Failed to create update dir: {e}"))?;
 
         let dest = update_dir.join(&asset.name);
-        self.download_asset_with_progress(asset, &dest, &mut |_, _| {})?;
+        self.download_asset_with_progress(asset, &dest, &mut |_, _| {}, None)?;
 
         let extract_dir = update_dir.join("extract");
         let _ = fs::remove_dir_all(&extract_dir);
@@ -1490,8 +1500,9 @@ impl UpdateManager {
         asset: &GitHubAsset,
         dest: &Path,
         progress: &mut dyn FnMut(u64, Option<u64>),
+        cancelled: Option<tokio::sync::watch::Receiver<bool>>,
     ) -> Result<(), String> {
-        use std::io::{Read, Write};
+        use std::io::Write;
         let expected = asset
             .digest
             .as_deref()
@@ -1503,54 +1514,67 @@ impl UpdateManager {
                 error
             })?;
 
-        let res = self
-            .client
-            .get(&asset.browser_download_url)
-            .send()
-            .map_err(|e| format!("Download failed: {e}"))?;
-        if !res.status().is_success() {
-            return Err(format!("Download failed with status {}", res.status()));
-        }
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| format!("Failed to create download runtime: {e}"))?;
+        let file = runtime.block_on(async {
+            let transfer = async {
+                let mut response = self
+                    .client
+                    .get(&asset.browser_download_url)
+                    .send().await
+                    .map_err(|e| format!("Download failed: {e}"))?;
+                if !response.status().is_success() {
+                    return Err(format!("Download failed with status {}", response.status()));
+                }
 
-        let total = res.content_length();
-        progress(0, total);
+                let total = response.content_length();
+                progress(0, total);
 
-        let parent = dest.parent().ok_or("Invalid payload path")?;
-        let mut file = tempfile::NamedTempFile::new_in(parent)
-            .map_err(|e| format!("Failed to create temporary payload file: {e}"))?;
-        let mut hasher = Sha256::new();
-        let mut reader = res;
-        let mut buffer = [0u8; 64 * 1024];
-        let mut downloaded: u64 = 0;
-        loop {
-            let n = reader
-                .read(&mut buffer)
-                .map_err(|e| format!("Failed to read payload chunk: {e}"))?;
-            if n == 0 {
-                break;
+                let parent = dest.parent().ok_or("Invalid payload path")?;
+                let mut file = tempfile::NamedTempFile::new_in(parent)
+                    .map_err(|e| format!("Failed to create temporary payload file: {e}"))?;
+                let mut hasher = Sha256::new();
+                let mut downloaded: u64 = 0;
+                while let Some(chunk) = response
+                    .chunk()
+                    .await
+                    .map_err(|e| format!("Failed to read payload chunk: {e}"))?
+                {
+                    file.write_all(&chunk)
+                        .map_err(|e| format!("Failed to write payload: {e}"))?;
+                    hasher.update(&chunk);
+                    downloaded = downloaded.saturating_add(chunk.len() as u64);
+                    progress(downloaded, total);
+                }
+                // Ensure the final progress tick reflects the actual on-disk size,
+                // even when the server omitted Content-Length.
+                progress(downloaded, total.or(Some(downloaded)));
+
+                if downloaded == 0 {
+                    return Err("Downloaded payload is empty".to_string());
+                }
+                let actual = format!("{:x}", hasher.finalize());
+                if !expected.eq_ignore_ascii_case(&actual) {
+                    let error = format!(
+                        "SHA-256 checksum mismatch for {}: expected {expected}, got {actual}",
+                        asset.name
+                    );
+                    log_update_event("payload_integrity_failed", &[("reason", &error)]);
+                    return Err(error);
+                }
+                Ok(file)
+            };
+            match cancelled {
+                Some(mut cancelled) => tokio::select! {
+                    biased;
+                    _ = cancelled.wait_for(|cancelled| *cancelled) => Err("Update download cancelled".to_string()),
+                    result = transfer => result,
+                },
+                None => transfer.await,
             }
-            file.write_all(&buffer[..n])
-                .map_err(|e| format!("Failed to write payload: {e}"))?;
-            hasher.update(&buffer[..n]);
-            downloaded = downloaded.saturating_add(n as u64);
-            progress(downloaded, total);
-        }
-        // Ensure the final progress tick reflects the actual on-disk size,
-        // even when the server omitted Content-Length.
-        progress(downloaded, total.or(Some(downloaded)));
-
-        if downloaded == 0 {
-            return Err("Downloaded payload is empty".to_string());
-        }
-        let actual = format!("{:x}", hasher.finalize());
-        if !expected.eq_ignore_ascii_case(&actual) {
-            let error = format!(
-                "SHA-256 checksum mismatch for {}: expected {expected}, got {actual}",
-                asset.name
-            );
-            log_update_event("payload_integrity_failed", &[("reason", &error)]);
-            return Err(error);
-        }
+        })?;
         file.persist(dest)
             .map_err(|e| format!("Failed to stage verified payload: {e}"))?;
         Ok(())
@@ -5351,6 +5375,55 @@ mod tests {
         );
         let err = mgr.prepare_update("99.0.6", &empty_url).unwrap_err();
         assert!(err.contains("Downloaded payload is empty"));
+    }
+
+    #[test]
+    fn cancel_update_stops_a_stalled_asset_transfer() {
+        let temp = tempfile::tempdir().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let asset_url = format!("http://{}/update.bin", listener.local_addr().unwrap());
+        let (cancel, cancelled) = tokio::sync::watch::channel(false);
+        let (received, wait_for_chunk) = std::sync::mpsc::channel();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut buffer = [0u8; 2048];
+            assert!(stream.read(&mut buffer).unwrap() > 0);
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nab")
+                .unwrap();
+            wait_for_chunk.recv_timeout(Duration::from_secs(5)).unwrap();
+            cancel.send_replace(true);
+            assert_eq!(
+                stream.read(&mut buffer).unwrap(),
+                0,
+                "transfer must close the connection"
+            );
+        });
+        let mgr = UpdateManager::new()
+            .with_updates_dir(temp.path().to_path_buf())
+            .with_api_base_url(serve_payload_metadata(&asset_url, b"abcd"));
+        let mut received = Some(received);
+        let error = mgr
+            .prepare_update_cancellable(
+                "99.0.0",
+                &asset_url,
+                &mut |downloaded, _| {
+                    if downloaded > 0 {
+                        received.take().unwrap().send(()).unwrap();
+                    }
+                },
+                Some(cancelled),
+            )
+            .unwrap_err();
+        server.join().unwrap();
+        assert_eq!(error, "Update download cancelled");
+        assert_eq!(
+            fs::read_dir(temp.path().join("v99.0.0")).unwrap().count(),
+            0
+        );
     }
 
     // SPEC-2041 Phase 19 (T-125 / FR-054): progress callback fires monotonically

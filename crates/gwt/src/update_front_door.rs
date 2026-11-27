@@ -488,16 +488,17 @@ impl PreparedUpdate {
 pub fn prepare_update_payload(
     state: gwt_core::update::UpdateState,
 ) -> Result<PreparedUpdate, String> {
-    prepare_update_payload_with_progress(state, &mut |_, _| {})
+    prepare_update_payload_cancellable(state, &mut |_, _| {}, None)
 }
 
 /// SPEC-2041 Phase 19 (FR-054): like [`prepare_update_payload`] but routes
 /// download chunk progress to `progress`. The closure must be cheap because
-/// it fires once per 64 KiB of payload; callers that broadcast progress over
+/// it fires once per chunk; callers that broadcast progress over
 /// WebSocket should throttle inside the closure (e.g. by `Instant::elapsed`).
-pub fn prepare_update_payload_with_progress(
+pub fn prepare_update_payload_cancellable(
     state: gwt_core::update::UpdateState,
     progress: &mut dyn FnMut(u64, Option<u64>),
+    cancelled: Option<tokio::sync::watch::Receiver<bool>>,
 ) -> Result<PreparedUpdate, String> {
     let (latest, asset_url) = match state {
         gwt_core::update::UpdateState::Available {
@@ -517,7 +518,7 @@ pub fn prepare_update_payload_with_progress(
     };
     let mgr = gwt_core::update::UpdateManager::new();
     let payload = mgr
-        .prepare_update_with_progress(&latest, &asset_url, progress)
+        .prepare_update_cancellable(&latest, &asset_url, progress, cancelled)
         .map_err(|err| format!("Failed to prepare update payload: {err}"))?;
     Ok(PreparedUpdate {
         latest,

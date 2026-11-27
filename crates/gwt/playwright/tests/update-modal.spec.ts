@@ -8,9 +8,51 @@
  * matches the existing Playwright suite's skip-by-default contract.
  */
 import { test, expect } from "@playwright/test";
+import { APP_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
 import { gotoLiveGwt } from "./_helpers/live-gwt";
 
 const BASE = process.env.GWT_PLAYWRIGHT_BASE_URL ?? "http://127.0.0.1:0/";
+
+test("cancelled download ignores late readiness and accepts a fresh retry", async ({ page }, info) => {
+  const errors: string[] = [];
+  page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+  page.on("pageerror", error => errors.push(error.message));
+  const theme = info.project.name.includes("light") ? "light" : "dark";
+  await page.addInitScript(value => localStorage.setItem("gwt:ui:theme", value), theme);
+  await installEmbeddedRoutes(page);
+  const version = "99.0.0";
+  const requests: Record<string, unknown>[] = [];
+  let send: (event: Record<string, unknown>) => void;
+  await page.routeWebSocket(/\/ws\?.*repo_hash=/, socket => {
+    send = event => socket.send(JSON.stringify(event));
+    socket.onMessage(message => {
+      if (typeof message === "string") requests.push(JSON.parse(message));
+    });
+    send({ kind: "update_state", state: "available", current: "9.0.0", latest: version });
+  });
+  await page.goto(APP_URL);
+  await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+  const cta = page.locator("#update-cta");
+  const modal = page.locator("#update-modal");
+  await cta.click();
+  await modal.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect.poll(() => requests.find(event => event.kind === "cancel_update_download"))
+    .toMatchObject({ version });
+  await expect(modal).toHaveCount(0);
+  await cta.click();
+  send!({ kind: "update_ready", version, asset_path: "/stale" });
+  // A subsequent progress event for a different release is a delivery
+  // barrier for the stale Ready on the same socket.
+  send!({ kind: "update_progress", version: "98.0.0", downloaded: 50, total: 100 });
+  await expect(modal.getByRole("progressbar")).toHaveAttribute("aria-valuenow", "50");
+  await expect(modal).toHaveAttribute("data-state", "downloading");
+  await page.screenshot({ path: info.outputPath(`update-cancel-retry-${theme}.png`) });
+  send!({ kind: "update_download_status", version, cancelled: true });
+  send!({ kind: "update_download_status", version, cancelled: false });
+  send!({ kind: "update_ready", version, asset_path: "/fresh" });
+  await expect(modal).toHaveAttribute("data-state", "ready");
+  expect(errors).toEqual([]);
+});
 
 test.describe("Update modal", () => {
   test.skip(!process.env.GWT_PLAYWRIGHT_BASE_URL, "no GWT_PLAYWRIGHT_BASE_URL set");

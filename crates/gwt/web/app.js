@@ -5485,6 +5485,9 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
               asset_path: event.asset_path,
             });
             break;
+          case "update_download_status":
+            updateCtaController.handleUpdateDownloadStatus(event);
+            break;
           case "update_apply_error":
             applyUpdateApplyError({
               stage: event.stage,
