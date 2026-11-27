@@ -165,7 +165,10 @@ const FAMILY_SUMMARIES: &[(&str, &str)] = &[
     ("build", "gwt-build-spec exit CLI (SPEC-1935)"),
     ("register", "gwt-register-spec exit CLI (SPEC-2784)"),
     ("pane", "Inspect and control live agent panes"),
-    ("pm", "PM agent diagnostics (SPEC-3431)"),
+    (
+        "pm",
+        "PM agent diagnostics and steering, e.g. pm.message.send (SPEC-3431)",
+    ),
     (
         "provider",
         "Free quota reset proposals and native user consent",
@@ -905,6 +908,9 @@ fn format_pm_help() -> String {
         "  JSON",
         "",
         "Operations:",
+        "  pm.message.send Deliver text to an authorized live agent pane in this project.",
+        "               PM principal only. Params: id, text (operation_id to replay a delivery).",
+        "               Use it instead of pane.send, which is self-only.",
         "  pm.peer.send Send request/reply/notice to another live project's PM.",
         "               Requires this project's registered PM. Params: project (absolute path),",
         "               kind, text, reply_to (required for reply), timeout_seconds (1..86400; default 900).",
@@ -976,6 +982,8 @@ fn format_pane_help() -> String {
         "  - Managed panes use the authenticated agent listener (loopback on Host; runtime bridge in containers).",
         "  - send is self-only: it targets the pane bound to GWT_SESSION_ID and",
         "    rejects panes owned by other sessions (SPEC-3050).",
+        "  - To steer another agent pane, the PM uses pm.message.send.",
+        "    Params: id, text (see gwtd --help pm).",
         "",
     ]
     .join("\n")
@@ -1702,6 +1710,23 @@ mod tests {
                 "PM help must document {expected}: {help}"
             );
         }
+    }
+
+    /// Issue #4061: the PM steering route must be discoverable from the PM,
+    /// pane, and global help, with its required params.
+    #[test]
+    fn help_documents_pm_message_send_with_params() {
+        for (page, help) in [("pm", format_pm_help()), ("pane", format_pane_help())] {
+            assert!(
+                help.contains("pm.message.send") && help.contains("Params: id, text"),
+                "{page} help must document pm.message.send and its params: {help}"
+            );
+        }
+        let global = format_global_help();
+        assert!(
+            global.contains("pm.message.send"),
+            "global help must mention pm.message.send: {global}"
+        );
     }
 
     #[test]
