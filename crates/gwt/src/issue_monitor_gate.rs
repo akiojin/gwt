@@ -185,7 +185,7 @@ impl AcceptanceSnapshot {
 /// Heading lines (case-insensitive, trimmed of leading `#`/spaces) that open the
 /// structured acceptance-criteria block. Japanese entries are stored in the
 /// okurigana-less spelling `heading_text` normalizes to.
-const ACCEPTANCE_HEADINGS: &[&str] = &[
+pub(crate) const ACCEPTANCE_HEADINGS: &[&str] = &[
     "acceptance criteria",
     "受入基準",
     "受入条件",
@@ -198,7 +198,7 @@ const ACCEPTANCE_HEADINGS: &[&str] = &[
 /// Issue #7359: the matching form folds the okurigana variants of 受け入れ
 /// (`受け入れ` / `受入れ` / `受け入` / `受入`) into `受入`, so `## 受入条件`
 /// opens the block exactly like `## 受け入れ条件`.
-fn heading_text(line: &str) -> Option<(String, String)> {
+pub(crate) fn heading_text(line: &str) -> Option<(String, String)> {
     let trimmed = line.trim_start();
     if !trimmed.starts_with('#') {
         return None;
@@ -214,7 +214,7 @@ fn heading_text(line: &str) -> Option<(String, String)> {
 
 /// Split an item's text into its explicit `AC-<id>` (when the item starts with
 /// a well-formed `AC-<id>:` token) and the remaining criterion text.
-fn split_explicit_id(rest: &str) -> (Option<String>, &str) {
+pub(crate) fn split_explicit_id(rest: &str) -> (Option<String>, &str) {
     if let Some(after_ac) = rest.strip_prefix("AC-") {
         if let Some(colon) = after_ac.find(':') {
             let id_part = after_ac[..colon].trim();
