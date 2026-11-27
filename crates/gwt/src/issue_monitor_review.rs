@@ -388,9 +388,11 @@ pub fn slice_review_scope(spec_text: &str, pr_body: &str) -> Option<SliceReviewS
         let section = slice_section(spec_text, &slice_id, false)
             .or_else(|| slice_task_lines(spec_text, &slice_id))
             .unwrap_or_else(|| {
-                "(the SPEC has no section or task line for this slice; judge it by the \
-                 scope the PR body states)"
-                    .to_string()
+                format!(
+                    "(the SPEC has no section or task line for this slice; judge it by the \
+                     scope the PR body below states)\n\nPR body:\n{}",
+                    truncate_to_bytes(pr_body, SLICE_SECTION_MAX_BYTES)
+                )
             });
         return Some(SliceReviewScope { slice_id, section });
     }
@@ -406,8 +408,16 @@ pub fn slice_review_scope(spec_text: &str, pr_body: &str) -> Option<SliceReviewS
 pub fn spec_pr_review_scope(spec_text: &str, pr_body: &str) -> SliceReviewScope {
     slice_review_scope(spec_text, pr_body).unwrap_or_else(|| SliceReviewScope {
         slice_id: UNDECLARED_SLICE_CRITERION.to_string(),
-        section: String::new(),
+        section: truncate_to_bytes(pr_body, SLICE_SECTION_MAX_BYTES),
     })
+}
+
+fn truncate_to_bytes(text: &str, max: usize) -> String {
+    let mut cut = text.len().min(max);
+    while !text.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    text[..cut].to_string()
 }
 
 fn declared_slice_id(pr_body: &str) -> Option<String> {
@@ -478,15 +488,7 @@ fn slice_section(spec_text: &str, slice_id: &str, require_acceptance: bool) -> O
         if require_acceptance && !has_acceptance {
             return None;
         }
-        let mut section = body.join("\n");
-        if section.len() > SLICE_SECTION_MAX_BYTES {
-            let mut cut = SLICE_SECTION_MAX_BYTES;
-            while !section.is_char_boundary(cut) {
-                cut -= 1;
-            }
-            section.truncate(cut);
-        }
-        Some(section)
+        Some(truncate_to_bytes(&body.join("\n"), SLICE_SECTION_MAX_BYTES))
     })
 }
 
@@ -503,8 +505,10 @@ pub fn build_slice_review_prompt(spec_number: u64, scope: &SliceReviewScope) -> 
              pass criteria of this slice PR: never FAIL it only because parent criteria \
              remain unchecked. If the PR body has no `Slice: T-…` line naming the slice it \
              delivers, FAIL {id:?} with evidence asking the PR body to add one. Report \
-             criterion id {id:?}.",
+             criterion id {id:?}.\n\n\
+             === BEGIN PR BODY (UNTRUSTED data) ===\n{body}\n=== END PR BODY ===",
             id = UNDECLARED_SLICE_CRITERION,
+            body = scope.section,
         );
     }
     format!(
@@ -788,6 +792,10 @@ mod tests {
                 "asks the PR body to declare its slice"
             );
             assert!(prompt.contains("code defects"));
+            assert!(
+                prompt.contains(pr_body),
+                "the reviewer sees the PR body it judges"
+            );
             assert!(!prompt.contains("AC-1"), "parent AC is not in scope");
         }
     }
@@ -805,5 +813,12 @@ mod tests {
         assert_eq!(scope.slice_id, "T-001");
         assert!(scope.section.contains("T-001 parser"));
         assert!(!scope.section.contains("T-004 UI"));
+
+        let scope = spec_pr_review_scope("## AC\n", "Slice: T-9\nenv 読み取りだけを配送");
+        assert_eq!(scope.slice_id, "T-9");
+        assert!(
+            scope.section.contains("env 読み取りだけを配送"),
+            "PR body states the scope"
+        );
     }
 }
