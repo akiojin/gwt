@@ -12763,6 +12763,7 @@ fn update_resume_marker_for(
             update_drain: true,
         }],
         attempt: 1,
+        helper_pid: None,
     }
 }
 

@@ -214,10 +214,7 @@ pub fn persist_pending_update_manifest_in(
     dir: &Path,
     manifest: &PendingUpdateManifest,
 ) -> Result<(), String> {
-    let lock = open_pending_update_manifest_lock(dir)?;
-    fs2::FileExt::lock_exclusive(&lock)
-        .map_err(|e| format!("Failed to lock pending-update manifest for staging: {e}"))?;
-    let _lock = PendingUpdateManifestLock { file: lock };
+    let _lock = wait_for_pending_update_manifest_lock(dir)?;
     let mut staged = manifest.clone();
     if let Some(current) =
         load_pending_update_manifest_in(dir).filter(|current| current.version == staged.version)
@@ -264,6 +261,13 @@ pub fn pending_update_manifest_lock(dir: &Path) -> Result<PendingUpdateManifestL
     let lock = open_pending_update_manifest_lock(dir)?;
     fs2::FileExt::try_lock_exclusive(&lock)
         .map_err(|e| format!("Pending-update manifest is busy or cannot be locked: {e}"))?;
+    Ok(PendingUpdateManifestLock { file: lock })
+}
+
+fn wait_for_pending_update_manifest_lock(dir: &Path) -> Result<PendingUpdateManifestLock, String> {
+    let lock = open_pending_update_manifest_lock(dir)?;
+    fs2::FileExt::lock_exclusive(&lock)
+        .map_err(|e| format!("Failed to lock pending-update manifest: {e}"))?;
     Ok(PendingUpdateManifestLock { file: lock })
 }
 
@@ -446,9 +450,9 @@ pub struct UpdateResumeProject {
     pub update_drain: bool,
 }
 
-/// Issue #4038 (AC-3): what the GUI was doing right before it quit to apply an
-/// update, written to `~/.gwt/update-resume/marker.json` before the helper is
-/// spawned and consumed by the next bootstrap. Its presence is the only
+/// What the application was doing right before it quit to apply an update,
+/// written to `~/.gwt/update-resume/marker.json` before the helper is spawned
+/// and consumed by the next bootstrap. Its presence is the only
 /// signal that a launch is the tail of an apply rather than a cold start.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UpdateResumeMarker {
@@ -467,6 +471,9 @@ pub struct UpdateResumeMarker {
     /// How many restarts have tried to settle this marker (starts at 1).
     #[serde(default = "default_update_resume_attempt")]
     pub attempt: u32,
+    /// The CLI parent during handoff, then the helper until the payload is applied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub helper_pid: Option<u32>,
 }
 
 fn default_update_resume_attempt() -> u32 {
@@ -542,6 +549,21 @@ pub struct UpdateApplyResult {
     pub recorded_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    /// The CLI settled the marker before the GUI could report the outcome.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub notify_on_gui_startup: bool,
+}
+
+impl UpdateApplyResult {
+    pub fn notice(&self) -> String {
+        match self.outcome {
+            UpdateApplyOutcome::Success => format!("Updated to v{}", self.to_version),
+            UpdateApplyOutcome::Failure => format!(
+                "Update to v{} failed: still running v{} (attempt {}). Click the version label to open Release Notes and retry.",
+                self.to_version, self.observed_version, self.attempt
+            ),
+        }
+    }
 }
 
 /// `~/.gwt/updates/apply-result.json`.
@@ -705,14 +727,10 @@ impl UpdateResumeSettlement {
     /// Human-readable notification-center line for this settle.
     pub fn notice(&self) -> String {
         match &self.outcome {
-            UpdateResumeOutcome::Applied => format!(
-                "Updated to v{}; execution resumed",
-                self.marker.to_version
-            ),
-            UpdateResumeOutcome::VersionMismatch { observed_version } => format!(
-                "Update to v{} failed: still running v{} (attempt {}); execution resumed without the update",
-                self.marker.to_version, observed_version, self.marker.attempt
-            ),
+            UpdateResumeOutcome::Applied => {
+                format!("Updated to v{}; execution resumed", self.marker.to_version)
+            }
+            UpdateResumeOutcome::VersionMismatch { .. } => self.result.notice(),
         }
     }
 }
@@ -724,12 +742,35 @@ pub fn settle_update_resume_marker(
     current_version: &str,
     now: UtcTimestamp,
 ) -> Option<UpdateResumeSettlement> {
-    let settlement = settle_update_resume_marker_in(
-        &update_resume_dir(),
-        &crate::paths::gwt_updates_dir(),
-        current_version,
-        now,
-    )?;
+    settle_update_resume_at_startup(current_version, now, false)
+}
+
+/// The restarted update command can settle only a CLI attempt. The GUI owns
+/// the drain holds and session restore information in its own markers.
+pub fn settle_cli_update_resume_marker(
+    current_version: &str,
+    now: UtcTimestamp,
+) -> Option<UpdateResumeSettlement> {
+    settle_update_resume_at_startup(current_version, now, true)
+}
+
+fn settle_update_resume_at_startup(
+    current_version: &str,
+    now: UtcTimestamp,
+    cli_startup: bool,
+) -> Option<UpdateResumeSettlement> {
+    let resume_dir = update_resume_dir();
+    load_update_resume_marker_in(&resume_dir)?;
+    let settlement = {
+        let _lock = wait_for_pending_update_manifest_lock(&pending_update_dir()).ok()?;
+        settle_update_resume_marker_for_startup(
+            &resume_dir,
+            &crate::paths::gwt_updates_dir(),
+            current_version,
+            now,
+            cli_startup,
+        )?
+    };
     if matches!(
         settlement.outcome,
         UpdateResumeOutcome::VersionMismatch { .. }
@@ -744,6 +785,22 @@ pub fn settle_update_resume_marker(
     Some(settlement)
 }
 
+/// Consume a result notification when the CLI already settled its marker.
+pub fn take_cli_update_resume_notice() -> Option<UpdateApplyResult> {
+    let result = load_update_apply_result()?;
+    if !result.notify_on_gui_startup {
+        return None;
+    }
+    let _lock = wait_for_pending_update_manifest_lock(&pending_update_dir()).ok()?;
+    let mut result = load_update_apply_result()?;
+    if !result.notify_on_gui_startup {
+        return None;
+    }
+    result.notify_on_gui_startup = false;
+    persist_update_apply_result(&result).ok()?;
+    Some(result)
+}
+
 /// Test-friendly variant of [`settle_update_resume_marker`].
 pub fn settle_update_resume_marker_in(
     resume_dir: &Path,
@@ -751,7 +808,27 @@ pub fn settle_update_resume_marker_in(
     current_version: &str,
     now: UtcTimestamp,
 ) -> Option<UpdateResumeSettlement> {
+    settle_update_resume_marker_for_startup(resume_dir, updates_dir, current_version, now, false)
+}
+
+fn settle_update_resume_marker_for_startup(
+    resume_dir: &Path,
+    updates_dir: &Path,
+    current_version: &str,
+    now: UtcTimestamp,
+    cli_startup: bool,
+) -> Option<UpdateResumeSettlement> {
     let marker = load_update_resume_marker_in(resume_dir)?;
+    if cli_startup && !is_cli_update_restart(&marker.restart_args) {
+        return None;
+    }
+    if marker.helper_pid.is_some_and(|pid| {
+        SystemProcessExecutor
+            .run(process_probe_request(pid, cfg!(windows)))
+            .map_or(true, |output| output.success)
+    }) {
+        return None;
+    }
     let normalize = |v: &str| v.trim().trim_start_matches('v').to_string();
     let observed_version = normalize(current_version);
     let applied = observed_version == normalize(&marker.to_version);
@@ -766,6 +843,7 @@ pub fn settle_update_resume_marker_in(
                 attempt: marker.attempt,
                 recorded_at: now.to_rfc3339(),
                 message: None,
+                notify_on_gui_startup: cli_startup,
             },
         )
     } else {
@@ -784,6 +862,7 @@ pub fn settle_update_resume_marker_in(
                     "expected v{} after restart but the running binary is v{observed_version}",
                     normalize(&marker.to_version)
                 )),
+                notify_on_gui_startup: cli_startup,
             },
         )
     };
@@ -792,6 +871,7 @@ pub fn settle_update_resume_marker_in(
             "fail",
             &[("stage", "record_apply_result"), ("reason", &err)],
         );
+        return None;
     }
     let marker_write = clear_update_resume_marker_in(resume_dir);
     if let Err(err) = marker_write {
@@ -1604,7 +1684,7 @@ impl UpdateManager {
         target_exe: &Path,
         new_exe: &Path,
         args_file: &Path,
-    ) -> Result<(), String> {
+    ) -> Result<u32, String> {
         self.spawn_internal_apply_update_with_executor(
             helper_exe,
             old_pid,
@@ -1612,7 +1692,8 @@ impl UpdateManager {
             new_exe,
             args_file,
             &SystemProcessExecutor,
-        )
+        )?
+        .ok_or_else(|| "Update helper spawn did not return a process ID".to_string())
     }
 
     /// SPEC-3014 FR-002: executor-injectable variant of
@@ -1625,7 +1706,7 @@ impl UpdateManager {
         new_exe: &Path,
         args_file: &Path,
         executor: &dyn ProcessExecutor,
-    ) -> Result<(), String> {
+    ) -> Result<Option<u32>, String> {
         let request = ProcessRequest::new(helper_exe)
             .arg("__internal")
             .arg("apply-update")
@@ -1640,8 +1721,8 @@ impl UpdateManager {
             .mode(ExecutionMode::Spawn);
         executor
             .run(request)
-            .map_err(|e| format!("Failed to spawn update helper: {e}"))?;
-        Ok(())
+            .map(|output| output.spawned_pid)
+            .map_err(|e| format!("Failed to spawn update helper: {e}"))
     }
 
     pub fn spawn_internal_run_installer(
@@ -1652,7 +1733,7 @@ impl UpdateManager {
         installer: &Path,
         installer_kind: InstallerKind,
         args_file: &Path,
-    ) -> Result<(), String> {
+    ) -> Result<u32, String> {
         self.spawn_internal_run_installer_with_executor(
             helper_exe,
             old_pid,
@@ -1661,7 +1742,8 @@ impl UpdateManager {
             installer_kind,
             args_file,
             &SystemProcessExecutor,
-        )
+        )?
+        .ok_or_else(|| "Installer helper spawn did not return a process ID".to_string())
     }
 
     /// SPEC-3014 FR-002: executor-injectable variant of
@@ -1676,7 +1758,7 @@ impl UpdateManager {
         installer_kind: InstallerKind,
         args_file: &Path,
         executor: &dyn ProcessExecutor,
-    ) -> Result<(), String> {
+    ) -> Result<Option<u32>, String> {
         let request = ProcessRequest::new(helper_exe)
             .arg("__internal")
             .arg("run-installer")
@@ -1697,8 +1779,8 @@ impl UpdateManager {
             .mode(ExecutionMode::Spawn);
         executor
             .run(request)
-            .map_err(|e| format!("Failed to spawn installer helper: {e}"))?;
-        Ok(())
+            .map(|output| output.spawned_pid)
+            .map_err(|e| format!("Failed to spawn installer helper: {e}"))
     }
 
     pub fn make_helper_copy(&self, current_exe: &Path, latest: &str) -> Result<PathBuf, String> {
@@ -2004,7 +2086,9 @@ pub fn internal_apply_update_with_executor(
 ) -> Result<(), String> {
     wait_for_pid_exit(old_pid, Duration::from_secs(300), executor)?;
     let args = UpdateManager::read_restart_args_file(args_file)?;
+    let cli_marker = owned_cli_update_marker(&args)?;
     replace_bundle_executables(target_exe, source_exe)?;
+    finish_cli_update_apply(cli_marker)?;
 
     executor
         .run(
@@ -2048,6 +2132,7 @@ pub fn internal_run_installer_with_executor(
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     {
         let restart = UpdateManager::read_restart_args_file_config(args_file)?;
+        let cli_marker = owned_cli_update_marker(&restart.args)?;
         let automatic_refusal = prepared_payload_automatic_apply_refusal(
             &PreparedPayload::Installer {
                 path: installer.to_path_buf(),
@@ -2112,6 +2197,7 @@ pub fn internal_run_installer_with_executor(
         };
 
         let restart_exe = fs::canonicalize(&restart_exe).unwrap_or(restart_exe);
+        finish_cli_update_apply(cli_marker)?;
         executor
             .run(
                 ProcessRequest::new(&restart_exe)
@@ -2127,6 +2213,38 @@ pub fn internal_run_installer_with_executor(
         let _ = (target_exe, installer, installer_kind, args_file);
         Err("installer updates are not supported on this platform".to_string())
     }
+}
+
+fn is_cli_update_restart(args: &[String]) -> bool {
+    args.first().map(String::as_str) == Some("update")
+}
+
+fn owned_cli_update_marker(args: &[String]) -> Result<Option<UpdateResumeMarker>, String> {
+    if !is_cli_update_restart(args) {
+        return Ok(None);
+    }
+    // The helper waits for its parent to exit before reading the marker.
+    // If the parent could not save our PID, stop before touching the payload.
+    load_update_resume_marker()
+        .filter(|marker| {
+            is_cli_update_restart(&marker.restart_args)
+                && marker.helper_pid == Some(std::process::id())
+        })
+        .map(Some)
+        .ok_or_else(|| "The CLI update helper does not own the resume marker".to_string())
+}
+
+fn finish_cli_update_apply(marker: Option<UpdateResumeMarker>) -> Result<(), String> {
+    let Some(mut marker) = marker else {
+        return Ok(());
+    };
+    let _lock = wait_for_pending_update_manifest_lock(&pending_update_dir())?;
+    if load_update_resume_marker().as_ref() != Some(&marker) {
+        return Err("The CLI update resume marker changed while applying the payload".to_string());
+    }
+    // The restarted binary can now settle even if this helper is still exiting.
+    marker.helper_pid = None;
+    persist_update_resume_marker(&marker)
 }
 
 /// File name for the self-copy spawned to apply an update (#3018).
@@ -3367,6 +3485,7 @@ mod tests {
             attempt: 1,
             recorded_at: UtcTimestamp::now().to_rfc3339(),
             message: Some("version mismatch".to_string()),
+            notify_on_gui_startup: false,
         })
         .unwrap();
 
@@ -3438,6 +3557,7 @@ mod tests {
             attempt: 1,
             recorded_at: UtcTimestamp::now().to_rfc3339(),
             message: Some("version mismatch".to_string()),
+            notify_on_gui_startup: false,
         })
         .unwrap();
         let periodic = manager.clone();
@@ -4446,8 +4566,15 @@ mod tests {
     #[test]
     fn internal_apply_update_with_executor_replaces_binaries_and_restarts() {
         let temp = tempfile::tempdir().unwrap();
+        let _home = crate::test_support::ScopedGwtHome::set(temp.path());
+        let marker = UpdateResumeMarker {
+            restart_args: vec!["update".to_string()],
+            helper_pid: Some(std::process::id()),
+            ..sample_resume_marker()
+        };
+        persist_update_resume_marker(&marker).unwrap();
         let target_dir = temp.path().join("install");
-        let source_dir = temp.path().join("staged");
+        let source_dir = crate::paths::gwt_updates_dir().join(format!("v{}", marker.to_version));
         fs::create_dir_all(&target_dir).unwrap();
         fs::create_dir_all(&source_dir).unwrap();
         let target_exe = target_dir.join("gwt");
@@ -4463,12 +4590,17 @@ mod tests {
         write_json_atomic(
             &args_file,
             &RestartArgsFile {
-                args: vec!["--restored".to_string()],
+                args: marker.restart_args.clone(),
                 cwd: String::new(),
                 allow_elevation: true,
             },
         )
         .unwrap();
+
+        // A concurrent GUI launch must not delete the CLI helper's payload.
+        assert!(settle_update_resume_marker(&marker.from_version, UtcTimestamp::now()).is_none());
+        assert_eq!(load_update_resume_marker(), Some(marker.clone()));
+        assert!(source_exe.exists());
 
         let mock = MockProcessExecutor::new();
         // PID probe: report "already exited" for either platform's probe.
@@ -4482,10 +4614,11 @@ mod tests {
 
         assert_eq!(fs::read(&target_exe).unwrap(), b"new-gwt");
         assert_eq!(fs::read(&target_daemon).unwrap(), b"new-gwtd");
+        assert_eq!(load_update_resume_marker().unwrap().helper_pid, None);
         let restart = mock.requests().into_iter().last().expect("restart spawn");
         assert_eq!(restart.program, target_exe.as_os_str());
         assert_eq!(restart.mode, ExecutionMode::Spawn);
-        assert_eq!(restart.args_lossy(), vec!["--restored"]);
+        assert_eq!(restart.args_lossy(), vec!["update"]);
     }
 
     #[test]
@@ -6232,6 +6365,7 @@ mod tests {
                 update_drain: true,
             }],
             attempt: 1,
+            helper_pid: None,
         }
     }
 
@@ -6359,6 +6493,8 @@ mod tests {
         };
         persist_update_resume_marker(&marker).unwrap();
         let now = UtcTimestamp::now();
+        assert!(settle_cli_update_resume_marker(env!("CARGO_PKG_VERSION"), now).is_none());
+        assert_eq!(load_update_resume_marker(), Some(marker));
         let result = settle_update_resume_marker(env!("CARGO_PKG_VERSION"), now).unwrap();
         assert!(matches!(
             result.outcome,

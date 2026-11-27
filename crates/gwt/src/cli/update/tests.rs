@@ -148,7 +148,8 @@ impl UpdateCliOps for FakeUpdateCliOps {
         current_exe: &Path,
         payload: &Path,
         args_file: &Path,
-    ) -> Result<(), String> {
+    ) -> Result<u32, String> {
+        assert!(update::load_update_resume_marker().is_some());
         self.apply_calls.push((
             helper_exe.to_path_buf(),
             old_pid,
@@ -156,7 +157,7 @@ impl UpdateCliOps for FakeUpdateCliOps {
             payload.to_path_buf(),
             args_file.to_path_buf(),
         ));
-        self.spawn_apply_result.clone()
+        self.spawn_apply_result.clone().map(|()| std::process::id())
     }
 
     fn spawn_internal_run_installer(
@@ -167,7 +168,8 @@ impl UpdateCliOps for FakeUpdateCliOps {
         installer: &Path,
         kind: InstallerKind,
         args_file: &Path,
-    ) -> Result<(), String> {
+    ) -> Result<u32, String> {
+        assert!(update::load_update_resume_marker().is_some());
         self.installer_calls.push((
             helper_exe.to_path_buf(),
             old_pid,
@@ -176,7 +178,9 @@ impl UpdateCliOps for FakeUpdateCliOps {
             kind,
             args_file.to_path_buf(),
         ));
-        self.spawn_installer_result.clone()
+        self.spawn_installer_result
+            .clone()
+            .map(|()| std::process::id())
     }
 }
 
@@ -465,6 +469,8 @@ fn run_with_covers_prepare_current_exe_and_restart_arg_failures() {
 
 #[test]
 fn run_with_covers_helper_copy_and_spawn_paths() {
+    let home = tempfile::tempdir().unwrap();
+    let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
     let mut apply = FakeUpdateCliOps::available(Some("https://example.test/gwt.zip"));
     assert!(matches!(
         run_with(&mut apply, UpdateRunMode::Apply),
@@ -477,6 +483,17 @@ fn run_with_covers_helper_copy_and_spawn_paths() {
     }
     assert_eq!(apply.apply_calls.len(), 1);
     assert!(apply.stdout.contains("restarting"));
+    let mut marker = update::load_update_resume_marker().expect("portable apply marker");
+    assert_eq!(marker.to_version, "1.1.0");
+    assert_eq!(marker.helper_pid, Some(std::process::id()));
+    assert!(update::settle_cli_update_resume_marker("1.0.0", UtcTimestamp::now()).is_none());
+    assert_eq!(update::load_update_resume_marker(), Some(marker.clone()));
+    assert!(update::load_update_apply_result().is_none());
+    marker.helper_pid = None;
+    update::persist_update_resume_marker(&marker).unwrap();
+    let settled = update::settle_cli_update_resume_marker("1.1.0", UtcTimestamp::now()).unwrap();
+    assert_eq!(settled.result.outcome, UpdateApplyOutcome::Success);
+    assert_eq!(update::load_update_apply_result(), Some(settled.result));
 
     let mut apply_error = FakeUpdateCliOps::available(Some("https://example.test/gwt.zip"));
     apply_error.spawn_apply_result = Err("spawn failed".to_string());
@@ -485,6 +502,7 @@ fn run_with_covers_helper_copy_and_spawn_paths() {
         RunOutcome::Code(1)
     ));
     assert!(apply_error.stderr.contains("Failed to apply update"));
+    assert!(gwt_core::update::load_update_resume_marker().is_none());
 
     let mut helper_error = FakeUpdateCliOps::available(Some("https://example.test/gwt.zip"));
     helper_error.make_helper_copy_result = Err("copy failed".to_string());
@@ -502,6 +520,7 @@ fn run_with_covers_helper_copy_and_spawn_paths() {
             RunOutcome::ExitSuccess
         ));
         assert!(helper_error.helper_copy_calls.is_empty());
+        gwt_core::update::clear_update_resume_marker().unwrap();
     }
 
     let mut installer = FakeUpdateCliOps::available(Some("https://example.test/gwt.msi"));
@@ -514,6 +533,14 @@ fn run_with_covers_helper_copy_and_spawn_paths() {
         RunOutcome::ExitSuccess
     ));
     assert_eq!(installer.installer_calls.len(), 1);
+    let mut marker = update::load_update_resume_marker().expect("installer apply marker");
+    assert_eq!(marker.to_version, "1.1.0");
+    assert_eq!(marker.helper_pid, Some(std::process::id()));
+    marker.helper_pid = None;
+    update::persist_update_resume_marker(&marker).unwrap();
+    let settled = update::settle_cli_update_resume_marker("1.0.0", UtcTimestamp::now()).unwrap();
+    assert_eq!(settled.result.outcome, UpdateApplyOutcome::Failure);
+    assert_eq!(update::load_update_apply_result(), Some(settled.result));
 
     let mut installer_error = FakeUpdateCliOps::available(Some("https://example.test/gwt.msi"));
     installer_error.prepare_update_result = Ok(PreparedPayload::Installer {
@@ -526,4 +553,5 @@ fn run_with_covers_helper_copy_and_spawn_paths() {
         RunOutcome::Code(1)
     ));
     assert!(installer_error.stderr.contains("Failed to apply update"));
+    assert!(gwt_core::update::load_update_resume_marker().is_none());
 }

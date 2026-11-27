@@ -5676,6 +5676,7 @@ mod tests {
             attempt: 1,
             recorded_at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
             message: Some("previous helper failed".into()),
+            notify_on_gui_startup: false,
         })
         .unwrap();
         assert!(admission.begin_resolution());
@@ -12362,6 +12363,7 @@ fn main() -> std::io::Result<()> {
                     restart_args: update_front_door::current_restart_args(),
                     projects: app.update_resume_projects(),
                     attempt: 1,
+                    helper_pid: None,
                 };
                 let roots = app.tabs.iter()
                     .filter(|tab| tab.kind == gwt::ProjectKind::Git)

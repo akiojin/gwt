@@ -584,6 +584,7 @@ fn startup_update_resume_under_large_session_load() {
                 update_drain: false,
             }],
             attempt: 1,
+            helper_pid: None,
         })
         .unwrap();
     }
