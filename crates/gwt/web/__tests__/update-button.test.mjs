@@ -11,13 +11,20 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { parseHTML } from "linkedom";
-import { createUpdateCtaController } from "../update-cta.js";
+import {
+  createUpdateCtaController,
+  UPDATE_APPLY_FAILURE_STAGES,
+  updateApplyFailureNotice,
+  updateApplyResultNotice,
+} from "../update-cta.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const appSource = readFileSync(resolve(here, "../app.js"), "utf8");
 const indexHtml = readFileSync(resolve(here, "../index.html"), "utf8");
 const appCss = readFileSync(resolve(here, "../styles/app.css"), "utf8");
 const componentsCss = readFileSync(resolve(here, "../styles/components.css"), "utf8");
+const backendUpdateSources = ["../../src/main.rs", "../../src/app_runtime/settings_update.rs"]
+  .map(path => readFileSync(resolve(here, path), "utf8"));
 
 function createManualCheckFixture() {
   const fixture = createFixture();
@@ -1498,4 +1505,71 @@ test("issue #5343: a different ready target clears the administrator reason", ()
   assert.equal(cta.textContent, "Update v9.107.0 ready — Restart now");
   controller.handleUpdateApplyPendingPersisted({ version: "9.106.0" });
   assert.equal(cta.textContent, "Update v9.106.0 ready — Restart now");
+});
+
+// Issue #7248 AC-1: every stage the backend can attach to update_apply_error.
+test("issue #7248: the failure stage inventory covers every backend update_apply_error stage", () => {
+  const emitted = new Set();
+  const patterns = [
+    /update_download_failure\(\s*"([^"]+)"/g,
+    /update_apply_error_failed\(\s*"([^"]+)"/g,
+    /UpdateApplyError \{[^}]*?stage: Some\("([^"]+)"/gs,
+    /spawn_update_apply_resolution\([^;]*?"([^"]+)",\s*"[a-z_]+",?\s*\)/gs,
+  ];
+  for (const source of backendUpdateSources) {
+    for (const pattern of patterns) {
+      for (const match of source.matchAll(pattern)) emitted.add(match[1]);
+    }
+  }
+  assert.ok(emitted.size >= 8, `expected the backend stage scan to find stages, got ${[...emitted]}`);
+  for (const stage of emitted) {
+    assert.ok(UPDATE_APPLY_FAILURE_STAGES.includes(stage), `stage "${stage}" is missing from UPDATE_APPLY_FAILURE_STAGES`);
+  }
+  assert.ok(UPDATE_APPLY_FAILURE_STAGES.includes(null), "message-only failures carry no stage");
+});
+
+// Issue #7248 AC-3: each stage has a stable notification row with the log route.
+test("issue #7248: every failure stage maps to a keyed notification notice with reason and log", () => {
+  const keys = new Set();
+  for (const stage of UPDATE_APPLY_FAILURE_STAGES) {
+    const payload = { stage, reason: `reason for ${stage}`, log_path: "/home/.gwt/logs/update.log" };
+    const notice = updateApplyFailureNotice(payload);
+    assert.equal(notice.key, `update-apply-error:${stage || "unknown"}`);
+    keys.add(notice.key);
+    assert.equal(notice.title, stage ? `Update failed: ${stage}` : "Update failed");
+    assert.equal(notice.message, `reason for ${stage}`);
+    assert.match(notice.details, /Log: \/home\/\.gwt\/logs\/update\.log/);
+  }
+  assert.equal(keys.size, UPDATE_APPLY_FAILURE_STAGES.length, "stages never share a row");
+  assert.equal(updateApplyFailureNotice({ message: "legacy" }).message, "legacy");
+  assert.equal(updateApplyFailureNotice(null), null);
+});
+
+test("issue #7248: a settled apply failure names expected and observed versions", () => {
+  const notice = updateApplyResultNotice({
+    outcome: "failure", from_version: "1.0.0", to_version: "1.1.0", observed_version: "1.0.0",
+    attempt: 2, recorded_at: "2026-11-11T00:00:00Z", message: "mismatch",
+  });
+  assert.equal(notice.key, "update-apply-result:2026-11-11T00:00:00Z");
+  assert.equal(notice.title, "Update failed: v1.0.0 → v1.1.0");
+  assert.match(notice.message, /expected v1\.1\.0, observed v1\.0\.0/);
+  assert.match(notice.details, /mismatch/);
+  assert.equal(updateApplyResultNotice({ outcome: "success", to_version: "1.1.0" }), null);
+  assert.equal(updateApplyResultNotice(null), null);
+});
+
+test("issue #7248: app.js records every apply failure outside the CTA status gate", () => {
+  const block = appSource.match(/case "update_apply_error":[\s\S]*?break;/)?.[0];
+  assert.ok(block);
+  assert.match(block, /updateApplyFailureModel\.update\(\(\) => failure\)/);
+  assert.match(block, /applyUpdateApplyError\(failure\)/);
+  const failureSink = appSource.match(/updateApplyFailureModel\.subscribe\([\s\S]*?\n      \}\);/)?.[0];
+  assert.match(failureSink, /notificationCenter\.recordError\(updateApplyFailureNotice\(failure\)\)/);
+  assert.match(failureSink, /applyUpdateApplyFailure\(failure\)/);
+  assert.doesNotMatch(failureSink, /status/, "the history sink never reads the CTA status");
+  const resultSink = appSource.match(/updateApplyResultModel\.subscribe\([\s\S]*?\n      \}\);/)?.[0];
+  assert.match(resultSink, /recordUpdateFailureNotice\(updateApplyResultNotice\(result\)\)/);
+  assert.match(appSource, /updateApplyResultModel\.update\(\(\) => event\.previous_failure \?\? null\)/);
+  const settings = appSource.match(/case "update_settings":[\s\S]*?break;/)?.[0];
+  assert.match(settings, /updateApplyResultModel\.update\(\(\) => event\.status\?\.last_apply_result \?\? null\)/);
 });

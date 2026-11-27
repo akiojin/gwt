@@ -8,6 +8,50 @@
 import { createFocusTrap } from "./focus-trap.js";
 import { createUiStateStore } from "./ui-state-store.js";
 
+// Issue #7248 AC-1: every stage the backend attaches to `update_apply_error`
+// (`null` is the stage-less legacy message). The CTA modal only opens for
+// the flow it is showing, so app.js records each of these in the
+// notification center and Settings status whatever the CTA status is.
+export const UPDATE_APPLY_FAILURE_STAGES = Object.freeze([
+  "Update check",
+  "Resolve release",
+  "Replace staged update",
+  "Download asset",
+  "Persist pending",
+  "Apply update",
+  "Restart now",
+  "Apply after agents finish",
+  null,
+]);
+
+function updateFailureReason(payload) {
+  return payload?.reason || payload?.message || "Unknown reason";
+}
+
+/** Notification-center row for one `update_apply_error` event. */
+export function updateApplyFailureNotice(payload) {
+  if (!payload) return null;
+  const stage = payload.stage || null;
+  return {
+    key: `update-apply-error:${stage || "unknown"}`,
+    title: stage ? `Update failed: ${stage}` : "Update failed",
+    message: updateFailureReason(payload),
+    details: `Log: ${payload.log_path || "~/.gwt/logs (update log)"}`,
+  };
+}
+
+/** Notification-center row for a settled apply that failed after restart. */
+export function updateApplyResultNotice(result) {
+  if (result?.outcome !== "failure") return null;
+  return {
+    key: `update-apply-result:${result.recorded_at}`,
+    title: `Update failed: v${result.from_version} → v${result.to_version}`,
+    message: `After restart: expected v${result.to_version}, observed v${result.observed_version}.`,
+    details: [result.message, `Recorded ${result.recorded_at}`, "Log: ~/.gwt/logs (update log)"]
+      .filter(Boolean).join("\n"),
+  };
+}
+
 export function createUpdateCtaController({
   document,
   send,
@@ -405,9 +449,7 @@ export function createUpdateCtaController({
     }
   }
 
-  function updateFailureDetail(payload) {
-    return payload?.reason || payload?.message || "Unknown reason";
-  }
+  const updateFailureDetail = updateFailureReason;
 
   function handleUpdateState(event) {
     if (!event || (event.state !== "available" && event.state !== "up_to_date")) {
