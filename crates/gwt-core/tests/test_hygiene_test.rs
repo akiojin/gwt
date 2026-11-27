@@ -830,6 +830,62 @@ fn smuggles_the_marker() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// SPEC #4072 AC-3: production reads the user home only through the seam, so
+// a test's thread-local ScopedGwtHome pin is what every reader observes.
+// ---------------------------------------------------------------------------
+
+/// The seam itself: the one place allowed to consult the process env.
+const HOME_SEAM: &str = "crates/gwt-config/src/home.rs";
+
+#[test]
+fn production_code_reads_the_user_home_only_through_the_seam() {
+    let root = workspace_root();
+    let direct_reads: Vec<String> = target_sources(&root)
+        .into_iter()
+        .filter(|source| {
+            source.kind == SourceKind::CfgTestBlocksOnly && source.relative_path != HOME_SEAM
+        })
+        .flat_map(|source| {
+            let text = fs::read_to_string(root.join(&source.relative_path))
+                .unwrap_or_else(|error| panic!("read {}: {error}", source.relative_path));
+            hygiene::production_home_reads(&text)
+                .into_iter()
+                .map(move |(line, snippet)| format!("{}:{line}: {snippet}", source.relative_path))
+        })
+        .collect();
+    assert!(
+        direct_reads.is_empty(),
+        "production code reads the user home past the seam, so a test's \
+         ScopedGwtHome pin is invisible to it (SPEC #4072 AC-3). Read \
+         `gwt_core::env::var_os(\"HOME\")` or call `gwt_core::paths::home_dir()` \
+         instead of std::env / dirs::home_dir:\n{}",
+        direct_reads.join("\n")
+    );
+}
+
+#[test]
+fn production_home_reads_skip_tests_comments_and_the_seam_readers() {
+    let reads = hygiene::production_home_reads(
+        r#"
+pub fn direct() -> Option<PathBuf> {
+    std::env::var_os("HOME").or_else(|| env::var_os("USERPROFILE")).map(PathBuf::from)
+}
+pub fn fallback() -> Option<PathBuf> { dirs::home_dir() }
+pub fn through_the_seam() -> Option<PathBuf> {
+    // dirs::home_dir() and std::env::var("HOME") are only mentioned here.
+    gwt_core::env::var_os("HOME").map(PathBuf::from).or_else(gwt_core::paths::home_dir)
+}
+#[cfg(test)]
+mod tests {
+    fn reads_the_real_home() { let _ = dirs::home_dir(); }
+}
+"#,
+    );
+    let lines: Vec<usize> = reads.iter().map(|(line, _)| *line).collect();
+    assert_eq!(lines, vec![3, 5], "unexpected reads: {reads:?}");
+}
+
 #[test]
 fn only_cfg_test_blocks_are_scanned_in_crate_sources() {
     let text = r#"
@@ -2267,6 +2323,37 @@ mod hygiene {
         RE.get_or_init(|| {
             Regex::new(
                 r"\b(?:env\s*::\s*(?:set_var|remove_var)|ScopedEnvVar\s*::\s*(?:set|unset))\s*\(",
+            )
+            .expect("valid regex")
+        })
+    }
+
+    /// Lines (1-based) of production code, outside `#[cfg(test)]` blocks and
+    /// comments, that read HOME / USERPROFILE from `std::env` or call
+    /// `dirs::home_dir()` directly (SPEC #4072 AC-3). One finding per line.
+    pub fn production_home_reads(text: &str) -> Vec<(usize, String)> {
+        let raw: Vec<&str> = text.lines().collect();
+        let lexical = lex_source(&raw);
+        let code: Vec<_> = lexical.iter().map(|(line, _)| line.clone()).collect();
+        let depths = brace_depths(&code);
+        let tests = scannable_lines(&code, &depths, SourceKind::CfgTestBlocksOnly);
+        raw.iter()
+            .zip(&lexical)
+            .enumerate()
+            .filter(|(index, (line, (_, comment)))| {
+                !tests[*index]
+                    && direct_home_read_regex().is_match(&line[..comment.unwrap_or(line.len())])
+            })
+            .map(|(index, (line, _))| (index + 1, line.trim().to_string()))
+            .collect()
+    }
+
+    fn direct_home_read_regex() -> &'static Regex {
+        static RE: OnceLock<Regex> = OnceLock::new();
+        RE.get_or_init(|| {
+            // `env::` qualified by another crate (gwt_core::env) is the seam.
+            Regex::new(
+                r#"(?:\bstd::|(?:^|[^:\w]))env::var(?:_os)?\s*\(\s*"(?:HOME|USERPROFILE)"|\bdirs::home_dir\s*\("#,
             )
             .expect("valid regex")
         })
