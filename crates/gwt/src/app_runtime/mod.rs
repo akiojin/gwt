@@ -156,6 +156,8 @@ fn user_event_priority(event: &UserEvent) -> AppEventPriority {
         | UserEvent::PmConversationLoaded { .. }
         | UserEvent::MenuEvent(_)
         | UserEvent::QuitApp { .. }
+        | UserEvent::ApplyUpdateStart { .. }
+        | UserEvent::CancelUpdateDownload { .. }
         | UserEvent::ApplyUpdateRestartNow { .. }
         | UserEvent::ApplyUpdateGraceful { .. }
         | UserEvent::UpdateApplyResolutionFailed(_)
@@ -501,6 +503,7 @@ pub(crate) enum UpdateAutoApplyRelease {
     Deferred,
     /// The persisted manifest for the drained version is gone.
     PayloadMissing,
+    DownloadCancelled,
     /// A newer release invalidated this staged version.
     Superseded,
     RequiresElevation,
@@ -2483,6 +2486,10 @@ pub struct AppRuntime {
     pub(crate) update_check_in_flight: bool,
     /// Initiator of the shared download, or None when its worker is idle.
     pub(crate) update_download_in_flight: Option<ClientId>,
+    pub(crate) update_download_cancel: Option<tokio::sync::watch::Sender<bool>>,
+    pub(crate) update_download_retry: Option<(gwt_core::update::UpdateState, ClientId)>,
+    pub(crate) pending_update_version_resolutions: HashMap<(ClientId, String), Arc<()>>,
+    pub(crate) last_download_manifest: Option<gwt_core::update::PendingUpdateManifest>,
     /// Newest discovery to retry if the active download fails.
     pub(crate) deferred_update_discovery: Option<gwt_core::update::UpdateState>,
     /// Browser-uploaded attachment temp files waiting to be staged under the
@@ -5400,6 +5407,10 @@ impl AppRuntime {
             pending_update: None,
             update_check_in_flight: false,
             update_download_in_flight: None,
+            update_download_cancel: None,
+            update_download_retry: None,
+            pending_update_version_resolutions: Default::default(),
+            last_download_manifest: None,
             deferred_update_discovery: None,
             attachment_uploads,
             persist_dispatcher,
@@ -11441,10 +11452,13 @@ impl AppRuntime {
                 Some(_) => {}
             }
         }
-        if release == UpdateAutoApplyRelease::Deferred && !released {
+        if release == UpdateAutoApplyRelease::DownloadCancelled
+            || (release == UpdateAutoApplyRelease::Deferred && !released)
+        {
             return Ok(events);
         }
         let (level, message) = match release {
+            UpdateAutoApplyRelease::DownloadCancelled => unreachable!(),
             UpdateAutoApplyRelease::Cancelled | UpdateAutoApplyRelease::Deferred => (
                 "info",
                 format!(
@@ -11482,6 +11496,7 @@ impl AppRuntime {
                 UpdateAutoApplyRelease::Cancelled | UpdateAutoApplyRelease::Deferred => {
                     "pending_refused"
                 }
+                UpdateAutoApplyRelease::DownloadCancelled => unreachable!(),
                 UpdateAutoApplyRelease::PayloadMissing => "pending_failed",
                 UpdateAutoApplyRelease::Superseded => "pending_superseded",
                 UpdateAutoApplyRelease::RequiresElevation => "pending_refused",
@@ -11983,7 +11998,9 @@ impl AppRuntime {
             FrontendEvent::ApplyUpdateToVersion { version } => {
                 self.apply_update_to_version_events(&client_id, version)
             }
-            FrontendEvent::CancelUpdateDownload => self.cancel_update_download_events(&client_id),
+            FrontendEvent::CancelUpdateDownload { version } => {
+                self.cancel_update_download_events(version)
+            }
             FrontendEvent::ApplyUpdateLater => self.apply_update_later_events(&client_id),
             FrontendEvent::ApplyUpdateRestartNow => {
                 self.apply_update_restart_now_events(&client_id)
@@ -13412,7 +13429,9 @@ impl AppRuntime {
                 work_id,
                 close_kind,
             } => self.close_work(context, &work_id, &close_kind),
-            FrontendEvent::CancelUpdateDownload => self.cancel_update_download_events(&client_id),
+            FrontendEvent::CancelUpdateDownload { version } => {
+                self.cancel_update_download_events(version)
+            }
             FrontendEvent::ApplyUpdateLater => self.apply_update_later_events(&client_id),
             FrontendEvent::ApplyUpdateRestartNow => {
                 self.apply_update_restart_now_events(&client_id)

@@ -516,7 +516,7 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         FrontendEvent::ApplyUpdateStart => {
             FrontendUserActionLog::new("apply_update_start", "update")
         }
-        FrontendEvent::CancelUpdateDownload => {
+        FrontendEvent::CancelUpdateDownload { .. } => {
             FrontendUserActionLog::new("cancel_update_download", "update")
         }
         FrontendEvent::ApplyUpdateLater => {
