@@ -2149,6 +2149,44 @@ impl<T: HttpTransport> HttpIssueClient<T> {
         Ok(after)
     }
 
+    fn resolve_duplicate_issue_id(&self, number: IssueNumber) -> Result<u64, ApiError> {
+        let operation = "resolve duplicate issue ID";
+        self.admit(&REST_BUDGET_ARGS)?;
+        self.settle(
+            &REST_BUDGET_ARGS,
+            (|| {
+                let response = self
+                    .transport
+                    .execute(HttpRequest {
+                        method: HttpMethod::Get,
+                        url: format!(
+                            "{}/repos/{}/{}/issues/{}",
+                            self.rest_base, self.owner, self.repo, number.0
+                        ),
+                        headers: self.auth_headers(),
+                        body: None,
+                    })
+                    .map_err(|error| ApiError::Network(error.to_string()))?;
+                if response.status == 404 {
+                    return Err(ApiError::NotFound(number));
+                }
+                check_status(&response)?;
+                let issue = parse_owner_json(&response.body, operation)?;
+                if !issue["pull_request"].is_null() {
+                    return Err(ApiError::PullRequestInsteadOfIssue(number));
+                }
+                let id = required_u64(&issue, "id", operation)?;
+                if id == 0 || issue["number"].as_u64() != Some(number.0) {
+                    return Err(ApiError::Parse {
+                        operation: operation.into(),
+                        message: format!("invalid identity for duplicate target {number}"),
+                    });
+                }
+                Ok(id)
+            })(),
+        )
+    }
+
     fn rest_put(&self, path: &str, body: Value) -> Result<HttpResponse, ApiError> {
         self.admit(&REST_BUDGET_ARGS)?;
         self.settle(
@@ -4084,6 +4122,9 @@ impl<T: HttpTransport> IssueClient for HttpIssueClient<T> {
         if state == IssueState::Closed {
             if let Some(reason) = reason {
                 payload["state_reason"] = json!(reason.as_str());
+                if let IssueCloseReason::Duplicate(target) = reason {
+                    payload["duplicate_issue_id"] = json!(self.resolve_duplicate_issue_id(target)?);
+                }
             }
         }
         let resp = self.rest_patch(&path, payload)?;
