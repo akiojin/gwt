@@ -36,6 +36,10 @@ export function createUpdateCtaController({
   availabilityModel.subscribe(value => value, available => {
     if (available) renderUpdateState(available);
   });
+  const downloadStatusModel = createUiStateStore(null);
+  downloadStatusModel.subscribe(value => value, download => {
+    if (download) renderUpdateDownloadStatus(download);
+  });
   const autoApplyModel = createUiStateStore(null);
   autoApplyModel.subscribe(value => value, autoApply => {
     if (autoApply) renderUpdateAutoApply(autoApply);
@@ -959,6 +963,11 @@ export function createUpdateCtaController({
   }
 
   function handleUpdateDownloadStatus({ version, cancelled }) {
+    if (!version) return;
+    downloadStatusModel.update(() => ({ version, cancelled }));
+  }
+
+  function renderUpdateDownloadStatus({ version, cancelled }) {
     if (!cancelled) {
       if (version === cancelledDownloadVersion && !waitingForDownloadCancel) {
         cancelledDownloadVersion = null;
