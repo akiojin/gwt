@@ -2349,7 +2349,7 @@ pub(crate) fn release_reaped_project_member(
                     .transition_agent_switch(
                         &operation,
                         AgentSwitchStage::Returned,
-                        Some("The source slot was returned. Saved work is waiting for its dependencies.".into()),
+                        None,
                     )
                     .map_err(std::io::Error::other)?;
             }

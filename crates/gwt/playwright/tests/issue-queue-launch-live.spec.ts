@@ -3217,7 +3217,7 @@ request.catch(() => {});
       const progress = agents.locator(".roster-switch-status");
       const refresh = agents.getByRole("button", { name: "Refresh plans", exact: true });
       await refresh.click();
-      await expect(progress).toContainText("#43 · Slot returned. Waiting to resume…", { timeout: 30_000 });
+      await expect(progress).toHaveText("#43 · Slot returned. Waiting to resume…", { timeout: 30_000 });
       await expect(progress).not.toContainText("Next issue");
       await info.attach(`shared-save-return-pending-${theme}`, { body: await page.screenshot(), contentType: "image/png" });
 
