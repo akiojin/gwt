@@ -47,3 +47,22 @@ p50 / p95 は nearest-rank。n=10 のため p95 は最悪値と同じ。
 - `p02-driver.json`: driver の出力（各 open の route 値、timeout の有無、Hub の error message）。
 - `p02-project-open-samples.jsonl`: isolated perf log から抜き出した `route:project.open` の生サンプル。
 - `p02-environment.txt`: checkout SHA、version、OS、CPU、採取時刻。
+
+## 計測できなかった行
+
+### P07 / P17 / P18（terminal 系）
+
+隔離インスタンス（P02 と同じ条件）で plain の Shell window を開き、headed Chromium から入力・wheel・出力の時刻を取る計測を試みたが、値は得られなかった。
+
+- 観測: Shell window は Running と表示されるが、入力と resize はすべて `window_command_error`（`background process connection changed. Automatic recovery stopped after 10 attempts`）で拒否され、prompt も出力も xterm に届かなかった。
+- 原因の手がかり: GUI 側の `project_owner_identity` が `None` のまま、runtime daemon 側の project owner は起動の約 15 秒後に `gui_presence_expired`（`gui_presence_count: 0`）で停止し、置き換えを繰り返した。fresh HOME の debug インスタンスで GUI presence が登録されていない。
+- 計測に必要な条件: Shell window の PTY が入力を受け付けるインスタンス。PM が #8043 として起票した。#8043 の解消まで計測不能とする。
+- 起点・終点の案（次に測る人向け）: P17 は `terminal_output` frame の受信からマーカーが buffer に入った後の最初の animation frame、P18 は wheel event から viewport 移動後の最初の animation frame、P07 は Enter の keydown から、続けて打った文字が buffer に入った後の最初の animation frame。macOS では window が隠れていると animation frame が止まるため、Chromium の occlusion throttling を無効にして測る。
+
+### P19（worktree picker 列挙）
+
+経路が存在しない。File Tree surface は 2026-10-16 の `d2f04c7518`（廃止サーフェスの Rust 表示経路を削除）で取り除かれ、`WindowPreset::FileTree` は `is_removed_legacy` になっている。PM の承認（2026-11-28）により inventory の主表から除外した。
+
+### P20（workspace merge 状態の反映）
+
+外から起動する操作が無い。merge 状態の scan は Work events ingest と tick の continuation として内部で始まり、要求を区切る event も route 計装も無い。値を得るには #3700 の route 計装（scan 要求から反映まで）の追加が必要。PM の裁定（2026-11-28）で今回は計装を追加せず、「未計装・外部起動操作なし」として残し、Phase 2 後半で再評価する。
