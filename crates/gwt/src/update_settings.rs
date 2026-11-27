@@ -16,6 +16,9 @@ pub struct Status {
     pub auto_apply_updates_effective: bool,
     /// The project's current admission hold, rather than saved inactive metadata.
     pub update_drain: Option<IssueMonitorUpdateDrain>,
+    /// Issue #7248: the last settled apply, shown in Settings status.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_apply_result: Option<gwt_core::update::UpdateApplyResult>,
 }
 
 /// Read the global preference and this project's effective admission hold.
@@ -42,6 +45,7 @@ pub fn status(project_root: &Path) -> io::Result<Status> {
         auto_apply_updates,
         auto_apply_updates_effective: auto_apply_updates.unwrap_or(false),
         update_drain,
+        last_apply_result: gwt_core::update::load_update_apply_result(),
     })
 }
 
@@ -354,6 +358,22 @@ mod tests {
         assert_eq!(status.update_drain, Some(expected_drain));
         assert!(!gwt_core::paths::gwt_config_path().exists());
         assert_eq!(fs::read(&prefs_path).unwrap(), before);
+        assert_eq!(status.last_apply_result, None);
+
+        // Issue #7248: Settings status carries the last settled apply.
+        let failure = gwt_core::update::UpdateApplyResult {
+            outcome: gwt_core::update::UpdateApplyOutcome::Failure,
+            from_version: "9.109.0".into(),
+            to_version: "9.110.0".into(),
+            observed_version: "9.109.0".into(),
+            attempt: 2,
+            recorded_at: "2026-10-05T19:12:00Z".into(),
+            message: Some("version mismatch".into()),
+            notify_on_gui_startup: false,
+        };
+        gwt_core::update::persist_update_apply_result(&failure).unwrap();
+        let status = super::status(&project_root).unwrap();
+        assert_eq!(status.last_apply_result, Some(failure));
 
         super::set(Some(true)).unwrap();
         let status = super::status(&project_root).unwrap();

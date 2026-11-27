@@ -261,6 +261,7 @@ function createHubApp({ document: doc, window: win, setVersion, setPm = () => {}
           accounts: event.accounts || [],
           sessions: (event.sessions || []).filter(session => session.active !== false),
           consumption: event.consumption || [],
+          providers: event.providers || [],
         });
         return true;
       case "supported_agent_list":

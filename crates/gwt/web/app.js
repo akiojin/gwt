@@ -62,7 +62,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
       import { createWorkspaceRenderSync } from "/issue-render-sync.js";
       import { createRenderDegradationBanner } from "/render-degradation-banner.js";
       import { createWorkspaceStateNotice } from "/workspace-state-notice.js";
-      import { createUpdateCtaController } from "/update-cta.js";
+      import { createUpdateCtaController, updateApplyFailureNotice, updateApplyResultNotice } from "/update-cta.js";
       // SPEC-2356 Anshin Addendum (FR-040): the in-app attention toaster ships
       // alongside the server-intent desktop notifier in the same module.
       import {
@@ -1088,6 +1088,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         handleUpdateProgress: applyUpdateProgress,
         handleUpdateApplyError: applyUpdateApplyError,
         handleUpdateReady: applyUpdateReady,
+        handleUpdateDownloadStatus: applyUpdateDownloadStatus,
         handleUpdateApplyPendingPersisted: applyUpdateApplyPendingPersisted,
         ...updateCtaController
       } = createUpdateCtaController({
@@ -1105,6 +1106,8 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
       const updateCheckResultModel = createUiStateStore(null);
       updateCheckResultModel.subscribe(event => event, event => {
         if (event) updateCtaController.handleUpdateCheckResult(event);
+        // Issue #7248: a failed settled apply stays in the history.
+        if (event) updateApplyResultModel.update(() => event.previous_failure ?? null);
       });
 
       // SPEC-2359 W-17 (FR-399): explicit full-screen overlay while the
@@ -4132,6 +4135,27 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
       // and modals). It is a pure sink; firing/dedup/gating stay in the controllers.
       const notificationCenter = createNotificationCenter({ document });
       notificationCenter.mount(document.body);
+      // Issue #7248: a settled apply result arrives again with every Settings
+      // refresh and header check; record each recorded failure once.
+      const recordedUpdateResultKeys = new Set();
+      function recordUpdateFailureNotice(notice) {
+        if (!notice || recordedUpdateResultKeys.has(notice.key)) return;
+        recordedUpdateResultKeys.add(notice.key);
+        notificationCenter.recordError(notice);
+      }
+      const updateApplyResultModel = createUiStateStore(null);
+      updateApplyResultModel.subscribe(result => result, result => {
+        recordUpdateFailureNotice(updateApplyResultNotice(result));
+      });
+      // Issue #7248 AC-1: the CTA modal opens only for the flow it is
+      // showing; every failure, in any CTA status, is recorded in the
+      // notification center and Settings status.
+      const updateApplyFailureModel = createUiStateStore(null);
+      updateApplyFailureModel.subscribe(failure => failure, failure => {
+        if (!failure) return;
+        notificationCenter.recordError(updateApplyFailureNotice(failure));
+        applyUpdateApplyFailure(failure);
+      });
       // Issue #7740: the bell is the shared header's Notifications entry.
       const syncNotificationBell = () => appChrome.setNotifications({
         count: notificationCenter.unreadCount(),
@@ -4497,6 +4521,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
       const {
         applyHookDoctorEvent,
         applyGlobalUpdateSettings,
+        applyUpdateApplyFailure,
         applyIssueSettingsStatus,
         applySettingsRepositoryLabels,
         applySettingsLabelsFailure,
@@ -5226,6 +5251,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
               accounts: event.accounts || [],
               sessions: (event.sessions || []).filter(session => session.active !== false),
               consumption: event.consumption || [],
+              providers: event.providers || [],
             });
             break;
           case "runtime_health":
@@ -5484,13 +5510,22 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
               asset_path: event.asset_path,
             });
             break;
-          case "update_apply_error":
-            applyUpdateApplyError({
+          case "update_download_status":
+            applyUpdateDownloadStatus({
+              version: event.version,
+              cancelled: event.cancelled,
+            });
+            break;
+          case "update_apply_error": {
+            const failure = {
               stage: event.stage,
               reason: event.reason || event.message,
               log_path: event.log_path,
-            });
+            };
+            updateApplyFailureModel.update(() => failure);
+            applyUpdateApplyError(failure);
             break;
+          }
           case "update_apply_pending_persisted":
             applyUpdateApplyPendingPersisted({
               version: event.version,
@@ -5536,6 +5571,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
             break;
           case "update_settings":
             applyGlobalUpdateSettings(event);
+            updateApplyResultModel.update(() => event.status?.last_apply_result ?? null);
             break;
           case "hook_doctor":
             applyHookDoctorEvent(event);

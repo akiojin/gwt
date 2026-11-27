@@ -314,31 +314,53 @@ impl AppRuntime {
     /// downloading, so Later / Restart now use the selected release. Manual
     /// selection never enters the automatic discovery path.
     pub(super) fn apply_update_to_version_events(
-        &self,
+        &mut self,
         client_id: &str,
         version: String,
     ) -> Vec<OutboundEvent> {
         let proxy = self.proxy.clone();
-        let client_id_owned = client_id.to_string();
+        let client_id = client_id.to_string();
+        let request = std::sync::Arc::new(());
+        self.pending_update_version_resolutions
+            .insert((client_id.clone(), version.clone()), request.clone());
         self.blocking_tasks.spawn(move || {
             let manager = gwt_core::update::UpdateManager::new();
             let current_exe = std::env::current_exe().ok();
-            match manager.resolve_state_for_version(&version, current_exe.as_deref()) {
-                Ok(state) => {
-                    proxy.send(UserEvent::ApplyUpdateStart {
-                        state,
-                        client_id: client_id_owned,
-                    });
-                }
-                Err(message) => {
-                    proxy.send(UserEvent::Dispatch(vec![OutboundEvent::reply(
-                        client_id_owned,
-                        update_apply_error_failed("Resolve release", &message),
-                    )]));
-                }
-            }
+            let result = manager.resolve_state_for_version(&version, current_exe.as_deref());
+            proxy.send(UserEvent::UpdateVersionResolved {
+                client_id,
+                version,
+                request,
+                result,
+            });
         });
         vec![]
+    }
+
+    pub(crate) fn finish_update_version_resolution(
+        &mut self,
+        client_id: ClientId,
+        version: String,
+        request: &std::sync::Arc<()>,
+        result: Result<gwt_core::update::UpdateState, String>,
+    ) -> Vec<OutboundEvent> {
+        let key = (client_id.clone(), version);
+        let std::collections::hash_map::Entry::Occupied(entry) =
+            self.pending_update_version_resolutions.entry(key)
+        else {
+            return Vec::new();
+        };
+        if !std::sync::Arc::ptr_eq(entry.get(), request) {
+            return Vec::new();
+        }
+        entry.remove();
+        match result {
+            Ok(state) => crate::start_update_download(self, state, client_id),
+            Err(error) => vec![OutboundEvent::reply(
+                client_id,
+                update_apply_error_failed("Resolve release", &error),
+            )],
+        }
     }
 
     pub(super) fn save_ui_trace_events(
@@ -914,6 +936,7 @@ impl AppRuntime {
                     auto_apply_updates: configured,
                     auto_apply_updates_effective: configured.unwrap_or(false),
                     update_drain: None,
+                    last_apply_result: gwt_core::update::load_update_apply_result(),
                 })
             }
         };
@@ -1014,9 +1037,6 @@ impl AppRuntime {
     /// Shared staging request for the update CTA and automatic discovery.
     /// The worker emits `UpdateReady` or `UpdateApplyError` without exiting.
     pub(super) fn apply_update_start_events(&mut self, client_id: &str) -> Vec<OutboundEvent> {
-        if self.update_download_in_flight.is_some() {
-            return Vec::new();
-        }
         match self.pending_update.clone() {
             Some(
                 state @ gwt_core::update::UpdateState::Available {
@@ -1056,16 +1076,77 @@ impl AppRuntime {
         }
     }
 
-    /// SPEC-2041 Phase 19 (FR-055): user pressed `Cancel` mid-download.
-    /// `prepare_update` runs synchronously on a worker thread, so a true
-    /// mid-download abort is best-effort. We still defensively clear any
-    /// `~/.gwt/pending-update/manifest.json` that the worker may have
-    /// persisted between the user's click and the modal close — without this
-    /// guard, a race would leave the bootstrap path applying an update the
-    /// user explicitly cancelled (CodeRabbit P1 review on PR #2630).
-    pub(super) fn cancel_update_download_events(&self, _client_id: &str) -> Vec<OutboundEvent> {
-        let _ = gwt_core::update::clear_pending_update_manifest();
-        vec![]
+    pub(super) fn cancel_update_download_events(
+        &self,
+        version: Option<String>,
+    ) -> Vec<OutboundEvent> {
+        // Queue behind ApplyUpdateStart when frontend requests arrive in
+        // the same batch, before either download event is processed.
+        self.proxy.send(UserEvent::CancelUpdateDownload { version });
+        Vec::new()
+    }
+
+    /// Cancel the active transfer or discard its just-published stage.
+    pub(crate) fn cancel_update_download(
+        &mut self,
+        requested: Option<String>,
+    ) -> Vec<OutboundEvent> {
+        let active = match &self.pending_update {
+            Some(gwt_core::update::UpdateState::Available { latest, .. }) => Some(latest.clone()),
+            _ => None,
+        };
+        let Some(version) = requested.or_else(|| active.clone()) else {
+            return Vec::new();
+        };
+        self.pending_update_version_resolutions
+            .retain(|(_, resolving_version), _| *resolving_version != version);
+        if self.update_download_retry.as_ref().is_some_and(|(state, _)| {
+            matches!(state, gwt_core::update::UpdateState::Available { latest, .. } if *latest == version)
+        }) {
+            self.update_download_retry = None;
+        }
+        if active.as_ref() == Some(&version) {
+            if let Some(cancel) = &self.update_download_cancel {
+                cancel.send_replace(true);
+            }
+        }
+        let mut events = Vec::new();
+        if let Some(manifest) = self
+            .last_download_manifest
+            .as_ref()
+            .filter(|m| m.version == version)
+        {
+            match gwt_core::update::clear_pending_update_manifest_if_unchanged_in(
+                &gwt_core::update::pending_update_dir(),
+                manifest,
+            ) {
+                Ok(removed) => {
+                    self.last_download_manifest = None;
+                    if removed {
+                        events.extend(self.release_update_auto_apply_events(
+                            &version,
+                            super::UpdateAutoApplyRelease::DownloadCancelled,
+                        ));
+                    }
+                }
+                Err(error) => {
+                    return vec![crate::update_download_failure(
+                        "Cancel download",
+                        error,
+                        gwt_core::update::update_log_path()
+                            .to_string_lossy()
+                            .into_owned(),
+                    )]
+                }
+            }
+        }
+        events.push(OutboundEvent::broadcast(
+            BackendEvent::UpdateDownloadStatus {
+                version,
+                cancelled: true,
+            },
+        ));
+        events
     }
 
     /// SPEC-2041 Phase 19 (FR-059..061, FR-064): user pressed `Later`.

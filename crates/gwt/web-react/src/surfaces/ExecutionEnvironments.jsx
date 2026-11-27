@@ -39,6 +39,35 @@ function UsageLine({ account }) {
   );
 }
 
+// SPEC #7347 AC-1 / AC-2: every provider the backend lists, with its label and
+// its default account's usage. Unreadable usage says n/a; the reason and the
+// unknown limits are the row's tooltip.
+function ProviderUsage({ rows }) {
+  if (!rows?.length) return null;
+  return (
+    <section className="exec-env__providers" aria-label="Usage by provider">
+      <h2>Usage by provider</h2>
+      <ul className="exec-env__provider-list">
+        {rows.map(row => {
+          const reset = row.na ? null : localTimeLabel(row.resetsAt);
+          return (
+            <li key={row.provider} className="exec-env__provider" data-provider={row.provider}
+              data-na={row.na ? "true" : undefined} data-severity={row.severity || undefined}
+              title={row.naReason || undefined} aria-description={row.naReason || undefined}>
+              <span className="exec-env__provider-label" aria-hidden="true">{row.shortLabel}</span>
+              <span className="exec-env__provider-name">{row.name}</span>
+              <span className="exec-env__provider-usage">
+                {row.usage}
+                {reset ? <>{" · resets "}<time dateTime={row.resetsAt}>{reset}</time></> : null}
+              </span>
+            </li>
+          );
+        })}
+      </ul>
+    </section>
+  );
+}
+
 // Issue #7841 AC-2: the latest limit gwt saw the account hit, shown even when
 // the provider reports no usage.
 function LastLimit({ account }) {
@@ -198,6 +227,7 @@ function Accounts({
         </div>
       ) : null}
       {model.error && !dialog && !login ? <p className="exec-env__error" role="alert">{model.error}</p> : null}
+      <ProviderUsage rows={model.providerUsage} />
       {pools.length === 0 ? (
         <div className="exec-env__empty">
           <h2>{model.loaded ? model.poolProviders ? "No accounts yet" : "No accounts report usage yet" : "Loading accounts…"}</h2>

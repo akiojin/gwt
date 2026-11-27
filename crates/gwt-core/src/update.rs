@@ -17,6 +17,7 @@ use reqwest::blocking::Client;
 use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, USER_AGENT};
 use semver::Version;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fs;
@@ -122,6 +123,7 @@ struct GitHubRelease {
 struct GitHubAsset {
     name: String,
     browser_download_url: String,
+    digest: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -212,10 +214,7 @@ pub fn persist_pending_update_manifest_in(
     dir: &Path,
     manifest: &PendingUpdateManifest,
 ) -> Result<(), String> {
-    let lock = open_pending_update_manifest_lock(dir)?;
-    fs2::FileExt::lock_exclusive(&lock)
-        .map_err(|e| format!("Failed to lock pending-update manifest for staging: {e}"))?;
-    let _lock = PendingUpdateManifestLock { file: lock };
+    let _lock = wait_for_pending_update_manifest_lock(dir)?;
     let mut staged = manifest.clone();
     if let Some(current) =
         load_pending_update_manifest_in(dir).filter(|current| current.version == staged.version)
@@ -262,6 +261,13 @@ pub fn pending_update_manifest_lock(dir: &Path) -> Result<PendingUpdateManifestL
     let lock = open_pending_update_manifest_lock(dir)?;
     fs2::FileExt::try_lock_exclusive(&lock)
         .map_err(|e| format!("Pending-update manifest is busy or cannot be locked: {e}"))?;
+    Ok(PendingUpdateManifestLock { file: lock })
+}
+
+fn wait_for_pending_update_manifest_lock(dir: &Path) -> Result<PendingUpdateManifestLock, String> {
+    let lock = open_pending_update_manifest_lock(dir)?;
+    fs2::FileExt::lock_exclusive(&lock)
+        .map_err(|e| format!("Failed to lock pending-update manifest: {e}"))?;
     Ok(PendingUpdateManifestLock { file: lock })
 }
 
@@ -444,9 +450,9 @@ pub struct UpdateResumeProject {
     pub update_drain: bool,
 }
 
-/// Issue #4038 (AC-3): what the GUI was doing right before it quit to apply an
-/// update, written to `~/.gwt/update-resume/marker.json` before the helper is
-/// spawned and consumed by the next bootstrap. Its presence is the only
+/// What the application was doing right before it quit to apply an update,
+/// written to `~/.gwt/update-resume/marker.json` before the helper is spawned
+/// and consumed by the next bootstrap. Its presence is the only
 /// signal that a launch is the tail of an apply rather than a cold start.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UpdateResumeMarker {
@@ -465,6 +471,9 @@ pub struct UpdateResumeMarker {
     /// How many restarts have tried to settle this marker (starts at 1).
     #[serde(default = "default_update_resume_attempt")]
     pub attempt: u32,
+    /// The CLI parent during handoff, then the helper until the payload is applied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub helper_pid: Option<u32>,
 }
 
 fn default_update_resume_attempt() -> u32 {
@@ -540,6 +549,21 @@ pub struct UpdateApplyResult {
     pub recorded_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    /// The CLI settled the marker before the GUI could report the outcome.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub notify_on_gui_startup: bool,
+}
+
+impl UpdateApplyResult {
+    pub fn notice(&self) -> String {
+        match self.outcome {
+            UpdateApplyOutcome::Success => format!("Updated to v{}", self.to_version),
+            UpdateApplyOutcome::Failure => format!(
+                "Update to v{} failed: still running v{} (attempt {}). Click the version label to open Release Notes and retry.",
+                self.to_version, self.observed_version, self.attempt
+            ),
+        }
+    }
 }
 
 /// `~/.gwt/updates/apply-result.json`.
@@ -703,14 +727,10 @@ impl UpdateResumeSettlement {
     /// Human-readable notification-center line for this settle.
     pub fn notice(&self) -> String {
         match &self.outcome {
-            UpdateResumeOutcome::Applied => format!(
-                "Updated to v{}; execution resumed",
-                self.marker.to_version
-            ),
-            UpdateResumeOutcome::VersionMismatch { observed_version } => format!(
-                "Update to v{} failed: still running v{} (attempt {}); execution resumed without the update",
-                self.marker.to_version, observed_version, self.marker.attempt
-            ),
+            UpdateResumeOutcome::Applied => {
+                format!("Updated to v{}; execution resumed", self.marker.to_version)
+            }
+            UpdateResumeOutcome::VersionMismatch { .. } => self.result.notice(),
         }
     }
 }
@@ -722,12 +742,35 @@ pub fn settle_update_resume_marker(
     current_version: &str,
     now: UtcTimestamp,
 ) -> Option<UpdateResumeSettlement> {
-    let settlement = settle_update_resume_marker_in(
-        &update_resume_dir(),
-        &crate::paths::gwt_updates_dir(),
-        current_version,
-        now,
-    )?;
+    settle_update_resume_at_startup(current_version, now, false)
+}
+
+/// The restarted update command can settle only a CLI attempt. The GUI owns
+/// the drain holds and session restore information in its own markers.
+pub fn settle_cli_update_resume_marker(
+    current_version: &str,
+    now: UtcTimestamp,
+) -> Option<UpdateResumeSettlement> {
+    settle_update_resume_at_startup(current_version, now, true)
+}
+
+fn settle_update_resume_at_startup(
+    current_version: &str,
+    now: UtcTimestamp,
+    cli_startup: bool,
+) -> Option<UpdateResumeSettlement> {
+    let resume_dir = update_resume_dir();
+    load_update_resume_marker_in(&resume_dir)?;
+    let settlement = {
+        let _lock = wait_for_pending_update_manifest_lock(&pending_update_dir()).ok()?;
+        settle_update_resume_marker_for_startup(
+            &resume_dir,
+            &crate::paths::gwt_updates_dir(),
+            current_version,
+            now,
+            cli_startup,
+        )?
+    };
     if matches!(
         settlement.outcome,
         UpdateResumeOutcome::VersionMismatch { .. }
@@ -742,6 +785,22 @@ pub fn settle_update_resume_marker(
     Some(settlement)
 }
 
+/// Consume a result notification when the CLI already settled its marker.
+pub fn take_cli_update_resume_notice() -> Option<UpdateApplyResult> {
+    let result = load_update_apply_result()?;
+    if !result.notify_on_gui_startup {
+        return None;
+    }
+    let _lock = wait_for_pending_update_manifest_lock(&pending_update_dir()).ok()?;
+    let mut result = load_update_apply_result()?;
+    if !result.notify_on_gui_startup {
+        return None;
+    }
+    result.notify_on_gui_startup = false;
+    persist_update_apply_result(&result).ok()?;
+    Some(result)
+}
+
 /// Test-friendly variant of [`settle_update_resume_marker`].
 pub fn settle_update_resume_marker_in(
     resume_dir: &Path,
@@ -749,7 +808,27 @@ pub fn settle_update_resume_marker_in(
     current_version: &str,
     now: UtcTimestamp,
 ) -> Option<UpdateResumeSettlement> {
+    settle_update_resume_marker_for_startup(resume_dir, updates_dir, current_version, now, false)
+}
+
+fn settle_update_resume_marker_for_startup(
+    resume_dir: &Path,
+    updates_dir: &Path,
+    current_version: &str,
+    now: UtcTimestamp,
+    cli_startup: bool,
+) -> Option<UpdateResumeSettlement> {
     let marker = load_update_resume_marker_in(resume_dir)?;
+    if cli_startup && !is_cli_update_restart(&marker.restart_args) {
+        return None;
+    }
+    if marker.helper_pid.is_some_and(|pid| {
+        SystemProcessExecutor
+            .run(process_probe_request(pid, cfg!(windows)))
+            .map_or(true, |output| output.success)
+    }) {
+        return None;
+    }
     let normalize = |v: &str| v.trim().trim_start_matches('v').to_string();
     let observed_version = normalize(current_version);
     let applied = observed_version == normalize(&marker.to_version);
@@ -764,6 +843,7 @@ pub fn settle_update_resume_marker_in(
                 attempt: marker.attempt,
                 recorded_at: now.to_rfc3339(),
                 message: None,
+                notify_on_gui_startup: cli_startup,
             },
         )
     } else {
@@ -782,6 +862,7 @@ pub fn settle_update_resume_marker_in(
                     "expected v{} after restart but the running binary is v{observed_version}",
                     normalize(&marker.to_version)
                 )),
+                notify_on_gui_startup: cli_startup,
             },
         )
     };
@@ -790,6 +871,7 @@ pub fn settle_update_resume_marker_in(
             "fail",
             &[("stage", "record_apply_result"), ("reason", &err)],
         );
+        return None;
     }
     let marker_write = clear_update_resume_marker_in(resume_dir);
     if let Err(err) = marker_write {
@@ -1032,7 +1114,7 @@ pub struct UpdateManager {
     api_base_url: String,
     cache_path: PathBuf,
     updates_dir: PathBuf,
-    client: Client,
+    client: reqwest::Client,
     release_client: Client,
 }
 
@@ -1177,12 +1259,12 @@ impl UpdateManager {
             .timeout(REQUEST_TIMEOUT)
             .build()
             .expect("valid release HTTP client configuration");
-        let client = Client::builder()
+        let client = reqwest::Client::builder()
             .default_headers(headers)
             .connect_timeout(CONNECT_TIMEOUT)
             .timeout(REQUEST_TIMEOUT)
             .build()
-            .unwrap_or_else(|_| Client::new());
+            .unwrap_or_else(|_| reqwest::Client::new());
 
         // SPEC-2041 Phase 19 (T-137 enabler): allow Gate 2 mock smokes to
         // redirect the update API to a local fixture by setting
@@ -1351,6 +1433,22 @@ impl UpdateManager {
         asset_url: &str,
         progress: &mut dyn FnMut(u64, Option<u64>),
     ) -> Result<PreparedPayload, String> {
+        self.prepare_update_cancellable(latest, asset_url, progress, None)
+    }
+
+    pub fn prepare_update_cancellable(
+        &self,
+        latest: &str,
+        asset_url: &str,
+        progress: &mut dyn FnMut(u64, Option<u64>),
+        cancelled: Option<tokio::sync::watch::Receiver<bool>>,
+    ) -> Result<PreparedPayload, String> {
+        let release = self.fetch_release_by_tag(latest)?;
+        let asset = release
+            .assets
+            .iter()
+            .find(|asset| asset.browser_download_url == asset_url)
+            .ok_or_else(|| format!("Release {latest} does not list the selected update asset"))?;
         let update_dir = self
             .updates_dir
             .join(format!("v{}", latest.trim().trim_start_matches('v')));
@@ -1359,7 +1457,7 @@ impl UpdateManager {
         let asset_name = asset_name_from_url(asset_url).unwrap_or_else(|| "gwt-update".to_string());
         let dest = update_dir.join(&asset_name);
 
-        self.download_asset_with_progress(asset_url, &dest, progress)?;
+        self.download_asset_with_progress(asset, &dest, progress, cancelled)?;
 
         let dest_str = dest.to_string_lossy().to_string();
         if dest_str.ends_with(".tar.gz") || dest_str.ends_with(".zip") {
@@ -1419,11 +1517,10 @@ impl UpdateManager {
             })?
             .to_string();
         let asset_name = docker_linux_bundle_asset_name(target_arch)?;
-        let asset_url = release
+        let asset = release
             .assets
             .iter()
             .find(|asset| asset.name == asset_name)
-            .map(|asset| asset.browser_download_url.as_str())
             .ok_or_else(|| {
                 format!(
                     "Latest release {} does not include required Docker bundle asset {}",
@@ -1431,20 +1528,13 @@ impl UpdateManager {
                 )
             })?;
 
-        self.install_docker_linux_bundle_from_url(
-            &version,
-            &asset_name,
-            asset_url,
-            target_gwt,
-            target_gwtd,
-        )
+        self.install_docker_linux_bundle(&version, asset, target_gwt, target_gwtd)
     }
 
-    fn install_docker_linux_bundle_from_url(
+    fn install_docker_linux_bundle(
         &self,
         version: &str,
-        asset_name: &str,
-        asset_url: &str,
+        asset: &GitHubAsset,
         target_gwt: &Path,
         target_gwtd: &Path,
     ) -> Result<InstalledDockerLinuxBundle, String> {
@@ -1454,8 +1544,8 @@ impl UpdateManager {
             .join(format!("v{}", version.trim().trim_start_matches('v')));
         fs::create_dir_all(&update_dir).map_err(|e| format!("Failed to create update dir: {e}"))?;
 
-        let dest = update_dir.join(asset_name);
-        self.download_asset(asset_url, &dest)?;
+        let dest = update_dir.join(&asset.name);
+        self.download_asset_with_progress(asset, &dest, &mut |_, _| {}, None)?;
 
         let extract_dir = update_dir.join("extract");
         let _ = fs::remove_dir_all(&extract_dir);
@@ -1478,13 +1568,6 @@ impl UpdateManager {
         })
     }
 
-    fn download_asset(&self, asset_url: &str, dest: &Path) -> Result<(), String> {
-        // Phase 19 backward-compat: callers that don't need byte-level
-        // progress (Docker bundle install, legacy CLI flow) tunnel through
-        // the chunked downloader with a no-op callback.
-        self.download_asset_with_progress(asset_url, dest, &mut |_, _| {})
-    }
-
     /// SPEC-2041 Phase 19 (FR-054): chunked downloader that drives a progress
     /// callback. Reads the response in 64 KiB chunks so the callback fires
     /// frequently enough to render a smooth progress bar without overwhelming
@@ -1494,53 +1577,86 @@ impl UpdateManager {
     /// before any bytes arrive.
     fn download_asset_with_progress(
         &self,
-        asset_url: &str,
+        asset: &GitHubAsset,
         dest: &Path,
         progress: &mut dyn FnMut(u64, Option<u64>),
+        cancelled: Option<tokio::sync::watch::Receiver<bool>>,
     ) -> Result<(), String> {
-        use std::io::{Read, Write};
-        if let Some(parent) = dest.parent() {
-            fs::create_dir_all(parent).map_err(|e| format!("Failed to create payload dir: {e}"))?;
-        }
+        use std::io::Write;
+        let expected = asset
+            .digest
+            .as_deref()
+            .and_then(|digest| digest.strip_prefix("sha256:"))
+            .filter(|digest| digest.len() == 64 && digest.bytes().all(|b| b.is_ascii_hexdigit()))
+            .ok_or_else(|| {
+                let error = format!("Missing or invalid SHA-256 digest for {}", asset.name);
+                log_update_event("payload_integrity_failed", &[("reason", &error)]);
+                error
+            })?;
 
-        let res = self
-            .client
-            .get(asset_url)
-            .send()
-            .map_err(|e| format!("Download failed: {e}"))?;
-        if !res.status().is_success() {
-            return Err(format!("Download failed with status {}", res.status()));
-        }
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| format!("Failed to create download runtime: {e}"))?;
+        let file = runtime.block_on(async {
+            let transfer = async {
+                let mut response = self
+                    .client
+                    .get(&asset.browser_download_url)
+                    .send().await
+                    .map_err(|e| format!("Download failed: {e}"))?;
+                if !response.status().is_success() {
+                    return Err(format!("Download failed with status {}", response.status()));
+                }
 
-        let total = res.content_length();
-        progress(0, total);
+                let total = response.content_length();
+                progress(0, total);
 
-        let mut file =
-            fs::File::create(dest).map_err(|e| format!("Failed to create payload file: {e}"))?;
-        let mut reader = res;
-        let mut buffer = [0u8; 64 * 1024];
-        let mut downloaded: u64 = 0;
-        loop {
-            let n = reader
-                .read(&mut buffer)
-                .map_err(|e| format!("Failed to read payload chunk: {e}"))?;
-            if n == 0 {
-                break;
+                let parent = dest.parent().ok_or("Invalid payload path")?;
+                let mut file = tempfile::NamedTempFile::new_in(parent)
+                    .map_err(|e| format!("Failed to create temporary payload file: {e}"))?;
+                let mut hasher = Sha256::new();
+                let mut downloaded: u64 = 0;
+                while let Some(chunk) = response
+                    .chunk()
+                    .await
+                    .map_err(|e| format!("Failed to read payload chunk: {e}"))?
+                {
+                    file.write_all(&chunk)
+                        .map_err(|e| format!("Failed to write payload: {e}"))?;
+                    hasher.update(&chunk);
+                    downloaded = downloaded.saturating_add(chunk.len() as u64);
+                    progress(downloaded, total);
+                }
+                // Ensure the final progress tick reflects the actual on-disk size,
+                // even when the server omitted Content-Length.
+                progress(downloaded, total.or(Some(downloaded)));
+
+                if downloaded == 0 {
+                    return Err("Downloaded payload is empty".to_string());
+                }
+                let actual = format!("{:x}", hasher.finalize());
+                if !expected.eq_ignore_ascii_case(&actual) {
+                    let error = format!(
+                        "SHA-256 checksum mismatch for {}: expected {expected}, got {actual}",
+                        asset.name
+                    );
+                    log_update_event("payload_integrity_failed", &[("reason", &error)]);
+                    return Err(error);
+                }
+                Ok(file)
+            };
+            match cancelled {
+                Some(mut cancelled) => tokio::select! {
+                    biased;
+                    _ = cancelled.wait_for(|cancelled| *cancelled) => Err("Update download cancelled".to_string()),
+                    result = transfer => result,
+                },
+                None => transfer.await,
             }
-            file.write_all(&buffer[..n])
-                .map_err(|e| format!("Failed to write payload: {e}"))?;
-            downloaded = downloaded.saturating_add(n as u64);
-            progress(downloaded, total);
-        }
-        // Ensure the final progress tick reflects the actual on-disk size,
-        // even when the server omitted Content-Length.
-        progress(downloaded, total.or(Some(downloaded)));
-
-        let size = fs::metadata(dest).map(|m| m.len()).unwrap_or_default();
-        if size == 0 {
-            let _ = fs::remove_file(dest);
-            return Err("Downloaded payload is empty".to_string());
-        }
+        })?;
+        file.persist(dest)
+            .map_err(|e| format!("Failed to stage verified payload: {e}"))?;
         Ok(())
     }
 
@@ -1592,7 +1708,7 @@ impl UpdateManager {
         target_exe: &Path,
         new_exe: &Path,
         args_file: &Path,
-    ) -> Result<(), String> {
+    ) -> Result<u32, String> {
         self.spawn_internal_apply_update_with_executor(
             helper_exe,
             old_pid,
@@ -1600,7 +1716,8 @@ impl UpdateManager {
             new_exe,
             args_file,
             &SystemProcessExecutor,
-        )
+        )?
+        .ok_or_else(|| "Update helper spawn did not return a process ID".to_string())
     }
 
     /// SPEC-3014 FR-002: executor-injectable variant of
@@ -1613,7 +1730,7 @@ impl UpdateManager {
         new_exe: &Path,
         args_file: &Path,
         executor: &dyn ProcessExecutor,
-    ) -> Result<(), String> {
+    ) -> Result<Option<u32>, String> {
         let request = ProcessRequest::new(helper_exe)
             .arg("__internal")
             .arg("apply-update")
@@ -1628,8 +1745,8 @@ impl UpdateManager {
             .mode(ExecutionMode::Spawn);
         executor
             .run(request)
-            .map_err(|e| format!("Failed to spawn update helper: {e}"))?;
-        Ok(())
+            .map(|output| output.spawned_pid)
+            .map_err(|e| format!("Failed to spawn update helper: {e}"))
     }
 
     pub fn spawn_internal_run_installer(
@@ -1640,7 +1757,7 @@ impl UpdateManager {
         installer: &Path,
         installer_kind: InstallerKind,
         args_file: &Path,
-    ) -> Result<(), String> {
+    ) -> Result<u32, String> {
         self.spawn_internal_run_installer_with_executor(
             helper_exe,
             old_pid,
@@ -1649,7 +1766,8 @@ impl UpdateManager {
             installer_kind,
             args_file,
             &SystemProcessExecutor,
-        )
+        )?
+        .ok_or_else(|| "Installer helper spawn did not return a process ID".to_string())
     }
 
     /// SPEC-3014 FR-002: executor-injectable variant of
@@ -1664,7 +1782,7 @@ impl UpdateManager {
         installer_kind: InstallerKind,
         args_file: &Path,
         executor: &dyn ProcessExecutor,
-    ) -> Result<(), String> {
+    ) -> Result<Option<u32>, String> {
         let request = ProcessRequest::new(helper_exe)
             .arg("__internal")
             .arg("run-installer")
@@ -1685,8 +1803,8 @@ impl UpdateManager {
             .mode(ExecutionMode::Spawn);
         executor
             .run(request)
-            .map_err(|e| format!("Failed to spawn installer helper: {e}"))?;
-        Ok(())
+            .map(|output| output.spawned_pid)
+            .map_err(|e| format!("Failed to spawn installer helper: {e}"))
     }
 
     pub fn make_helper_copy(&self, current_exe: &Path, latest: &str) -> Result<PathBuf, String> {
@@ -1992,7 +2110,9 @@ pub fn internal_apply_update_with_executor(
 ) -> Result<(), String> {
     wait_for_pid_exit(old_pid, Duration::from_secs(300), executor)?;
     let args = UpdateManager::read_restart_args_file(args_file)?;
+    let cli_marker = owned_cli_update_marker(&args)?;
     replace_bundle_executables(target_exe, source_exe)?;
+    finish_cli_update_apply(cli_marker)?;
 
     executor
         .run(
@@ -2036,6 +2156,7 @@ pub fn internal_run_installer_with_executor(
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     {
         let restart = UpdateManager::read_restart_args_file_config(args_file)?;
+        let cli_marker = owned_cli_update_marker(&restart.args)?;
         let automatic_refusal = prepared_payload_automatic_apply_refusal(
             &PreparedPayload::Installer {
                 path: installer.to_path_buf(),
@@ -2100,6 +2221,7 @@ pub fn internal_run_installer_with_executor(
         };
 
         let restart_exe = fs::canonicalize(&restart_exe).unwrap_or(restart_exe);
+        finish_cli_update_apply(cli_marker)?;
         executor
             .run(
                 ProcessRequest::new(&restart_exe)
@@ -2115,6 +2237,38 @@ pub fn internal_run_installer_with_executor(
         let _ = (target_exe, installer, installer_kind, args_file);
         Err("installer updates are not supported on this platform".to_string())
     }
+}
+
+fn is_cli_update_restart(args: &[String]) -> bool {
+    args.first().map(String::as_str) == Some("update")
+}
+
+fn owned_cli_update_marker(args: &[String]) -> Result<Option<UpdateResumeMarker>, String> {
+    if !is_cli_update_restart(args) {
+        return Ok(None);
+    }
+    // The helper waits for its parent to exit before reading the marker.
+    // If the parent could not save our PID, stop before touching the payload.
+    load_update_resume_marker()
+        .filter(|marker| {
+            is_cli_update_restart(&marker.restart_args)
+                && marker.helper_pid == Some(std::process::id())
+        })
+        .map(Some)
+        .ok_or_else(|| "The CLI update helper does not own the resume marker".to_string())
+}
+
+fn finish_cli_update_apply(marker: Option<UpdateResumeMarker>) -> Result<(), String> {
+    let Some(mut marker) = marker else {
+        return Ok(());
+    };
+    let _lock = wait_for_pending_update_manifest_lock(&pending_update_dir())?;
+    if load_update_resume_marker().as_ref() != Some(&marker) {
+        return Err("The CLI update resume marker changed while applying the payload".to_string());
+    }
+    // The restarted binary can now settle even if this helper is still exiting.
+    marker.helper_pid = None;
+    persist_update_resume_marker(&marker)
 }
 
 /// File name for the self-copy spawned to apply an update (#3018).
@@ -3355,6 +3509,7 @@ mod tests {
             attempt: 1,
             recorded_at: UtcTimestamp::now().to_rfc3339(),
             message: Some("version mismatch".to_string()),
+            notify_on_gui_startup: false,
         })
         .unwrap();
 
@@ -3426,6 +3581,7 @@ mod tests {
             attempt: 1,
             recorded_at: UtcTimestamp::now().to_rfc3339(),
             message: Some("version mismatch".to_string()),
+            notify_on_gui_startup: false,
         })
         .unwrap();
         let periodic = manager.clone();
@@ -3688,13 +3844,73 @@ mod tests {
     }
 
     #[test]
+    fn prepare_update_rejects_checksum_mismatch_before_staging() {
+        let temp = tempfile::tempdir().unwrap();
+        let _home = crate::test_support::ScopedGwtHome::set(temp.path());
+        let asset_url = serve_once(
+            "/gwt.pkg",
+            "200 OK",
+            "application/octet-stream",
+            b"changed payload".to_vec(),
+        );
+        let mgr = UpdateManager::new()
+            .with_api_base_url(serve_payload_metadata(&asset_url, b"published payload"))
+            .with_updates_dir(temp.path().to_path_buf());
+
+        let err = mgr.prepare_update("99.0.0", &asset_url).unwrap_err();
+        assert!(
+            err.contains("SHA-256 checksum mismatch for gwt.pkg"),
+            "{err}"
+        );
+        assert!(!temp.path().join("v99.0.0").join("gwt.pkg").exists());
+        let log = fs::read_to_string(update_log_path()).unwrap();
+        assert!(log.lines().any(|line| {
+            let entry: serde_json::Value = serde_json::from_str(line).unwrap();
+            entry["stage"] == "payload_integrity_failed" && entry["reason"] == err.as_str()
+        }));
+    }
+
+    fn serve_payload_metadata(asset_url: &str, bytes: &[u8]) -> String {
+        let release = serde_json::json!({
+            "tag_name": "v99.0.0",
+            "html_url": "https://example.invalid/release",
+            "assets": [{
+                "name": asset_url.rsplit('/').next().unwrap(),
+                "browser_download_url": asset_url,
+                "digest": format!("sha256:{:x}", Sha256::digest(bytes)),
+            }]
+        });
+        serve_once(
+            "/",
+            "200 OK",
+            "application/json",
+            serde_json::to_vec(&release).unwrap(),
+        )
+        .trim_end_matches('/')
+        .to_owned()
+    }
+
+    fn serve_update_payload(
+        mgr: &mut UpdateManager,
+        path: &str,
+        status: &str,
+        content_type: &str,
+        body: Vec<u8>,
+    ) -> String {
+        let url = serve_once(path, status, content_type, body.clone());
+        mgr.api_base_url = serve_payload_metadata(&url, &body);
+        url
+    }
+
+    #[test]
     fn prepare_update_handles_direct_binary_archives_installers_and_errors() {
         let temp = tempfile::tempdir().unwrap();
-        let mgr = UpdateManager::new()
+        let mut mgr = UpdateManager::new()
             .with_cache_path(temp.path().join("update-check.json"))
             .with_updates_dir(temp.path().join("updates"));
 
-        let direct_url = serve_once(
+        let direct_url = serve_update_payload(
+            &mut mgr,
             "/gwt.bin",
             "200 OK",
             "application/octet-stream",
@@ -3711,7 +3927,8 @@ mod tests {
         }
 
         let binary_name = Platform::detect().binary_name();
-        let archive_url = serve_once(
+        let archive_url = serve_update_payload(
+            &mut mgr,
             "/gwt.zip",
             "200 OK",
             "application/zip",
@@ -3729,7 +3946,8 @@ mod tests {
             other => panic!("expected extracted archive payload, got {other:?}"),
         }
 
-        let installer_url = serve_once(
+        let installer_url = serve_update_payload(
+            &mut mgr,
             "/gwt.pkg",
             "200 OK",
             "application/octet-stream",
@@ -3746,7 +3964,8 @@ mod tests {
             }
         );
 
-        let empty_url = serve_once(
+        let empty_url = serve_update_payload(
+            &mut mgr,
             "/empty.bin",
             "200 OK",
             "application/octet-stream",
@@ -3755,7 +3974,8 @@ mod tests {
         let empty_err = mgr.prepare_update("99.0.3", &empty_url).unwrap_err();
         assert!(empty_err.contains("Downloaded payload is empty"));
 
-        let status_err_url = serve_once(
+        let status_err_url = serve_update_payload(
+            &mut mgr,
             "/missing.bin",
             "404 Not Found",
             "text/plain",
@@ -4370,8 +4590,15 @@ mod tests {
     #[test]
     fn internal_apply_update_with_executor_replaces_binaries_and_restarts() {
         let temp = tempfile::tempdir().unwrap();
+        let _home = crate::test_support::ScopedGwtHome::set(temp.path());
+        let marker = UpdateResumeMarker {
+            restart_args: vec!["update".to_string()],
+            helper_pid: Some(std::process::id()),
+            ..sample_resume_marker()
+        };
+        persist_update_resume_marker(&marker).unwrap();
         let target_dir = temp.path().join("install");
-        let source_dir = temp.path().join("staged");
+        let source_dir = crate::paths::gwt_updates_dir().join(format!("v{}", marker.to_version));
         fs::create_dir_all(&target_dir).unwrap();
         fs::create_dir_all(&source_dir).unwrap();
         let target_exe = target_dir.join("gwt");
@@ -4387,12 +4614,17 @@ mod tests {
         write_json_atomic(
             &args_file,
             &RestartArgsFile {
-                args: vec!["--restored".to_string()],
+                args: marker.restart_args.clone(),
                 cwd: String::new(),
                 allow_elevation: true,
             },
         )
         .unwrap();
+
+        // A concurrent GUI launch must not delete the CLI helper's payload.
+        assert!(settle_update_resume_marker(&marker.from_version, UtcTimestamp::now()).is_none());
+        assert_eq!(load_update_resume_marker(), Some(marker.clone()));
+        assert!(source_exe.exists());
 
         let mock = MockProcessExecutor::new();
         // PID probe: report "already exited" for either platform's probe.
@@ -4406,10 +4638,11 @@ mod tests {
 
         assert_eq!(fs::read(&target_exe).unwrap(), b"new-gwt");
         assert_eq!(fs::read(&target_daemon).unwrap(), b"new-gwtd");
+        assert_eq!(load_update_resume_marker().unwrap().helper_pid, None);
         let restart = mock.requests().into_iter().last().expect("restart spawn");
         assert_eq!(restart.program, target_exe.as_os_str());
         assert_eq!(restart.mode, ExecutionMode::Spawn);
-        assert_eq!(restart.args_lossy(), vec!["--restored"]);
+        assert_eq!(restart.args_lossy(), vec!["update"]);
     }
 
     #[test]
@@ -4759,14 +4992,17 @@ mod tests {
             GitHubAsset {
                 name: "gwt_7.1.0_x64_en-US.msi".to_string(),
                 browser_download_url: "https://example.com/tauri.msi".to_string(),
+                digest: None,
             },
             GitHubAsset {
                 name: "gwt-wix-windows-x86_64.msi".to_string(),
                 browser_download_url: "https://example.com/wix.msi".to_string(),
+                digest: None,
             },
             GitHubAsset {
                 name: "gwt-windows-x86_64.msi".to_string(),
                 browser_download_url: "https://example.com/current.msi".to_string(),
+                digest: None,
             },
         ];
 
@@ -4784,10 +5020,12 @@ mod tests {
             GitHubAsset {
                 name: "gwt_7.1.0_x64.dmg".to_string(),
                 browser_download_url: "https://example.com/macos-x64.dmg".to_string(),
+                digest: None,
             },
             GitHubAsset {
                 name: "gwt_7.1.0_aarch64.dmg".to_string(),
                 browser_download_url: "https://example.com/macos-arm64.dmg".to_string(),
+                digest: None,
             },
         ];
 
@@ -4805,14 +5043,17 @@ mod tests {
             GitHubAsset {
                 name: "gwt-macos-universal.dmg".to_string(),
                 browser_download_url: "https://example.com/universal.dmg".to_string(),
+                digest: None,
             },
             GitHubAsset {
                 name: "gwt-macos-x86_64.dmg".to_string(),
                 browser_download_url: "https://example.com/x86_64.dmg".to_string(),
+                digest: None,
             },
             GitHubAsset {
                 name: "gwt-macos-arm64.dmg".to_string(),
                 browser_download_url: "https://example.com/arm64.dmg".to_string(),
+                digest: None,
             },
         ];
 
@@ -4829,6 +5070,7 @@ mod tests {
         let assets = vec![GitHubAsset {
             name: "gwt-macos-x86_64.dmg".to_string(),
             browser_download_url: "https://example.com/x86_64.dmg".to_string(),
+            digest: None,
         }];
 
         assert!(find_installer_asset_url(&platform, &assets).is_none());
@@ -5079,6 +5321,7 @@ mod tests {
         let mac_assets = vec![GitHubAsset {
             name: "gwt-macos-x86_64.pkg".to_string(),
             browser_download_url: "https://example.com/macos.pkg".to_string(),
+            digest: None,
         }];
         assert_eq!(
             find_installer_asset_url(&macos, &mac_assets).as_deref(),
@@ -5092,6 +5335,7 @@ mod tests {
         let windows_assets = vec![GitHubAsset {
             name: "gwt-windows-x86_64.msi".to_string(),
             browser_download_url: "https://example.com/windows.msi".to_string(),
+            digest: None,
         }];
         assert_eq!(
             find_installer_asset_url(&windows, &windows_assets).as_deref(),
@@ -5203,7 +5447,7 @@ mod tests {
     #[test]
     fn prepare_update_handles_tarballs_and_empty_payloads() {
         let temp = tempfile::tempdir().unwrap();
-        let mgr = UpdateManager::new()
+        let mut mgr = UpdateManager::new()
             .with_cache_path(temp.path().join("update-check.json"))
             .with_updates_dir(temp.path().join("updates"));
 
@@ -5238,7 +5482,8 @@ mod tests {
             archive.into_inner().unwrap().finish().unwrap();
         }
 
-        let tarball_url = serve_once(
+        let tarball_url = serve_update_payload(
+            &mut mgr,
             "/gwt.tar.gz",
             "200 OK",
             "application/gzip",
@@ -5254,9 +5499,65 @@ mod tests {
             other => panic!("expected tarball portable payload, got {other:?}"),
         }
 
-        let empty_url = serve_once("/empty.bin", "200 OK", "application/octet-stream", vec![]);
+        let empty_url = serve_update_payload(
+            &mut mgr,
+            "/empty.bin",
+            "200 OK",
+            "application/octet-stream",
+            vec![],
+        );
         let err = mgr.prepare_update("99.0.6", &empty_url).unwrap_err();
         assert!(err.contains("Downloaded payload is empty"));
+    }
+
+    #[test]
+    fn cancel_update_stops_a_stalled_asset_transfer() {
+        let temp = tempfile::tempdir().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let asset_url = format!("http://{}/update.bin", listener.local_addr().unwrap());
+        let (cancel, cancelled) = tokio::sync::watch::channel(false);
+        let (received, wait_for_chunk) = std::sync::mpsc::channel();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut buffer = [0u8; 2048];
+            assert!(stream.read(&mut buffer).unwrap() > 0);
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nab")
+                .unwrap();
+            wait_for_chunk.recv().unwrap();
+            cancel.send_replace(true);
+            assert_eq!(
+                stream.read(&mut buffer).unwrap(),
+                0,
+                "transfer must close the connection"
+            );
+        });
+        let mgr = UpdateManager::new()
+            .with_updates_dir(temp.path().to_path_buf())
+            .with_api_base_url(serve_payload_metadata(&asset_url, b"abcd"));
+        let error = {
+            let mut received = Some(received);
+            mgr.prepare_update_cancellable(
+                "99.0.0",
+                &asset_url,
+                &mut |downloaded, _| {
+                    if downloaded > 0 {
+                        received.take().unwrap().send(()).unwrap();
+                    }
+                },
+                Some(cancelled),
+            )
+            .unwrap_err()
+        };
+        server.join().unwrap();
+        assert_eq!(error, "Update download cancelled");
+        assert_eq!(
+            fs::read_dir(temp.path().join("v99.0.0")).unwrap().count(),
+            0
+        );
     }
 
     // SPEC-2041 Phase 19 (T-125 / FR-054): progress callback fires monotonically
@@ -5264,7 +5565,7 @@ mod tests {
     #[test]
     fn prepare_update_with_progress_invokes_callback_monotonically() {
         let temp = tempfile::tempdir().unwrap();
-        let mgr = UpdateManager::new()
+        let mut mgr = UpdateManager::new()
             .with_cache_path(temp.path().join("update-check.json"))
             .with_updates_dir(temp.path().join("updates"));
 
@@ -5303,7 +5604,13 @@ mod tests {
 
         let body = fs::read(&archive_path).unwrap();
         let expected_len = body.len() as u64;
-        let tarball_url = serve_once("/progress.tar.gz", "200 OK", "application/gzip", body);
+        let tarball_url = serve_update_payload(
+            &mut mgr,
+            "/progress.tar.gz",
+            "200 OK",
+            "application/gzip",
+            body,
+        );
 
         let mut ticks: Vec<(u64, Option<u64>)> = Vec::new();
         mgr.prepare_update_with_progress("99.0.7", &tarball_url, &mut |downloaded, total| {
@@ -5338,11 +5645,13 @@ mod tests {
     #[test]
     fn install_latest_docker_linux_bundle_downloads_release_tarball_to_cache_paths() {
         let temp = tempfile::tempdir().unwrap();
+        let body = tar_gz_bundle_body(b"docker-gwt", b"docker-gwtd");
+        let digest = Sha256::digest(&body);
         let tarball_url = serve_once(
             "/downloads/gwt-linux-x86_64.tar.gz",
             "200 OK",
             "application/gzip",
-            tar_gz_bundle_body(b"docker-gwt", b"docker-gwtd"),
+            body,
         );
         let release_body = format!(
             r#"{{
@@ -5351,7 +5660,8 @@ mod tests {
   "assets": [
     {{
       "name": "gwt-linux-x86_64.tar.gz",
-      "browser_download_url": "{tarball_url}"
+      "browser_download_url": "{tarball_url}",
+      "digest": "sha256:{digest:x}"
     }}
   ]
 }}"#
@@ -5384,11 +5694,13 @@ mod tests {
             "application/gzip",
             tar_gz_bundle_body(b"x64-gwt", b"x64-gwtd"),
         );
+        let arm64_body = tar_gz_bundle_body(b"arm64-gwt", b"arm64-gwtd");
+        let arm64_digest = Sha256::digest(&arm64_body);
         let arm64_url = serve_once(
             "/downloads/gwt-linux-aarch64.tar.gz",
             "200 OK",
             "application/gzip",
-            tar_gz_bundle_body(b"arm64-gwt", b"arm64-gwtd"),
+            arm64_body,
         );
         let release_body = format!(
             r#"{{
@@ -5401,7 +5713,8 @@ mod tests {
     }},
     {{
       "name": "gwt-linux-aarch64.tar.gz",
-      "browser_download_url": "{arm64_url}"
+      "browser_download_url": "{arm64_url}",
+      "digest": "sha256:{arm64_digest:x}"
     }}
   ]
 }}"#
@@ -6126,6 +6439,7 @@ mod tests {
                 update_drain: true,
             }],
             attempt: 1,
+            helper_pid: None,
         }
     }
 
@@ -6253,6 +6567,8 @@ mod tests {
         };
         persist_update_resume_marker(&marker).unwrap();
         let now = UtcTimestamp::now();
+        assert!(settle_cli_update_resume_marker(env!("CARGO_PKG_VERSION"), now).is_none());
+        assert_eq!(load_update_resume_marker(), Some(marker));
         let result = settle_update_resume_marker(env!("CARGO_PKG_VERSION"), now).unwrap();
         assert!(matches!(
             result.outcome,

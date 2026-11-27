@@ -35,7 +35,7 @@ pulldown-cmark = { workspace = true }
 base64 = { workspace = true }
 libc = { workspace = true }
 sysinfo = { workspace = true }
-tempfile = { workspace = true, optional = true }
+tempfile = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 core-foundation = "0.10"
@@ -66,14 +66,13 @@ tokio = { workspace = true, features = ["test-util"] }
 # `gwt_core::test_support` (env lock, `ScopedEnvVar`, `ScopedGwtHome`)
 # available to `crates/gwt-core/tests/` without `--all-features`.
 gwt-core = { path = ".", features = ["test-support"] }
-tempfile = { workspace = true }
 fs2 = { workspace = true }
 serde_json = { workspace = true }
 
 [features]
 # Exposes `gwt_core::test_support` (env lock + ScopedEnvVar) to dependent
 # crates' tests. Enable from dev-dependencies only (SPEC-3016 FR-003).
-test-support = ["gwt-config/test-support", "dep:tempfile"]
+test-support = ["gwt-config/test-support"]
 
 [package.metadata.cargo-machete]
 # build.rs parses skill YAML frontmatter with this build dependency.

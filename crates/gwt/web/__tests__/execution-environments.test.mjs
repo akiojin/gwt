@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { accountPools, accountRows, environmentRows, usagePoolAccountId } from "../execution-environments.js";
+import { accountPools, accountRows, environmentRows, providerRows, usagePoolAccountId } from "../execution-environments.js";
 
 // Issue #7648 (SPEC #7007 T-030): rows of the Execution environments screen
 // are derived from the provider usage snapshot and the tool catalog.
@@ -25,6 +25,19 @@ const codex = (extra = {}) => ({
   windows: [{ kind: "weekly", used_percent: 90, resets_at: RESET }],
   ...extra,
 });
+// SPEC #7347: the backend's provider list, in display order.
+const descriptor = (provider, display_name, short_label, acquisition, default_account_id) =>
+  ({ provider, display_name, short_label, acquisition, default_account_id });
+const PROVIDERS = [
+  descriptor("claude_code", "Claude Code", "CC", "api", "claude"),
+  descriptor("codex", "Codex", "CX", "cli_output", "codex"),
+  descriptor("grok_build", "Grok Build", "GB", "none", "grok"),
+  descriptor("antigravity", "Antigravity CLI", "AG", "none", "agy"),
+  descriptor("opencode", "OpenCode", "OC", "none", "opencode"),
+  descriptor("openclaw", "OpenClaw", "OW", "none", "openclaw"),
+  descriptor("hermes", "Hermes Agent", "HA", "none", "hermes"),
+  descriptor("copilot", "GitHub Copilot", "GH", "none", "gh"),
+];
 const agents = [
   { id: "claude", name: "Claude Code", installed: true, installed_version: "2.1.3", update_available: false },
   { id: "codex", name: "Codex", installed: true, installed_version: "0.164.0", update_available: true },
@@ -90,7 +103,7 @@ const view = (...environments) => ({
 const NOW = Date.parse("2026-11-24T03:00:00Z");
 
 test("an environment row joins its definition with the account's usage and the tool's version", () => {
-  const snapshot = { accounts: [claude({ limit_reached: true }), codex()] };
+  const snapshot = { providers: PROVIDERS, accounts: [claude({ limit_reached: true }), codex()] };
   const rows = environmentRows(view(definition("claude"), definition("codex")), snapshot, agents);
   assert.deepEqual(rows.map(row => [row.id, row.via, row.toolVersion, row.availability, row.usageProvider]), [
     ["claude", "Claude Code", "2.1.3", "limit", "claude_code"],
@@ -120,12 +133,14 @@ test("an environment keeps its row when its tool is missing or reports no usage"
 });
 
 // Issue #7841 AC-1 / AC-4: rows are keyed by provider and pool account; a
-// row from before accounts were pooled is the provider's default account.
+// row from before accounts were pooled is the provider's default account,
+// as the provider list names it (SPEC #7347 FR-004).
 test("usage rows are keyed by pool account and old rows read as the default account", () => {
-  assert.equal(usagePoolAccountId(claude()), "claude");
-  assert.equal(usagePoolAccountId(codex()), "codex");
-  assert.equal(usagePoolAccountId(claude({ pool_account_id: "claude-2" })), "claude-2");
-  assert.equal(usagePoolAccountId({ provider: "copilot" }), "gh");
+  assert.equal(usagePoolAccountId(claude(), PROVIDERS), "claude");
+  assert.equal(usagePoolAccountId(codex(), PROVIDERS), "codex");
+  assert.equal(usagePoolAccountId(claude({ pool_account_id: "claude-2" }), PROVIDERS), "claude-2");
+  assert.equal(usagePoolAccountId({ provider: "copilot" }, PROVIDERS), "gh");
+  assert.equal(usagePoolAccountId({ provider: "copilot" }), null, "no list, no guess");
 });
 
 // Issue #7841 AC-2: a tool without an official usage source says so, and a
@@ -158,7 +173,7 @@ test("accounts form one pool per tool with their own usage and sign-in state", (
       { id: "agy", tool: "agy", tool_name: "Antigravity", name: "Antigravity 1", sign_in: "unknown" },
     ],
   };
-  const usage = accountRows({ accounts: [
+  const usage = accountRows({ providers: PROVIDERS, accounts: [
     codex(), claude(), claude({ pool_account_id: "claude-2", account_label: "second@example.test", plan: "Pro" }),
   ] }, NOW);
   const pools = accountPools(definitions, usage);
@@ -189,9 +204,59 @@ test("an account's own environment shows the pool size and the account in use", 
     ],
     environments: [definition("claude"), definition("codex")],
   };
-  const snapshot = { accounts: [claude({ limit_reached: true }), codex(), claude({ pool_account_id: "claude-2" })] };
+  const snapshot = { providers: PROVIDERS, accounts: [claude({ limit_reached: true }), codex(), claude({ pool_account_id: "claude-2" })] };
   const [own, single] = environmentRows(definitions, snapshot, agents, NOW);
   assert.deepEqual([own.poolSize, own.accountName, own.inUseAccountId, own.availability], [2, "Claude Code 2", "claude-2", "available"]);
   assert.equal(own.account.poolAccountId, "claude-2", "usage is the account in use, not the provider's default");
   assert.deepEqual([single.poolSize, single.accountName], [1, "Codex 1"]);
+});
+
+// SPEC #7347 AC-1 / AC-2: every listed provider has a row, named and
+// labelled as the backend lists it; one whose usage cannot be read says n/a
+// and why, instead of being hidden.
+test("provider rows list every provider and mark unreadable usage as n/a", () => {
+  const unknown = { kind: "unknown", reason: "no official usage source" };
+  const rows = providerRows({
+    providers: PROVIDERS,
+    accounts: [
+      claude({ pool_account_id: "claude" }),
+      claude({ pool_account_id: "claude-2", windows: [{ kind: "weekly", used_percent: 3 }] }),
+      codex({ pool_account_id: "codex" }),
+      { provider: "grok_build", pool_account_id: "grok", state: unknown, windows: [], limit_reached: false },
+      { provider: "copilot", pool_account_id: "gh", state: { kind: "unavailable", reason: "timeout" }, windows: [], limit_reached: false },
+    ],
+  });
+  assert.deepEqual(rows.map(row => [row.provider, row.name, row.shortLabel]),
+    PROVIDERS.map(p => [p.provider, p.display_name, p.short_label]));
+  const by = provider => rows.find(row => row.provider === provider);
+  assert.equal(by("claude_code").usage, "58% used", "the default account's row");
+  assert.equal(by("claude_code").na, false);
+  assert.equal(by("codex").usage, "90% used");
+  assert.equal(by("codex").severity, "warning");
+  for (const provider of ["grok_build", "antigravity", "opencode", "openclaw", "hermes"]) {
+    assert.equal(by(provider).na, true, provider);
+    assert.equal(by(provider).usage, "n/a", provider);
+    assert.match(by(provider).naReason, /no way to read .* usage/i, provider);
+    assert.match(by(provider).naReason, /limits are unknown/i, provider);
+  }
+  assert.equal(by("copilot").na, true);
+  assert.match(by("copilot").naReason, /could not be read \(timeout\)/);
+  assert.match(by("copilot").naReason, /limits are unknown/i);
+});
+
+// SPEC #7347 AC-3: a provider the display has never heard of is listed and
+// drawn from the backend's list alone.
+test("a new provider is listed without display changes", () => {
+  const rows = providerRows({
+    providers: [...PROVIDERS, descriptor("test_dummy", "Test Dummy", "TD", "api", "dummy")],
+    accounts: [{ provider: "test_dummy", pool_account_id: "dummy", state: { kind: "ok" }, limit_reached: false,
+      windows: [{ kind: "five_hour", used_percent: 97, resets_at: RESET }] }],
+  });
+  const dummy = rows.at(-1);
+  assert.deepEqual([dummy.name, dummy.shortLabel, dummy.usage, dummy.severity, dummy.na],
+    ["Test Dummy", "TD", "97% used", "danger", false]);
+  const [row] = accountRows({ providers: [descriptor("test_dummy", "Test Dummy", "TD", "api", "dummy")],
+    accounts: [{ provider: "test_dummy", state: { kind: "ok" }, limit_reached: false, windows: [] }] });
+  assert.equal(row.name, "Test Dummy");
+  assert.equal(row.poolAccountId, "dummy");
 });

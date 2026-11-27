@@ -7,29 +7,18 @@ import { createDetachedIslandContainer, mountIsland } from "./react/islands.js";
 // the supported agent catalog (SPEC #5017); it never invents an account, a
 // sign-in state or a pool member the backend did not report.
 
-export const USAGE_PROVIDER_NAME = Object.freeze({
-  codex: "Codex", claude_code: "Claude Code", grok_build: "Grok Build", copilot: "GitHub Copilot", antigravity: "Antigravity",
-});
-
-// The supported-agent catalog id of the tool each provider account is
-// reached through, and the vendor the account belongs to. The tool id is
-// also the id of the provider's default (adopted) account (Issue #7841).
-const PROVIDER_TOOL = Object.freeze({
-  codex: Object.freeze({ agentId: "codex", vendor: "OpenAI" }),
-  claude_code: Object.freeze({ agentId: "claude", vendor: "Anthropic" }),
-  grok_build: Object.freeze({ agentId: "grok", vendor: "xAI" }),
-  copilot: Object.freeze({ agentId: "gh", vendor: "GitHub" }),
-  antigravity: Object.freeze({ agentId: "agy", vendor: "Google" }),
-});
+// SPEC #7347 FR-004: what a provider is called, its short label and its
+// default account come from the backend's provider list (`providers` of the
+// usage snapshot). Nothing here is keyed by a provider name, so a provider
+// the backend adds is listed and drawn without changes to this module.
+function providerDescriptor(providers, provider) {
+  return (providers || []).find(descriptor => descriptor?.provider === provider) || null;
+}
 
 // The pool account a usage row belongs to (Issue #7841). A row from before
 // accounts were pooled describes the provider's default account.
-export function usagePoolAccountId(account) {
-  return account?.pool_account_id || PROVIDER_TOOL[account?.provider]?.agentId || null;
-}
-
-function toolProvider(tool) {
-  return Object.keys(PROVIDER_TOOL).find(provider => PROVIDER_TOOL[provider].agentId === tool) || null;
+export function usagePoolAccountId(account, providers = []) {
+  return account?.pool_account_id || providerDescriptor(providers, account?.provider)?.default_account_id || null;
 }
 
 const SIGN_IN = Object.freeze({
@@ -38,8 +27,8 @@ const SIGN_IN = Object.freeze({
   unknown: Object.freeze({ kind: "unknown", label: "Sign-in unknown" }),
 });
 
-function usageProviderName(provider) {
-  return USAGE_PROVIDER_NAME[provider] || String(provider || "Unknown");
+function usageProviderName(providers, provider) {
+  return providerDescriptor(providers, provider)?.display_name || String(provider || "Unknown");
 }
 
 function usageWindowPercent(window) {
@@ -52,14 +41,15 @@ function usageWindowPercent(window) {
 
 const readable = account => ["ok", "stale"].includes(account?.state?.kind);
 
-// The window nearest its limit. Claude's model-specific weekly windows are
-// sub-limits of the shared quota, so only the shared windows govern.
+// Model-specific weekly windows are sub-limits of the shared quota.
+const SUB_LIMIT_WINDOWS = new Set(["opus_weekly", "sonnet_weekly", "fable_weekly"]);
+
+// The window nearest its limit among the shared windows of a readable account.
 function usageGoverningWindow(account) {
-  if (account.provider === "claude_code" && !readable(account)) return null;
+  if (!readable(account)) return null;
   let governing = null;
   for (const window of account.windows || []) {
-    if (account.provider === "claude_code" &&
-        window.kind !== "five_hour" && window.kind !== "weekly") continue;
+    if (SUB_LIMIT_WINDOWS.has(window.kind)) continue;
     const percent = usageWindowPercent(window);
     if (percent == null) continue;
     if (!governing || percent > governing.percent) governing = { window, percent };
@@ -71,8 +61,9 @@ function usageSummaryPercent(account) {
   return usageGoverningWindow(account)?.percent ?? null;
 }
 
-function codexCreditStatus(account) {
-  if (account.provider !== "codex" || !account.credits || !readable(account)) return null;
+// Credits a full subscription falls back to (Codex reports them).
+function creditStatus(account) {
+  if (!account.credits || !readable(account)) return null;
   const full = (account.windows || []).some(window =>
     ["five_hour", "weekly"].includes(window.kind) && usageWindowPercent(window) === 100);
   return {
@@ -82,13 +73,13 @@ function codexCreditStatus(account) {
 }
 
 function usageDisplayLimitReached(account) {
-  const credits = codexCreditStatus(account);
+  const credits = creditStatus(account);
   return Boolean(!credits?.active && (account.limit_reached || credits?.exhausted));
 }
 
 function usageSeverity(account) {
   if (usageDisplayLimitReached(account)) return "danger";
-  if (codexCreditStatus(account)?.active) return "normal";
+  if (creditStatus(account)?.active) return "normal";
   const percent = usageSummaryPercent(account);
   if (percent == null) return "";
   if (percent >= 95) return "danger";
@@ -134,9 +125,10 @@ function lastLimit(account) {
 // state, each read from the same snapshot. Rows are keyed by provider and
 // pool account; a row from before accounts were pooled is the default one.
 export function accountRows(snapshot, now = Date.now()) {
+  const providers = snapshot?.providers || [];
   return (snapshot?.accounts || []).map(account => {
     const status = accountStatus(account);
-    const credits = codexCreditStatus(account);
+    const credits = creditStatus(account);
     const governing = readable(account) ? usageGoverningWindow(account) : null;
     const limit = lastLimit(account);
     // A provider that reports usage decides its own limit state; without
@@ -148,8 +140,8 @@ export function accountRows(snapshot, now = Date.now()) {
     else if (governing) usage = `${Math.round(governing.percent)}% used`;
     return {
       provider: account.provider,
-      poolAccountId: usagePoolAccountId(account),
-      name: usageProviderName(account.provider),
+      poolAccountId: usagePoolAccountId(account, providers),
+      name: usageProviderName(providers, account.provider),
       accountLabel: account.account_label || null,
       plan: account.plan || null,
       status,
@@ -161,6 +153,39 @@ export function accountRows(snapshot, now = Date.now()) {
       usingCredits: Boolean(credits?.active),
       severity: limitPending ? "danger" : usageSeverity(account),
       collectionEnabled: status.kind !== "disabled",
+    };
+  });
+}
+
+// SPEC #7347 AC-1 / AC-2: one row per provider the backend lists, in its
+// order, with the default account's usage. A provider whose usage cannot be
+// read is listed as n/a with the reason, never hidden.
+export function providerRows(snapshot, now = Date.now()) {
+  const accounts = accountRows(snapshot, now);
+  return (snapshot?.providers || []).map(descriptor => {
+    const name = descriptor.display_name || descriptor.provider;
+    const own = accounts.filter(row => row.provider === descriptor.provider);
+    const account = own.find(row => row.poolAccountId === descriptor.default_account_id) || own[0] || null;
+    const kind = account?.status.kind;
+    const na = !account || kind === "unknown" || kind === "unavailable";
+    let naReason = null;
+    if (!account || kind === "unknown") {
+      naReason = `gwt has no way to read ${name} usage; its limits are unknown.`;
+    } else if (kind === "unavailable") {
+      const reason = account.status.label.replace(/^Unavailable(?: — )?/, "");
+      naReason = `${name} usage could not be read${reason ? ` (${reason})` : ""}; its limits are unknown.`;
+    }
+    return {
+      provider: descriptor.provider,
+      name,
+      shortLabel: descriptor.short_label || name.slice(0, 2).toUpperCase(),
+      account,
+      na,
+      naReason,
+      usage: na ? "n/a" : account.usage || account.status.label,
+      resetsAt: na ? null : account.resetsAt,
+      severity: na ? "" : account.severity,
+      limitReached: Boolean(account?.limitReached),
     };
   });
 }
@@ -177,14 +202,15 @@ export function accountPools(view, usage) {
       pool = { tool: account.tool, toolName: account.tool_name || account.tool, accounts: [] };
       pools.push(pool);
     }
-    const provider = toolProvider(account.tool);
+    // Pool account ids are unique, so the account's own row is found by id.
+    const row = usage.find(candidate => candidate.poolAccountId === account.id) || null;
     const signIn = SIGN_IN[account.sign_in] || SIGN_IN.unknown;
     const signedIn = signIn.kind === "signed_in";
     pool.accounts.push({
       id: account.id,
       name: account.name,
       tool: account.tool,
-      provider,
+      provider: row?.provider || null,
       signIn,
       signInIdentity: account.sign_in_identity,
       registered,
@@ -193,7 +219,7 @@ export function accountPools(view, usage) {
       canSignIn: !account.sign_in_blocked_reason && availableTools.has(account.tool),
       deleteBlockedReason: account.delete_blocked_reason,
       deleteImpact: account.delete_impact,
-      usage: provider ? usage.find(row => row.provider === provider && row.poolAccountId === account.id) || null : null,
+      usage: row,
     });
   }
   for (const pool of pools) {
@@ -279,6 +305,7 @@ export function createExecutionEnvironments({
       poolProviders: definitions?.pool_providers,
       activeSessions: definitions?.active_sessions || [],
       environments: environmentRows(definitions, snapshot, agents),
+      providerUsage: providerRows(snapshot),
       registeredAccounts: definitions?.accounts || [],
       viaOptions: definitions?.via_options || [],
     };

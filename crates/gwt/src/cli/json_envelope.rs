@@ -10130,6 +10130,7 @@ mod tests {
             restart_args: Vec::new(),
             projects: Vec::new(),
             attempt: 1,
+            helper_pid: None,
         })
         .unwrap();
         assert!(

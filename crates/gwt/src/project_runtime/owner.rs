@@ -7293,16 +7293,28 @@ impl OwnerState {
                             admission_feedback.as_ref(),
                             &input.current,
                             &error.detail,
-                        ) {
+                        )
+                        .and_then(|requeued| {
+                            if requeued {
+                                return Ok(true);
+                            }
+                            fail_unclaimed_monitor_admission(
+                                &root,
+                                admission_feedback.as_ref(),
+                                &input.current,
+                                &error.detail,
+                                error.retryable,
+                            )
+                        }) {
                             Ok(true) => match cleanup_monitor_window_record() {
                                 Ok(()) => monitor_failure_committed = true,
                                 Err(error) => {
-                                    tracing::warn!(%error, "capacity retry row cleanup remains unconfirmed");
+                                    tracing::warn!(%error, "unclaimed Monitor admission row cleanup remains unconfirmed");
                                 }
                             },
                             Ok(false) => {}
                             Err(error) => {
-                                tracing::warn!(%error, "capacity retry remains unconfirmed");
+                                tracing::warn!(%error, "unclaimed Monitor admission settlement remains unconfirmed");
                             }
                         }
                     }
@@ -13463,19 +13475,70 @@ fn close_runtime_inner(
     Ok(())
 }
 
+fn is_transient_monitor_capacity_refusal(detail: &str) -> bool {
+    crate::issue_monitor::is_monitor_spawn_hold_refusal(detail)
+        || detail == super::installation::ISSUE_MONITOR_SPAWN_ADMISSION_STALE
+        || detail.starts_with("Machine Agent capacity is occupied;")
+        || detail.starts_with("Machine Agent capacity observation is unavailable;")
+        || detail.starts_with("Machine Agent census is uncertain;")
+}
+
 fn retry_unclaimed_monitor_capacity(
     root: &Path,
     feedback: Option<&super::launch_payload::LaunchFeedbackContext>,
     current: &AtomicBool,
     detail: &str,
 ) -> Result<bool, String> {
+    if !is_transient_monitor_capacity_refusal(detail) {
+        return Ok(false);
+    }
+    // Capacity may have recovered since rejection.
+    settle_exact_unclaimed_monitor_delivery(root, feedback, current, |monitor, issue, _, now| {
+        monitor.record_transient_launch_retry(issue, detail.to_string(), now);
+        true
+    })
+}
+
+/// Issue #7274: a non-transient admission failure before any materializer
+/// claimed the delivery. Under the same exact-unclaimed authority as the
+/// capacity retry, the current owner records the durable `LaunchFailed` and
+/// releases the Monitor slot instead of leaving only a local GUI failure.
+fn fail_unclaimed_monitor_admission(
+    root: &Path,
+    feedback: Option<&super::launch_payload::LaunchFeedbackContext>,
+    current: &AtomicBool,
+    detail: &str,
+    retryable: bool,
+) -> Result<bool, String> {
+    if is_transient_monitor_capacity_refusal(detail) {
+        return Ok(false);
+    }
+    settle_exact_unclaimed_monitor_delivery(
+        root,
+        feedback,
+        current,
+        |monitor, issue, delivery_id, now| {
+            monitor.record_unclaimed_launch_failed_delivery_at(
+                issue,
+                delivery_id,
+                super::monitor::launch_failure_message(detail),
+                retryable,
+                now,
+            )
+        },
+    )
+}
+
+/// Settle only the same unclaimed delivery while this owner is current; never
+/// release another materializer's work or an Issue that already has a pane.
+fn settle_exact_unclaimed_monitor_delivery(
+    root: &Path,
+    feedback: Option<&super::launch_payload::LaunchFeedbackContext>,
+    current: &AtomicBool,
+    settle: impl FnOnce(&mut crate::IssueMonitorState, u64, &str, &str) -> bool,
+) -> Result<bool, String> {
     let Some(feedback) = feedback.filter(|feedback| {
-        (crate::issue_monitor::is_monitor_spawn_hold_refusal(detail)
-            || detail == super::installation::ISSUE_MONITOR_SPAWN_ADMISSION_STALE
-            || detail.starts_with("Machine Agent capacity is occupied;")
-            || detail.starts_with("Machine Agent capacity observation is unavailable;")
-            || detail.starts_with("Machine Agent census is uncertain;"))
-            && !feedback.issue_monitor_review_dispatch
+        !feedback.issue_monitor_review_dispatch
             && feedback.issue_monitor_autonomous_handoff.is_none()
             && current.load(Ordering::Acquire)
     }) else {
@@ -13503,9 +13566,7 @@ fn retry_unclaimed_monitor_capacity(
         return Ok(false);
     };
     let now = gwt_core::timestamp::UtcTimestamp::now().to_rfc3339();
-    let (_, requeued) = crate::try_mutate_issue_monitor_prefs(&path, |prefs| {
-        // Capacity may have recovered since rejection. Only the same unclaimed
-        // delivery may be returned; never release another materializer's work.
+    let (_, settled) = crate::try_mutate_issue_monitor_prefs(&path, |prefs| {
         if !current.load(Ordering::Acquire)
             || !prefs
                 .pending_launch_deliveries
@@ -13521,15 +13582,15 @@ fn retry_unclaimed_monitor_capacity(
         );
         if monitor.has_monitor_pane_for_issue(issue)
             || monitor.launch_identity(issue).window_id.is_some()
+            || !settle(&mut monitor, issue, delivery_id, &now)
         {
             return Ok(false);
         }
-        monitor.record_transient_launch_retry(issue, detail.to_string(), &now);
         *prefs = monitor.prefs();
         Ok(true)
     })
     .map_err(|error| error.to_string())?;
-    Ok(requeued)
+    Ok(settled)
 }
 
 #[cfg(test)]
@@ -13894,6 +13955,97 @@ mod worker_tests {
             crate::issue_monitor::AutonomousPhase::Idle
         );
         }
+    }
+
+    /// Issue #7274 AC-1: a non-transient admission failure before any claim
+    /// settles the exact unclaimed delivery durably and releases its slot; a
+    /// claimed, stale-owner or transient case keeps its existing authority.
+    #[test]
+    fn non_transient_admission_failure_settles_only_the_unclaimed_delivery() {
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
+        let path = crate::issue_monitor_prefs_path_for_repo_path(temp.path());
+        let mut monitor = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            crate::IssueMonitorPrefs {
+                pending_launch_deliveries: vec![serde_json::from_value(json!({
+                    "delivery_id": "delivery-42", "issue_number": 42,
+                    "branch_name": "work/issue-42", "linked_issue_kind": "issue",
+                    "claim_id": "claim-42", "created_at": "2026-11-27T00:00:00Z"
+                }))
+                .unwrap()],
+                ..Default::default()
+            },
+        );
+        monitor.terminal_queue_push(&[42], "test", "2026-11-27T00:00:00Z");
+        let mut prefs = monitor.prefs();
+        let feedback = serde_json::from_value(json!({
+            "client_id": "test", "title": "Issues",
+            "issue_monitor_issue_number": 42, "issue_monitor_delivery_id": "delivery-42",
+            "issue_monitor_review_dispatch": false
+        }))
+        .unwrap();
+        let detail = "worktree materialization failed: branch is checked out elsewhere";
+        let current = AtomicBool::new(false);
+        crate::save_issue_monitor_prefs(&path, &prefs).unwrap();
+        assert!(
+            !fail_unclaimed_monitor_admission(temp.path(), Some(&feedback), &current, detail, true)
+                .unwrap(),
+            "a superseded owner has no disposition authority"
+        );
+        assert_eq!(crate::load_issue_monitor_prefs(&path).unwrap(), prefs);
+
+        current.store(true, Ordering::Release);
+        assert!(!fail_unclaimed_monitor_admission(
+            temp.path(),
+            Some(&feedback),
+            &current,
+            "Machine Agent capacity is occupied; wait for an exact slot to be released",
+            true,
+        )
+        .unwrap());
+        prefs.pending_launch_deliveries[0].materializer_id = Some("successor".into());
+        crate::save_issue_monitor_prefs(&path, &prefs).unwrap();
+        assert!(
+            !fail_unclaimed_monitor_admission(temp.path(), Some(&feedback), &current, detail, true)
+                .unwrap(),
+            "a claimed delivery keeps its owner-tuple authority"
+        );
+        assert_eq!(crate::load_issue_monitor_prefs(&path).unwrap(), prefs);
+
+        prefs.pending_launch_deliveries[0].materializer_id = None;
+        crate::save_issue_monitor_prefs(&path, &prefs).unwrap();
+        assert!(
+            crate::IssueMonitorState::with_prefs(
+                crate::IssueMonitorConfig::default(),
+                prefs.clone()
+            )
+            .launch_identity(42)
+            .active
+        );
+        assert!(fail_unclaimed_monitor_admission(
+            temp.path(),
+            Some(&feedback),
+            &current,
+            detail,
+            true
+        )
+        .unwrap());
+        let after = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            crate::load_issue_monitor_prefs(&path).unwrap(),
+        );
+        assert!(after.prefs().pending_launch_deliveries.is_empty());
+        assert!(
+            !after.launch_identity(42).active,
+            "the durable failure releases the Monitor slot"
+        );
+        assert!(after.prefs().launching_issues.is_empty());
+        assert!(after
+            .prefs()
+            .failed_issues
+            .iter()
+            .any(|failure| failure.issue_number == 42 && failure.message == detail));
     }
 
     #[test]

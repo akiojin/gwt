@@ -131,6 +131,7 @@ impl OutboundEvent {
                     | BackendEvent::UpdateCheckResult { .. }
                     | BackendEvent::UpdateProgress { .. }
                     | BackendEvent::UpdateReady { .. }
+                    | BackendEvent::UpdateDownloadStatus { .. }
                     | BackendEvent::UpdateAutoApply { .. }
                     | BackendEvent::UpdateApplyPendingPersisted { .. }
                     | BackendEvent::UpdateApplyError { .. }
