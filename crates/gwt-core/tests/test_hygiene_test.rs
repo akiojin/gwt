@@ -750,13 +750,17 @@ fn rewrites_env() {
     let _path = gwt_core::test_support::ScopedEnvVar::unset(
         "PATH",
     );
+    std::env::
+        set_var("Y", "2");
+    let _split = ScopedEnvVar
+        ::set("Z", "3");
 }
 "#,
     );
 
     assert_eq!(
         findings.iter().map(|f| f.line).collect::<Vec<_>>(),
-        vec![5, 6, 7, 8],
+        vec![5, 6, 7, 8, 11, 13],
         "unexpected findings: {findings:?}"
     );
     assert!(findings.iter().all(|f| f.context == "rewrites_env"));
@@ -794,6 +798,22 @@ fn probes_the_real_process_env() {
 "#,
     );
     assert!(declared.is_empty(), "unexpected findings: {declared:?}");
+
+    let in_a_string = scan_fixture_for(
+        Rule::ProcessEnvWrite,
+        r#"
+#[test]
+fn smuggles_the_marker() {
+    let _note = "test-hygiene: allow-process-env #4072 not a comment";
+    std::env::set_var("X", "1");
+}
+"#,
+    );
+    assert_eq!(
+        in_a_string.len(),
+        1,
+        "a marker in a string is not a declaration"
+    );
 
     for marker in [
         "// test-hygiene: allow-process-env",
@@ -1842,6 +1862,11 @@ mod hygiene {
             .filter(|bind| !checked_socket_path_regex().is_match(&joined[bind.end()..]))
             .map(|bind| line_offsets.partition_point(|start| *start <= bind.start()) - 1)
             .collect();
+        // A process-env write split across lines is attributed to its first.
+        let process_env_writes: std::collections::BTreeSet<_> = process_env_write_regex()
+            .find_iter(&joined)
+            .map(|call| line_offsets.partition_point(|start| *start <= call.start()) - 1)
+            .collect();
 
         let mut findings = Vec::new();
         for (index, line) in code.iter().enumerate() {
@@ -1859,6 +1884,8 @@ mod hygiene {
             ] {
                 let violates = if rule == Rule::UncheckedSocketBind {
                     unchecked_binds.contains(&index)
+                } else if rule == Rule::ProcessEnvWrite {
+                    process_env_writes.contains(&index)
                 } else {
                     line_violates(rule, line)
                 };
@@ -1920,7 +1947,7 @@ mod hygiene {
             Rule::NativeWatcherDeadline => native_watcher_regex().is_match(code),
             Rule::ProductionProbeDeadline => production_probe_regex().is_match(code),
             Rule::UncheckedSocketBind => false, // Complete calls are checked in scan_source.
-            Rule::ProcessEnvWrite => process_env_write_regex().is_match(code),
+            Rule::ProcessEnvWrite => false,     // Complete calls are checked in scan_source.
         }
     }
 
@@ -1934,8 +1961,10 @@ mod hygiene {
         }
         candidates.iter().any(|line| match line.find(marker) {
             // SPEC #4072 FR-005: a process-env exception names its Issue too.
+            // It must also be a comment, not text inside a string literal.
             Some(at) if rule == Rule::ProcessEnvWrite => {
-                issue_reason_regex().is_match(&line[at + marker.len()..])
+                line[..at].trim_end().ends_with("//")
+                    && issue_reason_regex().is_match(&line[at + marker.len()..])
             }
             Some(at) => !line[at + marker.len()..].trim().is_empty(),
             None => false,
@@ -2236,8 +2265,10 @@ mod hygiene {
     fn process_env_write_regex() -> &'static Regex {
         static RE: OnceLock<Regex> = OnceLock::new();
         RE.get_or_init(|| {
-            Regex::new(r"\b(?:env::(?:set_var|remove_var)|ScopedEnvVar\s*::\s*(?:set|unset))\s*\(")
-                .expect("valid regex")
+            Regex::new(
+                r"\b(?:env\s*::\s*(?:set_var|remove_var)|ScopedEnvVar\s*::\s*(?:set|unset))\s*\(",
+            )
+            .expect("valid regex")
         })
     }
 

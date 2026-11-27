@@ -17,14 +17,24 @@ use std::{cell::RefCell, collections::HashMap, env::VarError, ffi::OsString, mar
 
 thread_local! {
     /// `key -> Some(value)` pins a value; `key -> None` hides the variable.
-    static OVERRIDES: RefCell<HashMap<&'static str, Option<OsString>>> =
+    static OVERRIDES: RefCell<HashMap<String, Option<OsString>>> =
         RefCell::new(HashMap::new());
+}
+
+/// The identity a key has in the process environment: Windows resolves names
+/// case-insensitively, other platforms exactly.
+fn identity(key: &str) -> String {
+    if cfg!(windows) {
+        key.to_ascii_uppercase()
+    } else {
+        key.to_string()
+    }
 }
 
 /// The current thread's override for `key`: `Some(Some(value))` when pinned,
 /// `Some(None)` when hidden, `None` when the process environment applies.
 pub fn override_for(key: &str) -> Option<Option<OsString>> {
-    OVERRIDES.with(|overrides| overrides.borrow().get(key).cloned())
+    OVERRIDES.with(|overrides| overrides.borrow().get(&identity(key)).cloned())
 }
 
 /// `std::env::var_os` that honours the current thread's override.
@@ -48,7 +58,7 @@ pub fn var(key: &str) -> Result<String, VarError> {
 /// Nested guards restore the previous override on drop. The guard is not
 /// `Send`: the override lives in thread-local storage.
 pub struct ScopedEnvOverride {
-    key: &'static str,
+    key: String,
     previous: Option<Option<OsString>>,
     _not_send: PhantomData<*const ()>,
 }
@@ -65,7 +75,9 @@ impl ScopedEnvOverride {
     }
 
     fn install(key: &'static str, value: Option<OsString>) -> Self {
-        let previous = OVERRIDES.with(|overrides| overrides.borrow_mut().insert(key, value));
+        let key = identity(key);
+        let previous =
+            OVERRIDES.with(|overrides| overrides.borrow_mut().insert(key.clone(), value));
         Self {
             key,
             previous,
@@ -79,8 +91,8 @@ impl Drop for ScopedEnvOverride {
         OVERRIDES.with(|overrides| {
             let mut overrides = overrides.borrow_mut();
             match self.previous.take() {
-                Some(previous) => overrides.insert(self.key, previous),
-                None => overrides.remove(self.key),
+                Some(previous) => overrides.insert(self.key.clone(), previous),
+                None => overrides.remove(&self.key),
             };
         });
     }
@@ -123,5 +135,15 @@ mod tests {
             assert_eq!(std::env::var_os("PATH"), process_path);
         }
         assert_eq!(var_os("PATH"), process_path);
+    }
+
+    /// Windows resolves environment names case-insensitively, so the
+    /// override must too.
+    #[cfg(windows)]
+    #[test]
+    fn windows_override_keys_ignore_case() {
+        let _hidden = ScopedEnvOverride::unset("Path");
+        assert_eq!(var_os("PATH"), None);
+        assert_eq!(override_for("path"), Some(None));
     }
 }

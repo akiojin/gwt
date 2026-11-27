@@ -690,8 +690,10 @@ pub fn managed_hook_config_is_git_tracked(path: &Path) -> bool {
 /// process-global `GWT_HOOK_BIN` (#4057, #3839). It is the shared keyed
 /// override (SPEC #4072), not a seam of its own.
 pub fn hook_bin_override() -> Option<String> {
+    // An empty pin behaves like an empty `GWT_HOOK_BIN`: discovery decides.
     gwt_config::env::override_for(GWT_HOOK_BIN_ENV)
         .flatten()
+        .filter(|value| !value.is_empty())
         .map(|value| value.to_string_lossy().into_owned())
 }
 
@@ -3222,6 +3224,15 @@ mod tests {
             gwt_config::env::ScopedEnvOverride::set(GWT_HOOK_BIN_ENV, "/via/generic/gwtd");
         assert_eq!(hook_bin_override().as_deref(), Some("/via/generic/gwtd"));
         assert_eq!(gwt_hook_bin_path(), "/via/generic/gwtd");
+    }
+
+    /// An empty pin behaves like an empty `GWT_HOOK_BIN`: it falls through to
+    /// executable discovery instead of embedding an empty binary.
+    #[test]
+    fn an_empty_hook_bin_override_falls_back_to_discovery() {
+        let _empty = gwt_config::env::ScopedEnvOverride::set(GWT_HOOK_BIN_ENV, "");
+        assert_eq!(hook_bin_override(), None);
+        assert!(!gwt_hook_bin_path().is_empty());
     }
 
     #[test]
