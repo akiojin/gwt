@@ -892,9 +892,7 @@ impl IssueMonitorPrefs {
         // Continue Work keeps its existing authority and liveness checks.
         matches!(
             intent.stage,
-            AgentSwitchStage::Unknown
-                | AgentSwitchStage::LaunchingNext
-                | AgentSwitchStage::Returned
+            AgentSwitchStage::Unknown | AgentSwitchStage::LaunchingNext
         ) && intent.checkpoint.is_some()
             && intent.source.assignment.host_id == host
             && intent
@@ -1959,7 +1957,7 @@ mod tests {
             .transition_agent_switch(&operation, AgentSwitchStage::Returned, None)
             .unwrap();
         assert!(!returned.has_admission_pin());
-        assert!(prefs.can_resume_agent_switch_source(&returned, "host"));
+        assert!(!prefs.can_resume_agent_switch_source(&returned, "host"));
         assert!(prefs.cancel_agent_switch(&operation).is_err());
         let resuming = prefs
             .transition_agent_switch(&operation, AgentSwitchStage::Resuming, None)

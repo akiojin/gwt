@@ -1643,10 +1643,12 @@ fn reserve_project_member_inner(
     let (_, member) = crate::try_mutate_issue_monitor_prefs(&path, |prefs| {
         ensure_roster(root, prefs, &path, &seed, sessions_dir, requested_tool.as_deref()).map_err(std::io::Error::other)?;
         use crate::issue_monitor::AgentSwitchStage;
-        let resume = if let Some((intent, delivery_id)) = issue_number
-            .and_then(|number| prefs.saved_switch_resume(number))
-            .zip(delivery_id)
+        let resume = if let Some(intent) =
+            issue_number.and_then(|number| prefs.saved_switch_resume(number))
         {
+            let delivery_id = delivery_id.ok_or_else(|| {
+                std::io::Error::other("Saved Work is waiting for its Issues Monitor delivery")
+            })?;
             if prefs.agent_roster.as_ref().map(|roster| roster.revision) != dead.roster_revision {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::WouldBlock,
