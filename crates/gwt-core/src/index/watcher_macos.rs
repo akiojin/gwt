@@ -3,41 +3,31 @@
 //! `notify` does not expose its stream, so the index watcher uses this private
 //! adapter while retaining `notify-debouncer-mini` for debounce and batching.
 //!
-//! `fsevent-sys` 5.2.0 deprecated its whole surface in favour of
-//! `objc2-core-services`, so every call below trips `deprecated`, which the
-//! repository's `-D warnings` clippy gate promotes to an error. Accept the
-//! deprecation here until the port to `objc2-core-services` lands (#4518); the
-//! allow is scoped to this adapter so no other deprecated API slips through
-//! the gate.
-//!
-//! When the suppression was added, clippy ran on Linux and Windows only, where
-//! this `cfg(target_os = "macos")` module never compiles — so the breakage was
-//! invisible to CI and surfaced as every macOS agent's `verify.run` failing at
-//! once. lint.yml's `Clippy (macOS)` job (#4522) now compiles this module, so
-//! removing the allow below fails CI rather than develop.
-#![allow(deprecated)]
+//! The stream is delivered on a private serial dispatch queue
+//! (`FSEventStreamSetDispatchQueue`), the replacement Apple and
+//! `objc2-core-services` name for the deprecated run-loop scheduling API.
+//! lint.yml's `Clippy (macOS)` job (#4522) compiles this module, so a newly
+//! deprecated call fails CI rather than develop.
 
 use std::{
     ffi::{c_char, c_void, CStr, OsStr},
     os::unix::ffi::OsStrExt,
     panic::{catch_unwind, AssertUnwindSafe},
     path::{Path, PathBuf},
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        mpsc, Arc, Mutex,
-    },
-    thread::{self, JoinHandle},
-    time::Duration,
+    ptr::NonNull,
+    sync::{Arc, Mutex},
 };
 
-use core_foundation::{
-    array::CFArray,
-    base::TCFType,
-    runloop::{kCFRunLoopDefaultMode, CFRunLoop, CFRunLoopRunResult},
-    string::CFString,
-};
-use fsevent_sys as fs;
+use dispatch2::{DispatchQueue, DispatchQueueAttr, DispatchRetained};
 use notify::{Config, Error, Event, EventHandler, EventKind, RecursiveMode, Result, WatcherKind};
+use objc2_core_foundation::{CFArray, CFString};
+use objc2_core_services::{
+    kFSEventStreamCreateFlagFileEvents, kFSEventStreamCreateFlagNoDefer,
+    kFSEventStreamEventIdSinceNow, ConstFSEventStreamRef, FSEventStreamContext,
+    FSEventStreamCreate, FSEventStreamEventFlags, FSEventStreamEventId, FSEventStreamInvalidate,
+    FSEventStreamRef, FSEventStreamRelease, FSEventStreamSetDispatchQueue,
+    FSEventStreamSetExclusionPaths, FSEventStreamStart, FSEventStreamStop,
+};
 
 type SharedHandler = Arc<Mutex<Box<dyn EventHandler>>>;
 
@@ -50,13 +40,13 @@ pub(super) enum StartupStep {
 
 pub(super) struct WorktreeWatcher {
     handler: SharedHandler,
-    stream: Option<StreamThread>,
+    stream: Option<NativeStream>,
 }
 
 #[cfg(test)]
 impl WorktreeWatcher {
     pub(super) fn startup_trace(&self) -> Vec<StartupStep> {
-        self.stream.as_ref().unwrap().trace.lock().unwrap().clone()
+        self.stream.as_ref().unwrap().trace.clone()
     }
 }
 
@@ -87,39 +77,13 @@ impl notify::Watcher for WorktreeWatcher {
             .to_str()
             .ok_or_else(|| Error::generic("FSEvents exclusion must be valid UTF-8"))?
             .to_owned();
-        let stop = Arc::new(AtomicBool::new(false));
-        let worker_stop = stop.clone();
-        let handler = self.handler.clone();
-        #[cfg(test)]
-        let trace = Arc::new(Mutex::new(Vec::new()));
-        #[cfg(test)]
-        let worker_trace = trace.clone();
-        let (ready_tx, ready_rx) = mpsc::sync_channel(1);
-        let worker = thread::Builder::new()
-            .name("gwt index FSEvents".into())
-            .spawn(move || {
-                run_stream(
-                    root_string,
-                    excluded_string,
-                    handler,
-                    worker_stop,
-                    ready_tx,
-                    #[cfg(test)]
-                    worker_trace,
-                )
-            })?;
-        let stream = StreamThread {
+        // On any failure, dropping the partial stream tears down what started.
+        self.stream = Some(NativeStream::start(
             root,
-            stop,
-            worker: Some(worker),
-            #[cfg(test)]
-            trace,
-        };
-        // On either failure, dropping the local stream stops and joins its worker.
-        ready_rx
-            .recv()
-            .map_err(|_| Error::generic("FSEvents worker exited during startup"))??;
-        self.stream = Some(stream);
+            &root_string,
+            &excluded_string,
+            self.handler.clone(),
+        )?);
         Ok(())
     }
 
@@ -140,145 +104,128 @@ impl notify::Watcher for WorktreeWatcher {
     }
 }
 
-struct StreamThread {
-    root: PathBuf,
-    stop: Arc<AtomicBool>,
-    worker: Option<JoinHandle<()>>,
-    #[cfg(test)]
-    trace: Arc<Mutex<Vec<StartupStep>>>,
-}
-
-impl Drop for StreamThread {
-    fn drop(&mut self) {
-        self.stop.store(true, Ordering::Release);
-        if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
-        }
-    }
-}
-
-// Created and destroyed on the worker thread; no native pointer crosses threads.
-struct NativeStream {
-    raw: fs::FSEventStreamRef,
-    scheduled: bool,
-    started: bool,
-}
-
-impl Drop for NativeStream {
-    fn drop(&mut self) {
-        // SAFETY: raw came from a successful Create. Each lifecycle call is
-        // paired only with its corresponding successful earlier transition.
-        unsafe {
-            if self.started {
-                fs::FSEventStreamStop(self.raw);
-            }
-            if self.scheduled {
-                fs::FSEventStreamInvalidate(self.raw);
-            }
-            fs::FSEventStreamRelease(self.raw);
-        }
-    }
-}
-
 struct CallbackContext {
     handler: SharedHandler,
 }
 
-fn run_stream(
-    root: String,
-    excluded: String,
-    handler: SharedHandler,
-    stop: Arc<AtomicBool>,
-    ready: mpsc::SyncSender<Result<()>>,
-    #[cfg(test)] trace: Arc<Mutex<Vec<StartupStep>>>,
-) {
-    // This stable allocation outlives NativeStream, including its Release.
-    let mut context = Box::new(CallbackContext { handler });
-    let native_context = fs::FSEventStreamContext {
-        version: 0,
-        info: (&mut *context as *mut CallbackContext).cast(),
-        retain: None,
-        release: None,
-        copy_description: None,
-    };
-    let paths = CFArray::from_CFTypes(&[CFString::new(&root)]);
-    let exclusions = CFArray::from_CFTypes(&[CFString::new(&excluded)]);
-    // SAFETY: context and both CF arrays remain alive through stream teardown.
-    // FileEvents without UseCFTypes supplies a C-string path array to callback.
-    let raw = unsafe {
-        fs::FSEventStreamCreate(
-            std::ptr::null_mut(),
-            callback,
-            &native_context,
-            paths.as_concrete_TypeRef().cast_mut().cast(),
-            fs::kFSEventStreamEventIdSinceNow,
-            0.05,
-            fs::kFSEventStreamCreateFlagFileEvents | fs::kFSEventStreamCreateFlagNoDefer,
-        )
-    };
-    if raw.is_null() {
-        let _ = ready.send(Err(Error::generic("FSEventStreamCreate failed")));
-        return;
-    }
-    let mut stream = NativeStream {
-        raw,
-        scheduled: false,
-        started: false,
-    };
-    // SAFETY: raw is valid and has not started. An exclusion may name a target
-    // directory that does not exist yet. Failure must not leave an unexcluded watch.
-    if unsafe {
-        fs::FSEventStreamSetExclusionPaths(raw, exclusions.as_concrete_TypeRef().cast_mut().cast())
-    } == 0
-    {
-        let _ = ready.send(Err(Error::generic("FSEvents target exclusion failed")));
-        return;
-    }
+struct NativeStream {
+    root: PathBuf,
+    raw: FSEventStreamRef,
+    queue: DispatchRetained<DispatchQueue>,
+    queued: bool,
+    started: bool,
+    // Declared after the lifecycle state: Drop releases the stream and drains
+    // the queue before this allocation is freed.
+    _context: Box<CallbackContext>,
     #[cfg(test)]
-    trace.lock().unwrap().push(StartupStep::Excluded(
-        exclusions
-            .iter()
-            .map(|path| PathBuf::from(path.to_string()))
-            .collect(),
-    ));
-    let run_loop = CFRunLoop::get_current();
-    // SAFETY: this is the worker's run loop and the system default mode constant.
-    let mode = unsafe { kCFRunLoopDefaultMode };
-    unsafe {
-        fs::FSEventStreamScheduleWithRunLoop(
-            raw,
-            run_loop.as_concrete_TypeRef().cast(),
-            mode.cast_mut().cast(),
-        );
-    }
-    stream.scheduled = true;
-    // SAFETY: the valid stream is scheduled on this worker's run loop.
-    if unsafe { fs::FSEventStreamStart(raw) } == 0 {
-        let _ = ready.send(Err(Error::generic("FSEventStreamStart failed")));
-        return;
-    }
-    stream.started = true;
-    #[cfg(test)]
-    trace.lock().unwrap().push(StartupStep::Started);
-    if ready.send(Ok(())).is_err() {
-        return;
-    }
-    while !stop.load(Ordering::Acquire) {
-        // A bounded run avoids the startup race of Stop arriving before Run.
-        match CFRunLoop::run_in_mode(mode, Duration::from_millis(100), false) {
-            CFRunLoopRunResult::Finished | CFRunLoopRunResult::Stopped => break,
-            _ => {}
+    trace: Vec<StartupStep>,
+}
+
+// SAFETY: the stream ref is owned exclusively by this value and only touched
+// through `&mut self` or Drop. Streams delivered on a dispatch queue accept
+// lifecycle calls from any thread; callbacks run on that serial queue.
+unsafe impl Send for NativeStream {}
+
+impl NativeStream {
+    fn start(
+        root: PathBuf,
+        root_path: &str,
+        excluded_path: &str,
+        handler: SharedHandler,
+    ) -> Result<Self> {
+        // This stable allocation outlives the stream, including its Release.
+        let mut context = Box::new(CallbackContext { handler });
+        let mut native_context = FSEventStreamContext {
+            version: 0,
+            info: (&mut *context as *mut CallbackContext).cast(),
+            retain: None,
+            release: None,
+            copyDescription: None,
+        };
+        let paths = CFArray::from_objects(&[&*CFString::from_str(root_path)]);
+        let exclusions = CFArray::from_objects(&[&*CFString::from_str(excluded_path)]);
+        // SAFETY: context outlives the stream, and Create copies the path array.
+        // FileEvents without UseCFTypes supplies a C-string path array to callback.
+        let raw = unsafe {
+            FSEventStreamCreate(
+                None,
+                Some(callback),
+                &mut native_context,
+                paths.as_opaque(),
+                kFSEventStreamEventIdSinceNow,
+                0.05,
+                kFSEventStreamCreateFlagFileEvents | kFSEventStreamCreateFlagNoDefer,
+            )
+        };
+        if raw.is_null() {
+            return Err(Error::generic("FSEventStreamCreate failed"));
         }
+        let mut stream = Self {
+            root,
+            raw,
+            queue: DispatchQueue::new("gwt index FSEvents", DispatchQueueAttr::SERIAL),
+            queued: false,
+            started: false,
+            _context: context,
+            #[cfg(test)]
+            trace: Vec::new(),
+        };
+        // SAFETY: raw is valid and has not started. An exclusion may name a target
+        // directory that does not exist yet. Failure must not leave an unexcluded watch.
+        if !unsafe { FSEventStreamSetExclusionPaths(raw, exclusions.as_opaque()) } {
+            return Err(Error::generic("FSEvents target exclusion failed"));
+        }
+        #[cfg(test)]
+        stream.trace.push(StartupStep::Excluded(
+            exclusions
+                .iter()
+                .map(|path| PathBuf::from(path.to_string()))
+                .collect(),
+        ));
+        // SAFETY: raw is valid; the queue is retained by the stream until Invalidate.
+        unsafe { FSEventStreamSetDispatchQueue(raw, Some(&stream.queue)) };
+        stream.queued = true;
+        // SAFETY: the valid stream has a dispatch queue.
+        if !unsafe { FSEventStreamStart(raw) } {
+            return Err(Error::generic("FSEventStreamStart failed"));
+        }
+        stream.started = true;
+        #[cfg(test)]
+        stream.trace.push(StartupStep::Started);
+        Ok(stream)
     }
 }
 
-extern "C" fn callback(
-    _stream: fs::FSEventStreamRef,
+impl Drop for NativeStream {
+    fn drop(&mut self) {
+        let raw = self.raw;
+        // SAFETY: raw came from a successful Create. Each lifecycle call is
+        // paired only with its corresponding successful earlier transition.
+        unsafe {
+            if self.started {
+                FSEventStreamStop(raw);
+            }
+            if self.queued {
+                FSEventStreamInvalidate(raw);
+            }
+        }
+        if self.queued {
+            // A callback already running on the serial queue finishes before
+            // the stream and its context are freed.
+            self.queue.exec_sync(|| {});
+        }
+        // SAFETY: no callback can run any more; this releases Create's reference.
+        unsafe { FSEventStreamRelease(raw) };
+    }
+}
+
+unsafe extern "C-unwind" fn callback(
+    _stream: ConstFSEventStreamRef,
     info: *mut c_void,
     count: usize,
-    paths: *mut c_void,
-    _flags: *const fs::FSEventStreamEventFlags,
-    _ids: *const fs::FSEventStreamEventId,
+    paths: NonNull<c_void>,
+    _flags: NonNull<FSEventStreamEventFlags>,
+    _ids: NonNull<FSEventStreamEventId>,
 ) {
     // Rust unwinding must never cross the native callback boundary.
     let _ = catch_unwind(AssertUnwindSafe(|| {
@@ -288,7 +235,8 @@ extern "C" fn callback(
         // SAFETY: FSEvents supplies count valid C strings for this callback's
         // lifetime, and info points to our Box retained until stream Release.
         let context = unsafe { &*info.cast::<CallbackContext>() };
-        let paths = unsafe { std::slice::from_raw_parts(paths.cast::<*const c_char>(), count) };
+        let paths =
+            unsafe { std::slice::from_raw_parts(paths.as_ptr().cast::<*const c_char>(), count) };
         let mut handler = context
             .handler
             .lock()
