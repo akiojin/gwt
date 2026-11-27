@@ -635,7 +635,7 @@ test("update progress batches the latest snapshot without delaying mount, cancel
   controller.beginDownloadingFor("9.26.0");
   controller.handleUpdateProgress({ downloaded: 80 * mb, total: 100 * mb });
   fixture.document.querySelector("[data-update-modal-cancel]").click();
-  assert.deepEqual(fixture.sent.at(-1), { kind: "cancel_update_download" }, "cancel sends synchronously");
+  assert.deepEqual(fixture.sent.at(-1), { kind: "cancel_update_download", version: "9.26.0" }, "cancel sends synchronously");
   assert.equal(fixture.document.getElementById("update-modal"), null);
   flush();
   assert.equal(fixture.document.getElementById("update-modal"), null, "pending progress cannot reopen the modal");
@@ -663,11 +663,18 @@ test("phase19: cancel during download sends cancel_update_download and returns C
 
   assert.deepEqual(fixture.sent, [
     { kind: "apply_update_start" },
-    { kind: "cancel_update_download" },
+    { kind: "cancel_update_download", version: "9.26.0" },
   ]);
   assert.equal(fixture.document.getElementById("update-modal"), null);
   const cta = fixture.document.getElementById("update-cta");
   assert.equal(cta.dataset.status, "available");
+  cta.click();
+  controller.handleUpdateReady({ version: "9.26.0" });
+  assert.equal(fixture.document.getElementById("update-modal").dataset.state, "downloading");
+  controller.handleUpdateDownloadStatus({ version: "9.26.0", cancelled: true });
+  controller.handleUpdateDownloadStatus({ version: "9.26.0", cancelled: false });
+  controller.handleUpdateReady({ version: "9.26.0" });
+  assert.equal(fixture.document.getElementById("update-modal").dataset.state, "ready");
 });
 
 test("phase19: update_ready transitions modal to ready state with [Later] [Restart now]", () => {

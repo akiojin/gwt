@@ -427,6 +427,7 @@ impl UpdateApplyOps for RealUpdateApplyOps {
     ) -> Result<(), String> {
         self.mgr
             .spawn_internal_apply_update(helper_exe, old_pid, current_exe, payload, args_file)
+            .map(|_| ())
     }
 
     fn spawn_internal_run_installer(
@@ -438,14 +439,16 @@ impl UpdateApplyOps for RealUpdateApplyOps {
         kind: gwt_core::update::InstallerKind,
         args_file: &Path,
     ) -> Result<(), String> {
-        self.mgr.spawn_internal_run_installer(
-            helper_exe,
-            old_pid,
-            current_exe,
-            installer,
-            kind,
-            args_file,
-        )
+        self.mgr
+            .spawn_internal_run_installer(
+                helper_exe,
+                old_pid,
+                current_exe,
+                installer,
+                kind,
+                args_file,
+            )
+            .map(|_| ())
     }
 }
 
@@ -488,16 +491,17 @@ impl PreparedUpdate {
 pub fn prepare_update_payload(
     state: gwt_core::update::UpdateState,
 ) -> Result<PreparedUpdate, String> {
-    prepare_update_payload_with_progress(state, &mut |_, _| {})
+    prepare_update_payload_cancellable(state, &mut |_, _| {}, None)
 }
 
 /// SPEC-2041 Phase 19 (FR-054): like [`prepare_update_payload`] but routes
 /// download chunk progress to `progress`. The closure must be cheap because
-/// it fires once per 64 KiB of payload; callers that broadcast progress over
+/// it fires once per chunk; callers that broadcast progress over
 /// WebSocket should throttle inside the closure (e.g. by `Instant::elapsed`).
-pub fn prepare_update_payload_with_progress(
+pub fn prepare_update_payload_cancellable(
     state: gwt_core::update::UpdateState,
     progress: &mut dyn FnMut(u64, Option<u64>),
+    cancelled: Option<tokio::sync::watch::Receiver<bool>>,
 ) -> Result<PreparedUpdate, String> {
     let (latest, asset_url) = match state {
         gwt_core::update::UpdateState::Available {
@@ -517,7 +521,7 @@ pub fn prepare_update_payload_with_progress(
     };
     let mgr = gwt_core::update::UpdateManager::new();
     let payload = mgr
-        .prepare_update_with_progress(&latest, &asset_url, progress)
+        .prepare_update_cancellable(&latest, &asset_url, progress, cancelled)
         .map_err(|err| format!("Failed to prepare update payload: {err}"))?;
     Ok(PreparedUpdate {
         latest,
@@ -673,6 +677,9 @@ fn stage_graceful_update_apply_with_ops<T>(
         let _lock = gwt_core::update::pending_update_manifest_lock(
             &gwt_core::update::pending_update_dir(),
         )?;
+        if gwt_core::update::load_update_resume_marker().is_some() {
+            return Err("An update is already awaiting restart.".to_string());
+        }
         if respect_defer {
             let current = gwt_core::update::load_pending_update_manifest().ok_or_else(|| {
                 "Pending update with a valid payload is no longer staged.".to_string()
@@ -728,6 +735,7 @@ fn stage_graceful_update_apply_with_ops<T>(
                 attempt: marker.attempt,
                 recorded_at: UtcTimestamp::now().to_rfc3339(),
                 message: Some(err.clone()),
+                notify_on_gui_startup: false,
             };
             if let Err(error) = gwt_core::update::persist_update_apply_result(&result) {
                 gwt_core::update::log_update_event(
@@ -822,6 +830,7 @@ fn apply_pending_manifest_and_exit(
         restart_args: current_restart_args(),
         projects: Vec::new(),
         attempt: 1,
+        helper_pid: None,
     };
     stage_graceful_update_apply(manifest, &marker, true, || {
         retirement.retire(|| {}, || false)
@@ -1372,6 +1381,7 @@ mod poll_state_tests {
                 update_drain: false,
             }],
             attempt: 1,
+            helper_pid: None,
         }
     }
 
@@ -1683,6 +1693,55 @@ mod poll_state_tests {
             gwt_core::update::load_pending_update_manifest().is_none(),
             "the pending manifest is consumed after the helper is spawned"
         );
+    }
+
+    #[test]
+    fn graceful_installer_apply_settles_against_the_restarted_version() {
+        use gwt_core::update::UpdateApplyOutcome;
+
+        for (observed_version, expected_outcome) in [
+            ("9.31.0", UpdateApplyOutcome::Success),
+            ("9.30.0", UpdateApplyOutcome::Failure),
+        ] {
+            let home = tempfile::tempdir().unwrap();
+            let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+            let mut manifest = staged_manifest_in(home.path());
+            let path = home.path().join("gwt.dmg");
+            std::fs::write(&path, b"installer fixture").unwrap();
+            manifest.payload = PreparedPayload::Installer {
+                path: path.clone(),
+                kind: InstallerKind::MacDmg,
+            };
+            gwt_core::update::persist_pending_update_manifest(&manifest).unwrap();
+            let mut ops = FakeUpdateApplyOps::portable(path);
+            let marker = sample_resume_marker();
+            super::stage_graceful_update_apply_with_ops(
+                &mut ops,
+                manifest,
+                &marker,
+                Path::new("/Applications/GWT.app/Contents/MacOS/gwt"),
+                Vec::new(),
+                42,
+                false,
+                true,
+                || Ok(()),
+            )
+            .unwrap();
+            assert!(ops.spawned_installer);
+            assert!(!ops.spawned_portable);
+            let settlement = gwt_core::update::settle_update_resume_marker(
+                observed_version,
+                UtcTimestamp::now(),
+            )
+            .expect("installer apply marker");
+            assert_eq!(settlement.marker, marker);
+            assert_eq!(settlement.result.outcome, expected_outcome);
+            assert_eq!(settlement.result.observed_version, observed_version);
+            assert_eq!(
+                settlement.result,
+                gwt_core::update::load_update_apply_result().unwrap()
+            );
+        }
     }
 
     #[test]

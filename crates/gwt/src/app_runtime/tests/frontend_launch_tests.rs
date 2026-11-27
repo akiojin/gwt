@@ -2150,6 +2150,7 @@ fn manual_update_check_coalesces_and_publishes_without_staging() {
         attempt: 1,
         recorded_at: gwt_core::timestamp::UtcTimestamp::now().to_rfc3339(),
         message: Some("version mismatch".into()),
+        notify_on_gui_startup: false,
     };
     let completed = runtime.complete_manual_update_check(state.clone(), Some(failure.clone()));
     assert!(!runtime.update_check_in_flight);

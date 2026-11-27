@@ -502,6 +502,7 @@ mod tests {
             attempt: 1,
             recorded_at: "2026-10-01T01:00:00Z".into(),
             message: Some("payload copy failed".into()),
+            notify_on_gui_startup: false,
         })
         .unwrap();
         let failed = status_json_with_local(&outcome, &generation, home.path());

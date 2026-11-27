@@ -1088,6 +1088,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         handleUpdateProgress: applyUpdateProgress,
         handleUpdateApplyError: applyUpdateApplyError,
         handleUpdateReady: applyUpdateReady,
+        handleUpdateDownloadStatus: applyUpdateDownloadStatus,
         handleUpdateApplyPendingPersisted: applyUpdateApplyPendingPersisted,
         ...updateCtaController
       } = createUpdateCtaController({
@@ -5508,6 +5509,12 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
             applyUpdateReady({
               version: event.version,
               asset_path: event.asset_path,
+            });
+            break;
+          case "update_download_status":
+            applyUpdateDownloadStatus({
+              version: event.version,
+              cancelled: event.cancelled,
             });
             break;
           case "update_apply_error": {

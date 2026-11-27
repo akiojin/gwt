@@ -4346,10 +4346,7 @@ mod tests {
             .map(|tail| tail.split('{').next().unwrap())
             .collect();
         // Explicit CLI apply uses the same host-wide update state as the GUI.
-        assert_eq!(
-            direct_globals,
-            ["UpdateProgress", "UpdateReady", "UpdateAutoApply"]
-        );
+        assert_eq!(direct_globals, ["UpdateAutoApply"]);
         let health = include_str!("runtime_health_poller.rs")
             .split("#[cfg(test)]")
             .next()

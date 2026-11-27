@@ -1420,8 +1420,11 @@ pub enum FrontendEvent {
     ApplyUpdateStart,
     /// SPEC-2041 Phase 19 (FR-055): user pressed Cancel on the downloading
     /// modal. Backend aborts the in-flight download and removes any partial
-    /// payload. Currently a best-effort no-op until async download lands.
-    CancelUpdateDownload,
+    /// payload.
+    CancelUpdateDownload {
+        #[serde(default)]
+        version: Option<String>,
+    },
     /// SPEC-2041 Phase 19 (FR-059..061): user pressed `Later`. Binary stays
     /// preserved; backend emits [`BackendEvent::UpdateApplyPendingPersisted`]
     /// so the CTA morphs to ready state and same-session polling stops.
@@ -3630,6 +3633,11 @@ pub enum BackendEvent {
         /// On-disk path to the prepared payload (extracted binary or installer).
         asset_path: String,
     },
+    /// A transfer was admitted or its cancellation was processed.
+    UpdateDownloadStatus {
+        version: String,
+        cancelled: bool,
+    },
     /// SPEC-2041 Phase 19 (FR-059): `Later` was confirmed. The downloaded
     /// binary is preserved (in-memory today; persistent across restarts once
     /// the bootstrap path lands in T-133). Frontend morphs the CTA to ready.
@@ -4482,6 +4490,13 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventBackpressurePolicy::BestEffort,
     ),
     BackendEventPolicy::new(
+        "update_download_status",
+        // Like other critical lifecycle outcomes, admission and cancellation
+        // must reach the client in order even under stream backpressure.
+        BackendEventDeliveryClass::Error,
+        BackendEventBackpressurePolicy::FailOpenError,
+    ),
+    BackendEventPolicy::new(
         "update_auto_apply",
         BackendEventDeliveryClass::EphemeralStatus,
         BackendEventBackpressurePolicy::BestEffort,
@@ -4770,6 +4785,7 @@ impl BackendEvent {
             BackendEvent::UpdateCheckResult { .. } => "update_check_result",
             BackendEvent::UpdateProgress { .. } => "update_progress",
             BackendEvent::UpdateReady { .. } => "update_ready",
+            BackendEvent::UpdateDownloadStatus { .. } => "update_download_status",
             BackendEvent::UpdateAutoApply { .. } => "update_auto_apply",
             BackendEvent::UpdateApplyPendingPersisted { .. } => "update_apply_pending_persisted",
             BackendEvent::UpdateApplyError { .. } => "update_apply_error",
