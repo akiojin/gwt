@@ -1280,6 +1280,7 @@ mod tests {
         use crate::mobile_host::registration_client::{
             ConnectionEvent, InviteOutcome, InviteRejection, InviteRequest, OutboundSignal,
         };
+        use crate::mobile_host::signal::BrowserSignal;
         use std::sync::RwLock;
         use tokio::sync::{mpsc, watch};
         let mut fixture = Fixture::new();
@@ -1373,13 +1374,16 @@ mod tests {
             // The Host learns which of its pending invites was claimed.
             assert_eq!(claimed, issued.invite_id);
             assert_ne!(claimed, invite(4, 300).0.invite_id());
-            let offer = json!({"type":"signal","payload":"offer"}).to_string();
+            let offer = json!({"type":"offer","sdp":"v=0"}).to_string();
+            let offer = json!({"type":"signal","payload":offer}).to_string();
             bounded(browser.send(Message::text(offer))).await.unwrap();
             assert_eq!(
                 bounded(connections.recv()).await,
                 Some(ConnectionEvent::Signal {
                     connection_id,
-                    payload: "offer".to_string()
+                    signal: BrowserSignal::Offer {
+                        sdp: "v=0".to_string()
+                    }
                 })
             );
             // The Host's signal reaches this browser.
@@ -1393,6 +1397,42 @@ mod tests {
                 json!({"type":"signal","payload":"answer"})
             );
             bounded(browser.close(None)).await.unwrap();
+            assert_eq!(
+                bounded(connections.recv()).await,
+                Some(ConnectionEvent::Closed { connection_id })
+            );
+        }
+        assert!(host.read().unwrap().is_enabled());
+        assert_eq!(live(&sessions), 1);
+
+        // A browser signal outside the Host wire is never reported: its
+        // connection is closed and the registration stays live.
+        {
+            use futures_util::{SinkExt as _, StreamExt as _};
+            use tokio_tungstenite::tungstenite::Message;
+            let issued = issued_invite(&host, &invites).await;
+            let origin = [("origin", "https://coordinator.example".to_string())];
+            let mut browser = open_path(&fixture, addr, BROWSER_CLAIM_PATH, &origin)
+                .await
+                .unwrap();
+            let claim =
+                json!({"type":"claim_invite","secret":hex::encode(issued.secret.as_slice())})
+                    .to_string();
+            bounded(browser.send(Message::text(claim))).await.unwrap();
+            assert_eq!(next_json(&mut browser).await, json!({"type":"claimed"}));
+            let ConnectionEvent::Claimed { connection_id, .. } =
+                bounded(connections.recv()).await.unwrap()
+            else {
+                panic!("the first connection event must be the claim");
+            };
+            let snapshot = json!({"type":"signal","payload":r#"{"type":"snapshot"}"#}).to_string();
+            bounded(browser.send(Message::text(snapshot)))
+                .await
+                .unwrap();
+            assert!(matches!(
+                bounded(browser.next()).await,
+                None | Some(Err(_)) | Some(Ok(Message::Close(_)))
+            ));
             assert_eq!(
                 bounded(connections.recv()).await,
                 Some(ConnectionEvent::Closed { connection_id })
@@ -2216,6 +2256,7 @@ mod tests {
     #[tokio::test]
     async fn host_client_closes_only_a_browser_that_outpaces_its_signal_share() {
         use crate::mobile_host::registration_client::ConnectionEvent;
+        use crate::mobile_host::signal::BrowserSignal;
         use futures_util::SinkExt as _;
         use std::sync::RwLock;
         use tokio::sync::{mpsc, watch};
@@ -2267,7 +2308,9 @@ mod tests {
         assert_eq!(next_json(&mut browser).await, json!({"type":"claimed"}));
         // The caller does not drain: the claim and the first signal fill the
         // signal share, so the second signal closes this browser only.
-        for payload in ["0", "1"] {
+        let offer = json!({"type":"offer","sdp":"v=0"}).to_string();
+        let candidate = json!({"type":"candidate","candidate":"c"}).to_string();
+        for payload in [&offer, &candidate] {
             let text = json!({"type":"signal","payload":payload}).to_string();
             bounded(browser.send(Message::text(text))).await.unwrap();
         }
@@ -2286,7 +2329,9 @@ mod tests {
             bounded(connections.recv()).await,
             Some(ConnectionEvent::Signal {
                 connection_id,
-                payload: "0".to_string()
+                signal: BrowserSignal::Offer {
+                    sdp: "v=0".to_string()
+                }
             })
         );
         assert_eq!(
