@@ -22,6 +22,9 @@ pub enum AcceptanceDefect {
         /// The heading as written (without the leading `#`s).
         heading: String,
     },
+    /// SPEC #3836 AC-12: explicit `AC-N:` checklist items exist only inside
+    /// the `tasks` section, which the classifier never reads as criteria.
+    MisplacedInTasks,
 }
 
 /// Outcome of the deterministic pre-launch acceptance-criteria classification.
@@ -133,6 +136,11 @@ impl AcceptanceCriteria {
                  under it; write each criterion as `- [ ] AC-1: ...` (a `- [ ]` line without \
                  the `AC-N:` prefix is accepted and numbered by position)"
             ),
+            AcceptanceDefect::MisplacedInTasks => "`AC-N:` checklist items were found only \
+                 inside the `tasks` section, which is never read as acceptance criteria; move \
+                 them under a `## 受け入れ基準` / `## Acceptance Criteria` heading in the `spec` \
+                 section (or the Issue body of a plain Issue)"
+                .to_string(),
         })
     }
 
@@ -295,8 +303,16 @@ pub fn classify_acceptance_criteria(issue_body: &str) -> AcceptanceCriteria {
     // (explicit id, checked, criterion text) for every checklist / explicit-id
     // item. `checked` is Issue #3917 AC-2 completion evidence.
     let mut items: Vec<(Option<String>, bool, String)> = Vec::new();
+    // SPEC #3836 AC-12: explicit `AC-N:` checklist items seen inside the
+    // `tasks` section, used only to name the misplacement in the defect.
+    let mut in_tasks_section = false;
+    let mut tasks_section_ac_items = false;
 
     for line in issue_body.lines() {
+        let marker = line.trim_start();
+        if marker.starts_with("<!--") && marker.contains("artifact:tasks ") {
+            in_tasks_section = marker.contains(" BEGIN");
+        }
         if let Some((heading, written)) = heading_text(line) {
             // Entering the block iff this heading matches; any other heading
             // closes a previously open block.
@@ -307,6 +323,14 @@ pub fn classify_acceptance_criteria(issue_body: &str) -> AcceptanceCriteria {
             continue;
         }
         if !in_block {
+            if in_tasks_section {
+                let checklist = marker
+                    .strip_prefix("- [ ]")
+                    .or_else(|| marker.strip_prefix("- [x]"))
+                    .or_else(|| marker.strip_prefix("- [X]"));
+                tasks_section_ac_items |=
+                    checklist.is_some_and(|rest| split_explicit_id(rest.trim_start()).0.is_some());
+            }
             continue;
         }
         let item = line.trim_start();
@@ -379,6 +403,8 @@ pub fn classify_acceptance_criteria(issue_body: &str) -> AcceptanceCriteria {
     let ids: Vec<String> = accepted.into_iter().map(|(id, _, _)| id).collect();
     let defect = if !ids.is_empty() {
         None
+    } else if tasks_section_ac_items {
+        Some(AcceptanceDefect::MisplacedInTasks)
     } else if let Some(heading) = heading_found {
         Some(AcceptanceDefect::NoChecklistItems { heading })
     } else {
@@ -968,6 +994,34 @@ mod tests {
                     <!-- artifact:tasks BEGIN -->\n- [ ] T-001\n<!-- artifact:tasks END -->\n";
         let c = classify_acceptance_criteria(body);
         assert_eq!(c.ids, vec!["AC-1"], "T-001 is a task, not a criterion");
+    }
+
+    #[test]
+    fn issue_3836_ac_items_only_in_tasks_section_name_the_misplacement() {
+        // SPEC #3836 AC-12: `AC-N:` items written in the `tasks` section stay
+        // non-criteria, but the rejection reason must say where they went.
+        let body = "<!-- artifact:spec BEGIN -->\n## Summary\ntext\n<!-- artifact:spec END -->\n\
+                    <!-- artifact:tasks BEGIN -->\n## Phase 1\n- [ ] T-001 do it\n\
+                    - [ ] AC-1: criterion in the wrong place\n<!-- artifact:tasks END -->\n";
+        let c = classify_acceptance_criteria(body);
+        assert!(!c.machine_checkable, "tasks-only criteria are not accepted");
+        assert_eq!(c.defect, Some(AcceptanceDefect::MisplacedInTasks));
+        let reason = c.rejection_reason().expect("a defect carries a reason");
+        assert!(reason.contains("`tasks`"), "{reason}");
+        assert!(reason.contains("`spec`"), "{reason}");
+        assert!(!crate::issue_monitor::is_legacy_acceptance_failure(&reason));
+    }
+
+    #[test]
+    fn issue_3836_ac_items_outside_tasks_keep_the_missing_heading_defect() {
+        // SPEC #3836 AC-6: only the `tasks` placement changes the reason.
+        let c = classify_acceptance_criteria("## Notes\n- [ ] AC-1: no heading\n");
+        assert_eq!(c.defect, Some(AcceptanceDefect::MissingHeading));
+        let after_tasks = classify_acceptance_criteria(
+            "<!-- artifact:tasks BEGIN -->\n- [ ] T-001\n<!-- artifact:tasks END -->\n\
+             ## Notes\n- [ ] AC-1: after the tasks section\n",
+        );
+        assert_eq!(after_tasks.defect, Some(AcceptanceDefect::MissingHeading));
     }
 
     #[test]
