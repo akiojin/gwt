@@ -178,6 +178,7 @@ pub(crate) struct AgentRuntimeRecord {
 }
 
 struct AgentOperation {
+    pane_create_timer: Option<crate::perf::RouteTimer>,
     session_id: Option<String>,
     early_events: VecDeque<TransportEvent>,
     request: serde_json::Value,
@@ -4816,6 +4817,7 @@ impl OwnerState {
             self.agent_operations.insert(
                 operation_id.clone(),
                 AgentOperation {
+                    pane_create_timer: None,
                     session_id: None,
                     early_events: VecDeque::new(),
                     request: expected_request.unwrap_or(serde_json::Value::Null),
@@ -5610,6 +5612,7 @@ impl OwnerState {
         command: OwnerCommand,
         reply: oneshot::Sender<OwnerReply>,
     ) {
+        let started = std::time::Instant::now();
         let request = match serde_json::to_value(&command) {
             Ok(request) => request,
             Err(error) => {
@@ -5669,6 +5672,10 @@ impl OwnerState {
         self.agent_operations.insert(
             operation_id.clone(),
             AgentOperation {
+                pane_create_timer: Some(crate::perf::RouteTimer::from_start(
+                    crate::perf::PerfRoute::PaneCreate,
+                    started,
+                )),
                 session_id: None,
                 early_events: VecDeque::new(),
                 request,
@@ -5804,6 +5811,7 @@ impl OwnerState {
         self.agent_operations.insert(
             operation_id.clone(),
             AgentOperation {
+                pane_create_timer: None,
                 session_id: None,
                 early_events: VecDeque::new(),
                 request,
@@ -5941,6 +5949,7 @@ impl OwnerState {
         self.agent_operations.insert(
             operation_id.clone(),
             AgentOperation {
+                pane_create_timer: None,
                 session_id: None,
                 early_events: VecDeque::new(),
                 request,
@@ -5997,6 +6006,7 @@ impl OwnerState {
         mut restore: Option<super::installation::OwnerSavedSessionRestore>,
         restore_predecessor: Option<String>,
     ) {
+        let started = std::time::Instant::now();
         if let Err(error) = &self.agent_registry {
             let _ = reply.send(Err(error.clone()));
             return;
@@ -6219,6 +6229,7 @@ impl OwnerState {
                 self.agent_operations.insert(
                     operation_id.clone(),
                     AgentOperation {
+                        pane_create_timer: None,
                         session_id: None,
                         early_events: VecDeque::new(),
                         request,
@@ -6372,6 +6383,10 @@ impl OwnerState {
         self.agent_operations.insert(
             operation_id.clone(),
             AgentOperation {
+                pane_create_timer: Some(crate::perf::RouteTimer::from_start(
+                    crate::perf::PerfRoute::PaneCreate,
+                    started,
+                )),
                 session_id: None,
                 early_events: VecDeque::new(),
                 request,
@@ -7680,6 +7695,7 @@ impl OwnerState {
 
     fn finish_agent_operation(&mut self, operation_id: &str, mut result: OwnerReply) {
         if let Some(operation) = self.agent_operations.get_mut(operation_id) {
+            drop(operation.pane_create_timer.take());
             // Exact compensation is immutable readback even if a later
             // physical/registry cleanup attempt still needs reconciliation.
             if let Some(Ok(captured)) = operation.result.as_ref().filter(|cached| {
@@ -13727,6 +13743,7 @@ mod worker_tests {
         owner.agent_operations.insert(
             "preparing".into(),
             AgentOperation {
+                pane_create_timer: None,
                 session_id: None,
                 early_events: VecDeque::new(),
                 request: json!({
@@ -15203,6 +15220,7 @@ mod tests {
         state.agent_operations.insert(
             "launch".into(),
             AgentOperation {
+                pane_create_timer: None,
                 session_id: Some("materialized-session".into()),
                 early_events: VecDeque::new(),
                 request: json!({}),
@@ -15739,6 +15757,7 @@ mod tests {
         state.agent_operations.insert(
             "operation".into(),
             AgentOperation {
+                pane_create_timer: None,
                 session_id: None,
                 early_events: VecDeque::new(),
                 request: json!(null),
@@ -16655,6 +16674,7 @@ mod tests {
         state.agent_operations.insert(
             "completed".into(),
             AgentOperation {
+                pane_create_timer: None,
                 session_id: Some(snapshot.id.clone()),
                 early_events: VecDeque::new(),
                 request: launch_request.clone(),
