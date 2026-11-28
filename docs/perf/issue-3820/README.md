@@ -229,6 +229,59 @@ p50 / p95 は nearest-rank。n=3 のため p95 は最悪値と同じ。
 - `sync-index.json`: P12 / P11 の生サンプル（outcome、error、受付時間を含む）。
 - `sync-index-environment.txt`: checkout SHA、version、OS、CPU、採取時刻。
 
+## P03 / P04 / P06 production route（#8040 の計装修復後）
+
+### 結論
+
+Issue #8040（PR #8060）で production の計装が戻ったため、隔離インスタンスで操作を駆動し、
+production が perf log に書いた `route:*` のサンプルをそのまま値として採った。headed Chromium の dark / light で各 20 操作。
+
+| 行 | 経路 | 記録数 / 操作数 | p50 ms | p95 ms | 最悪 ms | バジェット ms | 判定（暫定） |
+|---|---|---:|---:|---:|---:|---:|---|
+| P03 | project switch | 40 / 40 | 95.0 | 111.2 | 121.3 | 100（ui_response） | p95 超過 |
+| P04 | pane 生成（Shell） | 38 / 40 | 38.803 | 50.971 | 56.452 | 5000（pane.create） | 予算内 |
+| P06 | prompt 送信 | 40 / 40 | 0.036 | 0.062 | 0.127 | 100（ui_response） | 予算内（handler 区間のみ） |
+
+テーマ別（p50 / p95 / 最悪 ms）:
+
+| 行 | dark | light |
+|---|---|---|
+| P03 | 95.8 / 111.2 / 121.3 | 91.8 / 110.7 / 118.9 |
+| P04 | 43.969 / 56.452 / 56.452（19 / 20） | 31.563 / 47.136 / 47.136（19 / 20） |
+| P06 | 0.035 / 0.053 / 0.062 | 0.037 / 0.062 / 0.127 |
+
+p50 / p95 は nearest-rank。
+
+- P03 は `/p/<A>` から `/p/<B>` へのページ遷移で、フロントエンドが遷移開始から最初の workspace frame までを
+  `startup_first_frame`（`project_switch:true`）として送り、backend が `route:project.switch` に記録した値。
+  #3700 の ui_response 100 ms に対し、p50 は予算内、p95 は超過。
+- P04 は Shell window の作成（定義のうち「同期 process 生成」側、`launch_configured_shell`）。agent の起動は
+  隔離 HOME に agent の資格情報が無いため測っていない。
+- P04 は各テーマの実行でちょうど 1 回分の `route:pane.create` が記録されなかった（smoke でも 3 回中 2 件）。
+  Shell の作成経路の一部に計装が無い可能性があり、#8040 の観点で PM に報告した。値は記録された 38 件から計算した。
+- P06 は Shell への Enter を含む入力の handler 区間（PTY への書き込み完了まで）。GUI の回復は P07 が扱う。
+
+### 条件
+
+- 対象: checkout `a319539f1a`（`origin/develop` の #8060 を含む）の `target/debug/gwt`（debug build、gwtd 9.179.0）。
+- host: macOS 27.2.1、Apple M5 Max。2026-11-28T04:07Z〜04:10Z（`routes-environment.txt`）。
+- 起動: `--no-tray --no-open`、fresh HOME。`~/.gwt/runtime`、`.gitconfig`、`.config`、`.cache` を symlink した。
+  PM auto start と Issues の自動実行は無効にした。
+- fixture: 空 commit の repo の linked worktree を 2 つ開いた。GitHub remote は無い。
+- driver: `crates/gwt/playwright/tests/route-inventory-live.spec.ts`。P04 → P06 → P03 の順に各 20 操作。
+  P06 は Shell 作成後に owner の attach grace（15 秒）を待ってから送った。console / page error は 0 件。
+
+### 限界
+
+- fixture は最小の repo であり、下限側に偏る。
+- P03 の起点はブラウザの遷移開始であり、ユーザーのクリックから遷移開始までは含まない。
+- browser-check の hook repair / audit は P02 と同じ理由で実行していない。計測は agent を起動しない。
+
+### ファイル
+
+- `routes-dark.json` / `routes-light.json`: テーマごとの生サンプル、操作数、記録数。
+- `routes-environment.txt`: checkout SHA、version、OS、CPU、採取時刻。
+
 ## 計測できなかった行
 
 ### P19（worktree picker 列挙）
