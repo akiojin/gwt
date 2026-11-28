@@ -9814,7 +9814,16 @@ impl OwnerState {
             });
         }
         let close = target.and_then(|id| {
-            if self.closing.contains_key(&id) {
+            // Correlated self-close transfers the runtime at its exact Owner
+            // commit. A stalled acceptance worker must leave the pane available.
+            if matches!(
+                request,
+                AgentFrontendRequest::CloseWindow {
+                    request_id: Some(_),
+                    ..
+                }
+            ) || self.closing.contains_key(&id)
+            {
                 return None;
             }
             let row_exists = panes.iter().any(|pane| pane.window.id == id);
@@ -16783,6 +16792,80 @@ mod tests {
         .iter()
         .any(|row| row.id == "stopped"));
     }
+    #[tokio::test]
+    async fn stalled_self_close_worker_leaves_the_runtime_with_the_owner() {
+        use super::super::agent_frontend::{
+            set_owner_agent_dispatch_test_hook, OwnerAgentDispatchTestStage,
+        };
+
+        let root = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(root.path());
+        let (snapshot, pane) = unbound_fixture(root.path());
+        let (mut state, receiver, handle) = owner_fixture(root.path());
+        state.project_key = gwt_core::paths::project_scope_hash(root.path()).to_string();
+        let id = format!("{}::pane", state.project_key);
+        let registry = state.agent_registry.as_ref().unwrap();
+        let row = super::super::agent_dispatch::owned_process_window_state(
+            root.path(),
+            &id,
+            Some(&snapshot),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        super::super::agent_dispatch::publish_owned_process_window(
+            registry,
+            root.path(),
+            &id,
+            None,
+            row,
+            &AtomicBool::new(true),
+        )
+        .map_err(|error| error.detail)
+        .unwrap();
+        state
+            .install_pane(id.clone(), 1, pane, Arc::new(AtomicBool::new(true)))
+            .unwrap();
+        let token = state.issuer.issue(root.path(), &snapshot.id).unwrap().token;
+        let grant = state.issuer.grant_for_test(&token).unwrap();
+        let (entered, wait_for_worker) = mpsc::channel();
+        let (release, wait_for_release) = mpsc::channel::<()>();
+        let _hook = set_owner_agent_dispatch_test_hook(
+            &grant,
+            OwnerAgentDispatchTestStage::BeforeDispatch,
+            move || {
+                let _ = entered.send(());
+                let _ = wait_for_release.recv();
+            },
+        );
+        let (responder, acceptance) = crate::agent_capability::AgentSelfCloseResponder::channel();
+        state.dispatch_agent_frontend(
+            "origin".into(),
+            grant,
+            crate::agent_capability::AgentFrontendRequest::CloseWindow {
+                id: id.clone(),
+                request_id: Some(uuid::Uuid::new_v4().to_string()),
+                responder: Some(responder),
+            },
+        );
+        gwt_core::test_support::recv_event(&wait_for_worker, "self-close worker entered");
+        let owner_retained_pane =
+            state.runtimes.contains_key(&id) && !state.closing.contains_key(&id);
+        drop(acceptance);
+        drop(release);
+        let actor = spawn_owner_worker(move || run_fixture_owner(state, receiver));
+        // test-hygiene: allow-wall-clock-deadline Bound fixture shutdown after releasing the worker.
+        tokio::time::timeout(std::time::Duration::from_secs(10), handle.shutdown())
+            .await
+            .unwrap();
+        actor.join().unwrap();
+        assert!(
+            owner_retained_pane,
+            "unaccepted self-close transferred the live pane"
+        );
+    }
+
     #[tokio::test]
     async fn shutdown_keeps_accepted_self_close_explicit_before_origin_commit() {
         let root = tempfile::tempdir().unwrap();
