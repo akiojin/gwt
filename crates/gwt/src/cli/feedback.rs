@@ -65,11 +65,19 @@ fn feedback_decision(root: &Path, id: &str, materials: &str) -> gwt_core::Result
 /// Decide card (Issue #8083). `None`: the card is waiting and the report
 /// stays local. Any answer other than Send keeps it local.
 fn decide_consent(root: &Path, id: &str, prompt: &str) -> Result<Option<bool>, String> {
-    use gwt_core::decision_queue::DecisionStatus;
+    use gwt_core::decision_queue::{AnsweredBy, DecisionStatus};
     let latest = gwt_core::decision_queue::latest_for_target(root, &feedback_target(id))
         .map_err(|error| error.to_string())?;
     match latest {
-        Some(item) if item.status == DecisionStatus::Answered => {
+        // Only the user's own answer decides; a PM answer is not consent and
+        // the report waits on a fresh card instead.
+        Some(item)
+            if item.status == DecisionStatus::Answered
+                && item
+                    .answer
+                    .as_ref()
+                    .is_some_and(|answer| answer.by == AnsweredBy::User) =>
+        {
             Ok(Some(item.answer.is_some_and(|answer| {
                 answer.text.trim().starts_with("Send")
             })))
@@ -2978,6 +2986,13 @@ mod tests {
             assert_eq!(open[0].kind, DecisionKind::PmDecision);
             assert_eq!(open[0].waiters, vec![Waiter::Pm]);
             assert!(open[0].materials.contains(&record.input.title));
+            // A PM answering its own card is not consent: nothing is sent and
+            // a fresh card waits for the user.
+            decision_queue::answer(dir.path(), &open[0].id, FEEDBACK_SEND, AnsweredBy::Pm).unwrap();
+            assert_eq!(process().state, FeedbackState::PendingApproval);
+            assert_eq!(client.owner_mutation_count(), 0);
+            let open = decision_queue::list(dir.path(), None, false).unwrap();
+            assert_eq!(open.len(), 1, "a fresh card waits for the user");
             decision_queue::answer(dir.path(), &open[0].id, answer, AnsweredBy::User).unwrap();
             let result = process();
             assert_eq!(client.owner_mutation_count(), usize::from(sends));

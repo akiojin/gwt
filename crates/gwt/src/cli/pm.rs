@@ -322,22 +322,9 @@ pub struct CapabilitiesReport {
 /// The things the PM cannot do. Only these are declared by hand; every
 /// executable row comes from the dispatch catalog, and the test fails when a
 /// missing operation lands or a permission row names an unknown operation.
-/// Issue #8083: bounded PM operations run without a permission stop, so only
-/// the elevated-scope cases routed through `pm.operation.execute` stay here.
-const CAPABILITY_GAPS: &[(&str, &str, CapabilityGapReason, &str)] = &[
-    (
-        "pr.close", r#"{}"#, CapabilityGapReason::Permission,
-        "For PM inventory-triage closure, use pm.operation.execute for the exact PR; existing ordinary PR authority remains in force and the run is audited in Reports",
-    ),
-    (
-        "worktree.gc_build_artifacts", r#"{}"#, CapabilityGapReason::Permission,
-        "For unmerged or protected-workspace cleanup, use pm.operation.execute with scoped parameters; ordinary dry-run and merged-idle cleanup remain available, with live-worktree exclusions",
-    ),
-    (
-        "pm.message.send", r#"{}"#, CapabilityGapReason::Permission,
-        "For provider approval-prompt choices, use pm.operation.execute for the exact pane id and text; ordinary PM coordination remains available, with project and live-target authority enforced",
-    ),
-];
+/// Issue #8083: no PM operation waits for an owner permission, so no
+/// permission gap is declared by hand. A missing operation lands here.
+const CAPABILITY_GAPS: &[(&str, &str, CapabilityGapReason, &str)] = &[];
 
 pub(crate) fn capabilities_report() -> CapabilitiesReport {
     let executable = crate::cli::operation_catalog::canonical_names().map(|name| Capability {
@@ -2836,22 +2823,16 @@ mod tests {
                 "{operation} uses PM authority without a scoped approval route"
             );
         }
-        // Issue #8083: no bounded operation waits for an approval route.
+        // Issue #8083: no bounded operation, including the elevated scopes
+        // run through pm.operation.execute, is handed to the owner.
         for operation in gwt_core::pm_authorization::OPERATIONS {
-            let gap = report
-                .capabilities
-                .iter()
-                .find(|entry| entry.operation == *operation && !entry.executable);
-            if matches!(
-                *operation,
-                "pr.close" | "worktree.gc_build_artifacts" | "pm.message.send"
-            ) {
-                let row = serde_json::to_value(gap.expect("elevated scope row")).unwrap();
-                assert_eq!(row["permission_stage"], "autonomous");
-                assert_eq!(row["alternative_operation"], "pm.operation.execute");
-            } else {
-                assert!(gap.is_none(), "{operation} must not wait for approval");
-            }
+            assert!(
+                !report
+                    .capabilities
+                    .iter()
+                    .any(|entry| entry.operation == *operation && !entry.executable),
+                "{operation} must not be handed to the owner"
+            );
         }
         assert!(!serde_json::to_string(&report)
             .unwrap()

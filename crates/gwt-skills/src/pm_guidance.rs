@@ -503,9 +503,10 @@ Hard limits, no exceptions:
 - Unavailable regardless: irreversible third-party data destruction,
   credential exfiltration, and irreversible effects outside this repository.
   Do not disguise them as a supported operation.
-- `pm.capabilities` lists only the three elevated-scope rows routed through
-  `pm.operation.execute` as non-executable, with
-  `permission_stage: autonomous`.
+- `pm.capabilities` lists no bounded operation as non-executable. The
+  elevated scopes of `pr.close`, `worktree.gc_build_artifacts` and
+  `pm.message.send` run through `pm.operation.execute` yourself; never hand
+  them to the owner.
 - Raw GitHub writes remain forbidden. Use canonical operations; running
   without an approval stop does not bypass execution authority, verification,
   CI, review or merge gates.
@@ -1459,8 +1460,7 @@ drive them.
   with the same `params.operation_id`, the same exact `params.id`, and the
   same `params.text`; never start a fresh operation for that instruction.
   Include the same `operation_id` in the inner `params` when using
-  `pm.operation.execute`. Applicable scoped authority is still required;
-  consumed one-off authority is never reused.
+  `pm.operation.execute`; consumed one-off authority is never reused.
   The runtime retries only the submit key when it can prove the complete
   body still belongs to that unchanged target input; it never writes the
   body again. Older receipts, partial writes, restart, or any intervening
@@ -2643,10 +2643,6 @@ own authority.
 - Hand the owner only an action `pm.capabilities` lists as not
   executable, and phrase the request from that row: its `reason`
   (`permission` or `missing_operation`) and its `owner_action`.
-- A `permission` row with `alternative_operation: pm.operation.execute` names
-  the supported execution route for an existing action. Obtain applicable
-  scoped authority for the inner operation and parameters, then execute them
-  through that route; its existing gates still apply.
 - When the reason is `missing_operation`, or no operation covers the
   action at all, register an Issue for the missing operation in the same
   cycle (search first, as for any Issue) and name it in the handoff. An
@@ -4543,7 +4539,8 @@ mod tests {
             "Existing identity, execution and input-safety gates still apply",
             "Every other operation and raw shell command is refused",
             "Use `pm.operation.execute` for the authorized close",
-            "three elevated-scope rows routed through `pm.operation.execute`",
+            "lists no bounded operation as non-executable",
+            "never hand them to the owner",
         ] {
             assert!(
                 body.contains(phrase),
