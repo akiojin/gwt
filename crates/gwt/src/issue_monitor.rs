@@ -1983,9 +1983,14 @@ pub enum IssueMonitorClaimHealth {
 /// exhaustion, and (Issue #7665) the named non-capacity holds.
 pub(crate) const MONITOR_SPAWN_HOLD_PREFIX: &str = "Issues launch hold before launching Issue #";
 
+/// Shared capacity can fill between preparation and the final delivery claim.
+pub(crate) const MONITOR_DELIVERY_CLAIM_REFUSAL: &str =
+    "Issues launch delivery claim changed before owner materialization";
+
 pub(crate) fn is_monitor_spawn_hold_refusal(message: &str) -> bool {
     message.starts_with("Issues max_active reached (")
         || message.starts_with(MONITOR_SPAWN_HOLD_PREFIX)
+        || message == MONITOR_DELIVERY_CLAIM_REFUSAL
 }
 
 /// Last attempt, last successful readback, and last failure remain inspectable
