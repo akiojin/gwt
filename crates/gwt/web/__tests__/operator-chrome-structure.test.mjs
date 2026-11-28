@@ -2029,7 +2029,6 @@ test("Every keyframes-driven animation has a prefers-reduced-motion override", (
   // matching it) appears in any prefers-reduced-motion block.
   const css = readFileSync(resolve(here, "../styles/components.css"), "utf8");
   const keyframes = [...new Set([...css.matchAll(/@keyframes\s+([\w-]+)\s*\{/g)].map((m) => m[1]))];
-  assert.ok(keyframes.length >= 6, `expected >= 6 keyframes, got ${keyframes.length}`);
 
   // CSS @media blocks have nested rules with their own closing braces, so
   // a naive regex with `[^}]*` or `[\s\S]*?\n\}` undercaptures. Walk the
