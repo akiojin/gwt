@@ -362,3 +362,39 @@ test("Issue #7864 mounts only the most recent 50 articles in native order", asyn
     Array.from({ length: 50 }, (_, index) => `Article ${2450 + index}`));
   assert.equal(f.home().querySelector(".gwt-home__timeline > details"), null);
 });
+
+// Issue #8086 AC-1/AC-2: the native history is the one conversation every
+// client reads. A tab that never sent the message — another client, or one
+// opened or reloaded later — shows the owner's message between the PM's
+// replies, and the sending tab's local receipt yields to the same message.
+test("Issue #8086: every tab shows both sides of the PM conversation in order", async () => {
+  const text = "Ship the nightly fix";
+  const history = [
+    { id: "pm-1", role: "assistant", text: "Working on the queue.", timestamp: "2026-11-28T06:00:00.000Z" },
+    { id: "owner-1", role: "user", text, timestamp: "2026-11-28T06:01:00.000Z" },
+    { id: "pm-2", role: "assistant", text: "Shipping it now.", timestamp: "2026-11-28T06:02:00.000Z" },
+  ];
+  const conversation = messages => [project(alpha, [], { conversation: { conversation_id: "c", messages } })];
+  const timeline = tab => [...tab.home().querySelectorAll(".gwt-home__timeline > article:not([data-home-greeting])")]
+    .map(node => node.textContent);
+
+  const sender = fixture();
+  sender.load([alpha], conversation(history.slice(0, 1)));
+  assert.ok(sender.app.home.actions.submit(text, alpha.project_key));
+  sender.socket.deliver({ kind: "pane_send_result", ok: true, request_id: sender.sends()[0].request_id });
+  await settle();
+  sender.load([alpha], conversation(history));
+  await settle();
+  assert.equal(sender.home().querySelectorAll("[data-home-sent]").length, 0);
+  const sent = timeline(sender);
+
+  const other = fixture();
+  other.load([alpha], conversation(history));
+  await settle();
+  const seen = timeline(other);
+  assert.deepEqual(seen, sent, "another tab shows the same conversation as the sender");
+  assert.equal(seen.length, 3);
+  assert.match(seen[0], /Working on the queue\./);
+  assert.match(seen[1], /You.*to Alpha.*Ship the nightly fix/);
+  assert.match(seen[2], /Shipping it now\./);
+});

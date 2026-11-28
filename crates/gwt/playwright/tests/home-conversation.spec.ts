@@ -227,19 +227,17 @@ for (const width of [1440, 390]) {
     await writeFile(metrics, JSON.stringify({ theme, width, history: history.length, initialMs, samples }, null, 2));
     await info.attach("PM history metrics", { path: metrics, contentType: "application/json" });
 
-    for (let attempt = 0; attempt < 4 && (await entry(2999).count()) === 0; attempt++) {
-      const last = await messages.last().textContent();
-      await log.evaluate(async node => {
-        // Landing at the bottom after an anchor adjustment can make a direct
-        // scroll to the same offset a no-op. Cross the paging threshold anew.
+    for (const nextLast of [2949, 2999]) {
+      if (await entry(nextLast).count()) continue;
+      await log.evaluate(node => new Promise<void>(resolve => {
         const bottom = node.scrollHeight - node.clientHeight;
-        if (bottom - node.scrollTop <= 16) {
-          node.scrollTop = bottom - 64;
-          await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
-        }
-        node.scrollTop = node.scrollHeight;
-      });
-      await expect(messages.last()).not.toHaveText(last!);
+        // The anchor can have moved scrollTop since the last delivered event.
+        // Observe an off-bottom scroll before asking Chromium to report bottom again.
+        node.addEventListener("scroll", () => resolve(), { once: true });
+        node.scrollTop = bottom - (node.scrollTop === bottom - 64 ? 96 : 64);
+      }));
+      await log.evaluate(node => { node.scrollTop = node.scrollHeight; });
+      await expect(messages.last()).toHaveText(history[nextLast].text);
     }
     await log.evaluate(node => { node.scrollTop = node.scrollHeight; });
     await expect(entry(2999)).toBeInViewport();
@@ -592,3 +590,51 @@ for (const width of [1440, 390]) {
     expect(errors).toEqual([]);
   });
 }
+
+// Issue #8086 AC-1/AC-2/AC-4: two tabs of one gwt. The host projects the
+// owner's message into the native history every client reads, so the tab
+// that did not send it shows both sides in order, and both tabs name the PM.
+test("Issue #8086 two tabs show both sides of the PM conversation and the PM name", async ({ context }, testInfo) => {
+  const theme = themeOf(testInfo.project.name);
+  const text = "Ship the nightly fix";
+  const pm = { name: "Ozawa Hino", avatar: { kind: "preset" as const, preset_id: "fox" } };
+  const history = (owner: boolean) => [
+    { id: "pm-1", role: "assistant", text: "Working on the queue.", timestamp: "2026-11-28T06:00:00.000Z" },
+    ...(owner ? [
+      { id: "owner-1", role: "user", text, timestamp: "2026-11-28T06:01:00.000Z" },
+      { id: "pm-2", role: "assistant", text: "Shipping it now.", timestamp: "2026-11-28T06:02:00.000Z" },
+    ] : []),
+  ];
+  const backend = (owner: boolean): Backend => ({ projects: [alpha], pm, conversation: [{
+    project_key: alpha.project_key, title: alpha.title, pm_available: true, decisions: [],
+    conversation: { availability: "ready", messages: history(owner) },
+  }] });
+  const sender = await context.newPage();
+  const other = await context.newPage();
+  const errors = [...[sender, other].map(collectBrowserErrors)];
+  await openHome(sender, theme, backend(false));
+  await openHome(other, theme, backend(false));
+
+  const composer = sender.locator("[data-home]").getByRole("textbox", { name: "Message to the Project Manager" });
+  await composer.fill(text);
+  await composer.press("Enter");
+  await expect(sender.locator("[data-home-sent]")).toContainText(text);
+  // The host now holds the message in the native history both tabs read.
+  for (const page of [sender, other]) {
+    await page.evaluate(projects => (window as any).__homeProjects(projects), backend(true).conversation);
+  }
+  for (const page of [sender, other]) {
+    const log = page.locator("[data-home]").getByRole("log");
+    const entries = log.locator(":scope > article:not([data-home-greeting])");
+    // Home reads again every 5 seconds; wait for the native turn to arrive.
+    await expect(log.getByText("Shipping it now.")).toBeVisible({ timeout: 15_000 });
+    await expect(entries).toHaveCount(3);
+    await expect(entries.nth(0)).toContainText("Working on the queue.");
+    await expect(entries.nth(1)).toContainText(new RegExp(`You.*to Alpha.*${text}`));
+    await expect(entries.nth(2)).toContainText("Shipping it now.");
+    await expect(page.locator("[data-home-sent]")).toHaveCount(0);
+    await expect(page.locator("footer.app-foot .app-foot__pm")).toHaveText(`PM: ${pm.name}`);
+  }
+  await other.screenshot({ path: testInfo.outputPath(`home-two-tabs-${theme}.png`) });
+  expect(errors.flat()).toEqual([]);
+});

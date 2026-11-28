@@ -55,6 +55,15 @@ pub const DEFAULT_WORK_EVENTS_INGEST_BUDGET_MS: f64 = 5_000.0;
 /// ceiling rather than the interaction budget.
 pub const DEFAULT_WORK_HOOK_HEALTH_BUDGET_MS: f64 = 5_000.0;
 
+/// Phase of [`PerfRoute::WorkEventsIngest`] for one Work merge-status scan
+/// pass (SPEC #3820 P20): from the worker pass start to the merge status
+/// being published to the GUI.
+///
+/// The scan is only ever started as the ingest's event-loop continuation, so
+/// it is recorded beside that route. #3700 defines no budget for it, so it is
+/// an unbudgeted phase rather than a route of its own.
+pub const WORK_MERGE_STATUS_PHASE: &str = "merge_status";
+
 const TARGET_PREFIX: &str = "route:";
 /// Perf-log `target` prefix for one phase inside a route (Issue #4283 AC-5).
 const PHASE_TARGET_PREFIX: &str = "phase:";
@@ -262,5 +271,15 @@ mod tests {
             DEFAULT_WORK_HOOK_HEALTH_BUDGET_MS
         );
         assert_eq!(DEFAULT_WORK_HOOK_HEALTH_BUDGET_MS, 5_000.0);
+    }
+
+    /// SPEC #3820 P20: the merge-status scan is the ingest's continuation and
+    /// has no #3700 budget, so it is an unbudgeted phase, never a route.
+    #[test]
+    fn work_merge_status_scan_is_an_unbudgeted_ingest_phase() {
+        let target = PerfRoute::WorkEventsIngest.phase_target(WORK_MERGE_STATUS_PHASE);
+
+        assert_eq!(target, "phase:work_events.ingest.merge_status");
+        assert_eq!(PerfRoute::from_target(&target), None);
     }
 }

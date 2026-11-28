@@ -114,7 +114,7 @@ axum = { version = "0.8", features = ["ws"] }
 # the cross-platform NSApp / GTK / Windows message-pump glue. The wry
 # WebView dependency was removed alongside the tray migration; muda is
 # still pulled in transitively by tray-icon for menu construction.
-tao = "0.37"
+tao = "0.38"
 base64.workspace = true
 regex.workspace = true
 quick-xml = "0.42.0"
@@ -138,7 +138,7 @@ pulldown-cmark.workspace = true
 ammonia.workspace = true
 tempfile.workspace = true
 sysinfo = { workspace = true, features = ["disk"] }
-tray-icon = "0.26"
+tray-icon = "0.27"
 auto-launch = "0.6"
 whoami = "2.1"
 # SPEC #2920 Phase 4: the tray-icon crate needs RGBA bytes, so decode the
@@ -182,7 +182,7 @@ windows-result = "0.100"
 # Native reset consent must not delegate approval to PATH's zenity. Keep the
 # existing rfd/portal folder picker unchanged and fail promptly without DISPLAY.
 [target.'cfg(target_os = "linux")'.dependencies]
-gtk = "0.18"
+gtk = "0.19"
 
 [features]
 # Issue #3675 AC-2: arms the unsandboxed-gh spawn guard at process start (see

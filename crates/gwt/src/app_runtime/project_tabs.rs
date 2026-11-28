@@ -1112,9 +1112,6 @@ impl AppRuntime {
 
     #[cfg(test)]
     pub(crate) fn select_project_tab_events(&mut self, tab_id: &str) -> Vec<OutboundEvent> {
-        // Issue #4145 AC-1: the whole user-visible switch runs synchronously on
-        // the GUI event loop here, so this guard is the switch route.
-        let _perf_route = gwt::perf::RouteTimer::start(gwt::perf::PerfRoute::ProjectSwitch);
         let Some(target_incarnation) = self.project_tab_incarnations.get(tab_id).cloned() else {
             return Vec::new();
         };

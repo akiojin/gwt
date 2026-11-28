@@ -55,19 +55,22 @@
 }
 
 :root {
-  --font-display: "Hubot Sans", "Hubot Sans Condensed", "Helvetica Neue Condensed", system-ui, sans-serif;
-  --font-body: "Mona Sans Variable", "Mona Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
-  --font-mono: "JetBrains Mono Variable", "JetBrains Mono", "SFMono-Regular", Menlo, Consolas, monospace;
+  --font-body: -apple-system, BlinkMacSystemFont, "Segoe UI", "Hiragino Kaku Gothic ProN", "Hiragino Sans", "Noto Sans JP", sans-serif;
+  --font-display: var(--font-body);
+  --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
 
-  /* Type scale (rem) — developer-readable Operator proportions */
-  --type-xs: 0.75rem;     /* 12px — meta / strip */
-  --type-sm: 0.875rem;    /* 14px — secondary body */
-  --type-base: 1rem;      /* 16px — body */
-  --type-md: 1.0625rem;   /* 17px — emphasis body */
-  --type-lg: 1.1875rem;   /* 19px — section title */
-  --type-xl: 1.5rem;      /* 24px — pane title */
-  --type-2xl: 2rem;       /* 32px — display */
-  --type-3xl: 2.75rem;    /* 44px — hero / mission briefing */
+  /* v3 body, headings and supporting text */
+  --type-xs: 0.75rem;
+  --type-caption: 0.8125rem;
+  --type-sm: 0.875rem;
+  --type-base: 0.9375rem;
+  --type-md: 1rem;
+  --type-lg: 1.25rem;
+  --type-xl: 1.5rem;
+  --type-2xl: 2rem;
+  --type-3xl: 2.75rem;
+  --leading-body: 1.65;
+  --font-section-heading: 800 var(--type-lg)/1.35 var(--font-body);
 
   /* Tracking */
   --tracking-tight: -0.01em;
@@ -77,13 +80,11 @@
   --tracking-mono: 0.005em;
 }
 
-/* Display utility — Hubot Sans, condensed for mission-control headlines */
+/* Display utility */
 .t-display {
   font-family: var(--font-display);
   font-weight: 700;
-  font-stretch: 75%;
-  letter-spacing: var(--tracking-display);
-  text-transform: uppercase;
+  letter-spacing: var(--tracking-normal);
   color: var(--color-display-fg);
 }
 
@@ -102,12 +103,12 @@
   line-height: 1.1;
 }
 
-/* Body utility — Mona Sans Variable */
+/* Body utility */
 .t-body {
   font-family: var(--font-body);
   font-weight: 400;
   font-size: var(--type-base);
-  line-height: 1.55;
+  line-height: var(--leading-body);
   color: var(--color-text);
   font-feature-settings: "ss01", "cv11";
 }

@@ -740,7 +740,7 @@ async function nativeLifetimeFixture(outputBatcher = null) {
     renderProjectPicker: noop, renderProjectOnboarding: noop, syncCurrentProjectWorkspaceIds: noop, deriveCurrentProjectWorkspaceIds: () => [],
     requestAgentRoster: noop, activeWorkspace: () => initial.tabs[0].workspace,
     window: {}, requestSocketSnapshots: () => events.push("resync"), workspaceWindowById: () => windows[0],
-    Terminal: NativeTerminal, FitAddon: class {}, XTERM_THEME_DARK: {}, resolveTerminalFontFamily: () => "mono", isBlinkBrowser: () => false,
+    Terminal: NativeTerminal, FitAddon: class {}, resolveTerminalTheme: () => ({}), resolveTerminalFontFamily: () => "mono", isBlinkBrowser: () => false,
     installTerminalViewportRefreshHandlers: () => noop, createTerminalSnapshotWriteCoordinator: () => ({}),
     // app.js imports this gate. The eval of createTerminalRuntime does not see imports.
     createTerminalInputCommitGate,

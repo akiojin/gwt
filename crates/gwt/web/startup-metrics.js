@@ -3,6 +3,7 @@ export function createStartupMetrics({
   send,
   requestAnimationFrame = (callback) => globalThis.requestAnimationFrame(callback),
   now = () => performance.now(),
+  projectSwitch = false,
 }) {
   let frameScheduled = false;
   const reportedRunningTerminals = new WeakSet();
@@ -13,7 +14,11 @@ export function createStartupMetrics({
       // The second callback follows a rendering opportunity for the workspace.
       requestAnimationFrame(() => {
         requestAnimationFrame(() => {
-          send({ kind: "startup_first_frame", navigation_ms: now() });
+          send({
+            kind: "startup_first_frame",
+            navigation_ms: now(),
+            ...(projectSwitch ? { project_switch: true } : {}),
+          });
         });
       });
     },

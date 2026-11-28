@@ -18,11 +18,11 @@ body {
   background: var(--color-canvas);
   color: var(--color-text);
   font-family: var(--font-body);
-  font-size: var(--type-base);
-  line-height: 1.5;
+  line-height: var(--leading-body);
 }
 
 body {
+  font-size: var(--type-base);
   overflow: hidden;
   position: relative;
 }
@@ -123,33 +123,6 @@ body {
   overflow-wrap: anywhere;
 }
 
-/* Scan-grid backdrop (subtle, behind everything else) */
-body::before {
-  content: "";
-  position: fixed;
-  inset: 0;
-  pointer-events: none;
-  z-index: 0;
-  background-image:
-    linear-gradient(to right, var(--bg-scan-grid) 1px, transparent 1px),
-    linear-gradient(to bottom, var(--bg-scan-grid) 1px, transparent 1px);
-  background-size: 32px 32px;
-  background-position: -1px -1px;
-  opacity: 0.55;
-}
-
-/* Grain overlay (pseudo-CRT texture, very subtle) */
-body::after {
-  content: "";
-  position: fixed;
-  inset: 0;
-  pointer-events: none;
-  z-index: 0;
-  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160' viewBox='0 0 160 160'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 0.91 0 0 0 0 0.92 0 0 0 0 0.93 0 0 0 0.45 0'/></filter><rect width='100%' height='100%' filter='url(%23n)' opacity='0.5'/></svg>");
-  mix-blend-mode: overlay;
-  opacity: 0.28;
-}
-
 #app {
   position: relative;
   z-index: 1;
@@ -165,7 +138,6 @@ body::after {
     "rail surface"
     "strip strip"
     "appfoot appfoot";
-  background: var(--bg-depth-glow), transparent;
 }
 
 /* ============================================================
@@ -186,10 +158,8 @@ body::after {
   border-bottom: 1px solid var(--color-border);
   z-index: 10;
   font-family: var(--font-display);
-  font-stretch: 75%;
   font-weight: 700;
-  letter-spacing: var(--tracking-display);
-  text-transform: uppercase;
+  letter-spacing: var(--tracking-normal);
   font-size: var(--type-sm);
   color: var(--color-display-fg);
 }
@@ -198,10 +168,10 @@ body::after {
   display: flex;
   align-items: center;
   gap: var(--space-3);
-  font-family: var(--font-mono);
+  font-family: var(--font-body);
   font-size: var(--type-xs);
   color: var(--color-text-muted);
-  letter-spacing: var(--tracking-mono);
+  letter-spacing: var(--tracking-normal);
   text-transform: none;
   font-weight: 500;
 }
@@ -233,9 +203,9 @@ body::after {
   border: 1px solid var(--color-focus-ring);
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow-2);
-  font-family: var(--font-mono);
+  font-family: var(--font-body);
   font-size: var(--type-sm);
-  letter-spacing: var(--tracking-mono);
+  letter-spacing: var(--tracking-normal);
   color: var(--color-state-active);
   cursor: pointer;
   pointer-events: auto;
@@ -549,10 +519,9 @@ body::after {
   border: 0;
   color: var(--color-text-muted);
   font: inherit;
-  font-family: var(--font-mono);
+  font-family: var(--font-body);
   font-size: var(--type-xs);
-  letter-spacing: var(--tracking-mono);
-  text-transform: uppercase;
+  letter-spacing: var(--tracking-normal);
   padding: 0 var(--space-3);
   border-radius: var(--radius-pill);
   cursor: pointer;
@@ -568,8 +537,9 @@ body::after {
 }
 
 .op-theme-toggle__option[aria-checked="true"] {
-  background: var(--color-button-bg);
-  color: var(--color-button-fg);
+  background: var(--color-surface);
+  color: var(--color-link);
+  box-shadow: var(--shadow-1);
   font-weight: 700;
 }
 
@@ -584,8 +554,7 @@ body::after {
 }
 
 .op-theme-toggle__option[aria-checked="true"] .op-theme-toggle__indicator {
-  /* On the active AUTO chip the foreground is already button-fg; keep the
-     indicator visible by inheriting that high-contrast color. */
+  /* Use the same readable foreground as the active option. */
   color: inherit;
 }
 
@@ -615,7 +584,7 @@ body::after {
   background: var(--color-surface);
 }
 .split-pane[data-active="true"] {
-  border-color: var(--color-focus-ring);
+  border-color: var(--color-border-strong);
 }
 .split-pane__header {
   display: flex;
@@ -873,11 +842,9 @@ body::after {
   flex: none;
   color: var(--color-display-fg);
   font-family: var(--font-display);
-  font-stretch: 75%;
   font-weight: 700;
   font-size: var(--type-sm);
-  letter-spacing: var(--tracking-display);
-  text-transform: uppercase;
+  letter-spacing: var(--tracking-normal);
 }
 
 .app-head__row {
@@ -913,10 +880,9 @@ body::after {
   border-radius: var(--radius-md);
   background: transparent;
   color: var(--color-text);
-  font-family: var(--font-mono);
-  font-size: var(--type-xs);
-  font-weight: 600;
-  letter-spacing: var(--tracking-mono);
+  font-family: var(--font-body);
+  font-size: var(--type-caption);
+  font-weight: 700;
   text-transform: none;
   white-space: nowrap;
   cursor: pointer;
@@ -999,9 +965,9 @@ body::after {
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
   box-shadow: var(--shadow-2);
-  font-family: var(--font-mono);
+  font-family: var(--font-body);
   font-size: var(--type-xs);
-  letter-spacing: var(--tracking-mono);
+  letter-spacing: var(--tracking-normal);
 }
 
 .app-head-popover__item {
@@ -1047,9 +1013,9 @@ body::after {
   background: var(--color-surface);
   border-top: 1px solid var(--color-border);
   color: var(--color-text-muted);
-  font-family: var(--font-mono);
+  font-family: var(--font-body);
   font-size: var(--type-xs);
-  letter-spacing: var(--tracking-mono);
+  letter-spacing: var(--tracking-normal);
 }
 
 .app-foot .app-version,
@@ -1187,22 +1153,11 @@ body::after {
   display: flex;
   align-items: center;
   padding: 0 var(--space-4);
-  font-family: var(--font-mono);
-  font-size: var(--type-xs);
-  letter-spacing: var(--tracking-mono);
+  font-family: var(--font-body);
+  font-size: var(--type-caption);
   border-top: 1px solid var(--color-border);
   z-index: 10;
   gap: var(--space-3);
-  /* SPEC-2356 — the strip bg is dark in BOTH themes (it is a permanent dark
-     chrome band). Scope the state-color tokens locally to bright on-dark
-     variants so cell value contrast clears WCAG AA in light theme too —
-     light theme's default state colors are tuned for light bg and would
-     otherwise fail (e.g. dark red blocked on dark strip bg = 2.6:1). */
-  --color-state-active: #22d3ee;
-  --color-state-idle: #94a3b8;
-  --color-state-blocked: #f87171;
-  /* FR-039 (anshin) — WAITING cell amber, bright enough for the dark strip. */
-  --color-state-needs-input: #fbbf24;
 }
 
 .op-status-strip__cell {
@@ -1250,12 +1205,6 @@ button.op-status-strip__cell {
   background: var(--color-state-active);
   display: inline-block;
   margin-right: var(--space-1);
-  animation: op-live-pulse var(--motion-pulse) ease-in-out infinite;
-}
-
-@keyframes op-live-pulse {
-  0%, 100% { opacity: 1; transform: scale(1); }
-  50% { opacity: 0.4; transform: scale(0.85); }
 }
 
 .op-status-strip__cell--running .op-status-strip__value {
@@ -1305,7 +1254,7 @@ button.op-status-strip__cell {
 }
 
 .op-status-strip__cell--runtime-health[data-state="warn"] .op-status-strip__value {
-  color: #facc15;
+  color: var(--color-state-needs-input);
 }
 
 .op-status-strip__cell--runtime-health[data-state="hot"] .op-status-strip__value {
@@ -1356,8 +1305,8 @@ button.op-status-strip__cell {
   color: var(--color-text);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
-  box-shadow: var(--shadow-xl, 0 12px 40px rgba(0, 0, 0, 0.5));
-  font-family: var(--font-mono);
+  box-shadow: var(--shadow-2);
+  font-family: var(--font-body);
   font-size: var(--type-xs);
   scrollbar-gutter: stable;
 }
@@ -1417,7 +1366,6 @@ button.op-status-strip__cell {
 .op-runtime-health-detail__queue-label {
   color: var(--color-text-muted);
   font-size: 0.68rem;
-  text-transform: uppercase;
 }
 
 .op-runtime-health-detail__chip-value,
@@ -1466,7 +1414,6 @@ button.op-status-strip__cell {
   font-weight: 700;
   letter-spacing: 0;
   text-align: center;
-  text-transform: uppercase;
 }
 
 .op-runtime-health-detail__sort-button[aria-pressed="true"] {
@@ -1507,7 +1454,6 @@ button.op-status-strip__cell {
   background: var(--color-surface-elevated);
   color: var(--color-text-muted);
   font-size: 0.66rem;
-  text-transform: uppercase;
   border-bottom: 1px solid color-mix(in oklab, var(--color-border) 70%, transparent);
 }
 
@@ -1633,7 +1579,7 @@ button.op-runtime-health-detail__process {
 }
 
 /* ============================================================
-   Living Telemetry — agent pulse rim on active windows
+   Agent state outlines
    ============================================================ */
 
 [data-agent-state] {
@@ -1644,15 +1590,13 @@ button.op-runtime-health-detail__process {
 
 [data-agent-state="running"] {
   --agent-color: var(--current-agent, var(--color-state-active));
-  box-shadow: var(--shadow-glow-active);
-  animation: op-rim-pulse var(--motion-pulse) ease-in-out infinite;
+  box-shadow: 0 0 0 1px var(--agent-color);
 }
 
 [data-agent-state="idle"] {
   /* SPEC-2356 — idle state tints with the agent colour at 50% chroma so
      observers can still identify the agent (claude/codex/hermes/...) even
-     when nothing is happening. The pulse animation is suppressed; only a
-     static rim remains. */
+     when nothing is happening. */
   --agent-color: color-mix(in oklab, var(--current-agent, var(--color-state-idle)) 55%, var(--color-state-idle));
   box-shadow: 0 0 0 1px var(--agent-color);
 }
@@ -1671,20 +1615,12 @@ button.op-runtime-health-detail__process {
 
 [data-agent-state="error"] {
   --agent-color: var(--color-state-blocked);
-  box-shadow: 0 0 0 1px var(--agent-color),
-              0 0 14px 0 color-mix(in oklab, var(--agent-color) 50%, transparent);
-  animation: op-rim-alert calc(var(--motion-pulse) * 0.5) ease-in-out infinite;
+  box-shadow: 0 0 0 1px var(--agent-color);
 }
 
-/* FR-039 (anshin) — waiting is a LOUD your-turn rim: it pulses like
-   error (so the operator notices it) but uses the warm amber state colour
-   instead of error red. Reuses the op-rim-alert keyframe, which is driven
-   by --agent-color, so the glow tracks the needs-input token. */
 [data-agent-state="waiting"] {
   --agent-color: var(--color-state-needs-input);
-  box-shadow: 0 0 0 1px var(--agent-color),
-              0 0 14px 0 color-mix(in oklab, var(--agent-color) 50%, transparent);
-  animation: op-rim-alert calc(var(--motion-pulse) * 0.5) ease-in-out infinite;
+  box-shadow: 0 0 0 1px var(--agent-color);
 }
 
 [data-agent-state="stopped"] {
@@ -1695,34 +1631,6 @@ button.op-runtime-health-detail__process {
 [data-agent-state="interrupted"] {
   --agent-color: var(--color-state-blocked);
   box-shadow: 0 0 0 1px var(--agent-color);
-}
-
-@keyframes op-rim-pulse {
-  0%, 100% { box-shadow: 0 0 0 1px var(--agent-color),
-                          0 0 12px 0 color-mix(in oklab, var(--agent-color) 35%, transparent); }
-  50% { box-shadow: 0 0 0 1px var(--agent-color),
-                     0 0 22px 2px color-mix(in oklab, var(--agent-color) 55%, transparent); }
-}
-
-@keyframes op-rim-alert {
-  0%, 100% { box-shadow: 0 0 0 1px var(--agent-color),
-                          0 0 14px 0 color-mix(in oklab, var(--agent-color) 50%, transparent); }
-  50%      { box-shadow: 0 0 0 2px var(--agent-color),
-                          0 0 22px 1px color-mix(in oklab, var(--agent-color) 70%, transparent); }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  [data-agent-state="running"],
-  [data-agent-state="error"],
-  [data-agent-state="waiting"] {
-    animation: none;
-  }
-  /* SPEC-2356 — Status Strip live dot pulses to signal "system is alive".
-     Motion-sensitive users get a static dot that still indicates online
-     state via colour, just without the scale+opacity pulse. */
-  .op-status-strip__live-dot {
-    animation: none;
-  }
 }
 
 /* ============================================================
@@ -1813,10 +1721,8 @@ button.op-runtime-health-detail__process {
 
 .op-drawer__title {
   font-family: var(--font-display);
-  font-stretch: 75%;
   font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: var(--tracking-display);
+  letter-spacing: var(--tracking-normal);
   font-size: var(--type-md);
   margin: 0;
   color: var(--color-display-fg);
@@ -1834,7 +1740,7 @@ button.op-runtime-health-detail__process {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  font-family: var(--font-mono);
+  font-family: var(--font-body);
   font-size: var(--type-base);
 }
 
@@ -1893,10 +1799,8 @@ button.op-runtime-health-detail__process {
 .op-hotkey-card__title {
   grid-column: 1 / -1;
   font-family: var(--font-display);
-  font-stretch: 75%;
   font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: var(--tracking-display);
+  letter-spacing: var(--tracking-normal);
   font-size: var(--type-lg);
   margin: 0 0 var(--space-2) 0;
   color: var(--color-display-fg);
@@ -1909,10 +1813,8 @@ button.op-runtime-health-detail__process {
 
 .op-hotkey-card__group-title {
   font-family: var(--font-display);
-  font-stretch: 75%;
   font-size: var(--type-xs);
-  letter-spacing: var(--tracking-display);
-  text-transform: uppercase;
+  letter-spacing: var(--tracking-normal);
   color: var(--color-text-muted);
   margin: 0;
 }
@@ -1951,7 +1853,7 @@ kbd.op-kbd {
   flex-direction: column;
   justify-content: center;
   align-items: center;
-  font-family: var(--font-mono);
+  font-family: var(--font-body);
   color: var(--color-text-muted);
   font-size: var(--type-sm);
   /* SPEC-2356 — splash should accept click-to-dismiss (`pointer-events`
@@ -1973,67 +1875,12 @@ kbd.op-kbd {
 }
 
 .op-briefing__title {
-  font-family: var(--font-display);
-  font-stretch: 75%;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: var(--tracking-display);
-  color: var(--color-display-fg);
-  font-size: var(--type-3xl);
-  margin: 0 0 var(--space-6);
-}
-
-.op-briefing__lines {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: var(--space-1);
-  margin-bottom: var(--space-6);
-}
-
-.op-briefing__line {
-  opacity: 0;
-  animation: op-briefing-line-in var(--motion-slow) var(--motion-curve) forwards;
-}
-
-.op-briefing__line[data-state="ok"]::after {
-  content: " ok";
-  color: var(--color-state-active);
-}
-
-.op-briefing__online {
-  font-family: var(--font-display);
-  font-stretch: 75%;
-  font-weight: 700;
-  letter-spacing: var(--tracking-display);
-  color: var(--color-state-active);
-  font-size: var(--type-md);
-  text-transform: uppercase;
-  opacity: 0;
-  /* SPEC-2356 — soft cyan glow on the OPERATOR ONLINE marker so it reads
-     as the boot complete signal. */
-  text-shadow: 0 0 12px color-mix(in oklab, var(--color-state-active) 60%, transparent);
-  animation: op-briefing-online-in var(--motion-slow) ease-out forwards;
-  animation-delay: calc(var(--motion-slow) * 4);
-}
-
-@keyframes op-briefing-line-in {
-  from { opacity: 0; transform: translateY(4px); }
-  to   { opacity: 1; transform: translateY(0); }
-}
-
-@keyframes op-briefing-online-in {
-  from { opacity: 0; }
-  to   { opacity: 1; }
+  margin: 0;
+  font: var(--font-section-heading);
+  color: var(--color-text);
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .op-briefing__line,
-  .op-briefing__online {
-    animation: none;
-    opacity: 1;
-    transform: none;
-  }
   .op-briefing { transition: none; }
 }
 
@@ -2043,8 +1890,6 @@ kbd.op-kbd {
 
 @media (forced-colors: active) {
   body::before, body::after { display: none; }
-  [data-agent-state] { animation: none; }
-  .op-status-strip__live-dot { animation: none; }
   /* SPEC-2017 US-9 — Kanban surface in forced-colors mode. Drop our
      token-derived backgrounds so system colors paint the columns,
      cards, and chips. Borders fall back to ButtonText so the column
@@ -2217,7 +2062,6 @@ kbd.op-kbd {
   font-weight: 700;
   line-height: 1;
   padding: 2px 6px;
-  text-transform: uppercase;
 }
 .release-notes-sidebar-date {
   font-size: 11px;
@@ -2274,13 +2118,13 @@ kbd.op-kbd {
   outline-offset: 2px;
 }
 .release-notes-update-action.is-update {
-  background: var(--color-state-active);
-  border-color: var(--color-state-active);
-  color: var(--color-text-on-accent, #0a0a0a);
+  background: var(--color-button-bg);
+  border-color: var(--color-button-bg);
+  color: var(--color-button-fg);
 }
 .release-notes-update-action.is-update:hover {
-  background: color-mix(in oklab, var(--color-state-active) 88%, #000000);
-  border-color: color-mix(in oklab, var(--color-state-active) 88%, #000000);
+  background: var(--color-button-bg-hover);
+  border-color: var(--color-button-bg-hover);
 }
 .release-notes-update-action.is-downgrade {
   background: transparent;
@@ -2368,11 +2212,11 @@ kbd.op-kbd {
 .release-notes-downgrade-confirm__confirm {
   background: var(--color-state-blocked);
   border: 1px solid var(--color-state-blocked);
-  color: var(--color-text-on-accent, #0a0a0a);
+  color: var(--color-danger-button-fg);
 }
 .release-notes-downgrade-confirm__confirm:hover {
-  background: color-mix(in oklab, var(--color-state-blocked) 88%, #000000);
-  border-color: color-mix(in oklab, var(--color-state-blocked) 88%, #000000);
+  background: var(--color-danger-button-bg-hover);
+  border-color: var(--color-danger-button-bg-hover);
 }
 .release-notes-content h3 {
   margin: 14px 0 6px 0;
@@ -2567,7 +2411,6 @@ kbd.op-kbd {
 .workspace-overview-row[data-status="active"] .workspace-overview-status::before,
 .workspace-overview-row[data-status="running"] .workspace-overview-status::before {
   background: var(--color-state-active);
-  box-shadow: 0 0 6px 0 color-mix(in oklab, var(--color-state-active) 55%, transparent);
 }
 
 .workspace-overview-row[data-status="blocked"] .workspace-overview-status::before {
@@ -3103,11 +2946,10 @@ kbd.op-kbd {
   border: 1px solid var(--workspace-execution-accent);
   border-radius: var(--radius-pill);
   color: var(--workspace-execution-accent);
-  font-family: var(--font-mono);
+  font-family: var(--font-body);
   font-size: var(--type-2xs);
   font-weight: 700;
   letter-spacing: var(--tracking-wide);
-  text-transform: uppercase;
 }
 
 .workspace-execution-alert {
@@ -3274,18 +3116,7 @@ button.workspace-board-ref:focus-visible {
   letter-spacing: 0.02em;
 }
 
-/* SPEC-3038 FR-011 / US-5 — button hierarchy. The solid dark-block
-   treatment is reserved for the single primary action per view; every other
-   modal/wizard action reads as a quiet ghost. The Open Project split button
-   (.arrange-button, project bar) stays solid as that bar's primary. */
-:root[data-theme] .arrange-button {
-  background: var(--color-button-bg);
-  color: var(--color-button-fg);
-  border-color: var(--color-button-border);
-}
-:root[data-theme] .arrange-button:hover {
-  background: var(--color-button-bg-hover);
-}
+/* SPEC-3038 FR-011 / US-5 — keep solid fill for the primary action. */
 :root[data-theme] .wizard-button {
   background: transparent;
   color: var(--color-text);
@@ -3325,18 +3156,14 @@ button.workspace-board-ref:focus-visible {
 :root[data-theme] .project-picker-title,
 :root[data-theme] .project-onboarding-title {
   font-family: var(--font-display);
-  font-stretch: 75%;
   font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: var(--tracking-display);
+  letter-spacing: var(--tracking-normal);
 }
 
 :root[data-theme] .title-text {
   font-family: var(--font-display);
-  font-stretch: 75%;
   font-weight: 700;
-  letter-spacing: var(--tracking-display);
-  text-transform: uppercase;
+  letter-spacing: var(--tracking-normal);
   font-size: var(--type-xs);
   color: var(--color-display-fg);
 }
@@ -3378,10 +3205,8 @@ button.workspace-board-ref:focus-visible {
 :root[data-theme] .project-picker-title,
 :root[data-theme] .project-onboarding-title {
   font-family: var(--font-display);
-  font-stretch: 75%;
   font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: var(--tracking-display);
+  letter-spacing: var(--tracking-normal);
   color: var(--color-display-fg);
 }
 
@@ -3575,53 +3400,6 @@ button.workspace-board-ref:focus-visible {
   color: inherit;
 }
 
-.op-briefing__stamp {
-  font-family: var(--font-mono);
-  font-size: var(--type-xs);
-  letter-spacing: var(--tracking-mono);
-  color: var(--color-text-muted);
-  margin-bottom: var(--space-4);
-}
-
-/* ============================================================
-   Project Bar accent — subtle gradient strip under the bar.
-
-   The accent line sits at the bottom edge of the Project Bar and
-   flows along the agent state token's chroma so that the chrome
-   reads as part of the Mission Control system. The line is
-   render-cheap (1px linear-gradient) and silent under
-   `forced-colors: active`.
-   ============================================================ */
-
-:root[data-theme] .project-bar::after {
-  content: "";
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: -1px;
-  height: 1px;
-  background: linear-gradient(
-    to right,
-    transparent 0%,
-    color-mix(in oklab, var(--color-state-active) 56%, transparent) 18%,
-    color-mix(in oklab, var(--agent-codex) 36%, transparent) 50%,
-    color-mix(in oklab, var(--color-state-active) 56%, transparent) 82%,
-    transparent 100%
-  );
-  pointer-events: none;
-  opacity: 0.55;
-}
-
-@media (forced-colors: active) {
-  :root[data-theme] .project-bar::after {
-    background: none;
-  }
-}
-
-.project-bar {
-  position: relative; /* anchor the ::after accent line */
-}
-
 /* Mission-control blinking colons in the live clock */
 @keyframes op-strip-clock-blink {
   0%, 60% { opacity: 1; }
@@ -3646,61 +3424,6 @@ button.workspace-board-ref:focus-visible {
     animation: none;
   }
 }
-
-/* ============================================================
-   Mission Briefing intro — animated progress bar between lines.
-
-   While the staged reveal lines come in, a subtle progress bar
-   sweeps from 0 → 100% behind the message column, finishing as
-   the OPERATOR ONLINE marker fades in. Visual, no functional
-   meaning; reduced-motion / forced-colors environments hide it.
-   ============================================================ */
-.op-briefing__progress {
-  position: relative;
-  width: min(360px, 64vw);
-  height: 2px;
-  background: color-mix(in oklab, var(--color-text-muted) 16%, transparent);
-  border-radius: var(--radius-pill);
-  overflow: hidden;
-  margin-bottom: var(--space-4);
-}
-
-.op-briefing__progress::after {
-  content: "";
-  position: absolute;
-  top: 0;
-  left: 0;
-  height: 100%;
-  background: linear-gradient(
-    to right,
-    transparent 0%,
-    var(--color-state-active) 35%,
-    var(--agent-codex) 65%,
-    transparent 100%
-  );
-  width: 100%;
-  transform: translateX(-100%);
-  animation: op-briefing-sweep 1.4s ease-out forwards;
-}
-
-@keyframes op-briefing-sweep {
-  from { transform: translateX(-100%); }
-  to   { transform: translateX(0); }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .op-briefing__progress::after {
-    animation: none;
-    transform: translateX(0);
-  }
-}
-
-@media (forced-colors: active) {
-  .op-briefing__progress { display: none; }
-}
-
-/* SPEC-3038: the legacy sidebar row vocabulary is retired — rail items carry
-   icons. */
 
 /* SPEC-2356 — universal focus ring on input/select/textarea elements
    without their own dedicated focus rule. Token-driven, never overrides
@@ -3934,9 +3657,9 @@ button.workspace-board-ref:focus-visible {
   display: inline-flex;
   align-items: center;
   gap: var(--space-2);
-  font-family: var(--font-mono);
+  font-family: var(--font-body);
   font-size: var(--type-xs);
-  letter-spacing: var(--tracking-mono);
+  letter-spacing: var(--tracking-normal);
   color: var(--color-text-muted);
   cursor: pointer;
   user-select: none;
@@ -3989,11 +3712,9 @@ button.workspace-board-ref:focus-visible {
   border-bottom: 1px solid var(--color-border);
   background: var(--color-surface-elevated);
   font-family: var(--font-display);
-  font-stretch: 75%;
   font-weight: 700;
   font-size: var(--type-xs);
-  letter-spacing: var(--tracking-display);
-  text-transform: uppercase;
+  letter-spacing: var(--tracking-normal);
   color: var(--color-display-fg);
 }
 
@@ -4134,10 +3855,9 @@ button.workspace-board-ref:focus-visible {
 .kanban-card-chip {
   padding: 2px var(--space-2);
   border-radius: var(--radius-pill);
-  font-family: var(--font-mono);
+  font-family: var(--font-body);
   font-size: var(--type-xs);
-  letter-spacing: var(--tracking-mono);
-  text-transform: uppercase;
+  letter-spacing: var(--tracking-normal);
   background: color-mix(in oklab, var(--agent-codex) 18%, transparent);
   color: var(--agent-codex);
 }
@@ -4296,12 +4016,10 @@ button.workspace-board-ref:focus-visible {
 
 .kanban-drawer-section-title {
   font-family: var(--font-display);
-  font-stretch: 75%;
   font-weight: 700;
   font-size: var(--type-xs);
-  letter-spacing: var(--tracking-display);
+  letter-spacing: var(--tracking-normal);
   color: var(--color-text-strong);
-  text-transform: uppercase;
 }
 
 .kanban-drawer-section-body {
@@ -4438,7 +4156,6 @@ button.workspace-board-ref:focus-visible {
 .knowledge-markdown-body h4 {
   margin: var(--space-3) 0 var(--space-2);
   font-family: var(--font-display);
-  font-stretch: 75%;
   font-weight: 700;
   line-height: 1.2;
   color: var(--color-text-strong);
@@ -4563,11 +4280,7 @@ button.workspace-board-ref:focus-visible {
 
 :root[data-theme] .settings-heading {
   margin: 0;
-  font-family: var(--font-display);
-  font-size: var(--type-md);
-  font-weight: 700;
-  letter-spacing: var(--tracking-display);
-  text-transform: uppercase;
+  font: var(--font-section-heading);
   color: var(--color-text-strong);
 }
 
@@ -4684,7 +4397,7 @@ button.workspace-board-ref:focus-visible {
   padding: var(--space-3) var(--space-4);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
-  background: var(--color-surface-elevated);
+  background: var(--color-surface);
   max-width: 520px;
 }
 
@@ -4704,7 +4417,6 @@ button.workspace-board-ref:focus-visible {
   font-size: var(--type-xs);
   font-weight: 600;
   letter-spacing: var(--tracking-wide);
-  text-transform: uppercase;
   color: var(--color-text-muted);
 }
 
@@ -4916,9 +4628,9 @@ button.workspace-board-ref:focus-visible {
 
 :root[data-theme] .settings-status {
   margin: 0;
-  font-family: var(--font-mono);
+  font-family: var(--font-body);
   font-size: var(--type-xs);
-  letter-spacing: var(--tracking-mono);
+  letter-spacing: var(--tracking-normal);
   color: var(--color-text-muted);
 }
 
@@ -4951,7 +4663,6 @@ button.workspace-board-ref:focus-visible {
   font-size: var(--type-xs);
   font-weight: 700;
   letter-spacing: var(--tracking-wide);
-  text-transform: uppercase;
 }
 
 :root[data-theme] .custom-agent-env-rows {
@@ -5068,33 +4779,32 @@ button.workspace-board-ref:focus-visible {
   padding: 2px var(--space-2);
   border-radius: var(--radius-pill, 999px);
   font-size: var(--type-2xs);
-  text-transform: uppercase;
   letter-spacing: 0.08em;
 }
 
 :root[data-theme] .workspace-resume-picker-row-tag.is-conversation {
-  background: rgba(56, 189, 248, 0.12);
-  color: rgb(125, 211, 252);
+  background: var(--color-accent-soft);
+  color: var(--color-state-active);
 }
 
 :root[data-theme] .workspace-resume-picker-row-tag.is-fresh {
-  background: rgba(148, 163, 184, 0.16);
-  color: rgb(203, 213, 225);
+  background: color-mix(in oklab, var(--color-state-idle) 16%, var(--color-surface));
+  color: var(--color-state-idle);
 }
 
 :root[data-theme] .workspace-resume-picker-row-tag.is-active {
-  background: rgba(34, 197, 94, 0.12);
-  color: rgb(134, 239, 172);
+  background: color-mix(in oklab, var(--color-state-success) 12%, var(--color-surface));
+  color: var(--color-state-success);
 }
 
 :root[data-theme] .workspace-resume-picker-row-tag.is-interrupted {
-  background: rgba(251, 146, 60, 0.14);
-  color: rgb(253, 186, 116);
+  background: color-mix(in oklab, var(--color-state-needs-input) 14%, var(--color-surface));
+  color: var(--color-state-needs-input);
 }
 
 :root[data-theme] .workspace-resume-picker-row-tag.is-running {
-  background: rgba(56, 189, 248, 0.14);
-  color: rgb(125, 211, 252);
+  background: color-mix(in oklab, var(--color-state-active) 14%, var(--color-surface));
+  color: var(--color-state-active);
 }
 
 :root[data-theme] .workspace-resume-picker-row-meta {
@@ -5111,7 +4821,6 @@ button.workspace-board-ref:focus-visible {
 }
 
 :root[data-theme] .workspace-resume-picker-row-meta-label {
-  text-transform: uppercase;
   letter-spacing: 0.06em;
   color: var(--color-text-subtle);
 }
@@ -5130,8 +4839,8 @@ button.workspace-board-ref:focus-visible {
 :root[data-theme] .workspace-resume-picker-error {
   padding: var(--space-2) var(--space-3);
   border-radius: var(--radius-md);
-  background: rgba(248, 113, 113, 0.12);
-  color: rgb(252, 165, 165);
+  background: color-mix(in oklab, var(--color-state-blocked) 12%, var(--color-surface));
+  color: var(--color-state-blocked);
   font-size: var(--type-sm);
 }
 
@@ -5157,7 +4866,7 @@ button.workspace-board-ref:focus-visible {
    for readability: header, rate-limit windows, consumption grid, sparkline. */
 .op-usage-card {
   padding: 10px 0 12px;
-  border-top: 1px solid var(--color-border, rgba(127, 127, 127, 0.25));
+  border-top: 1px solid var(--color-border);
 }
 
 .op-usage-card:first-of-type {
@@ -5176,11 +4885,11 @@ button.workspace-board-ref:focus-visible {
 }
 
 .op-usage-card[data-provider="codex"] .op-usage-card__icon {
-  color: var(--agent-color-codex, #6fb1ff);
+  color: var(--agent-codex);
 }
 
 .op-usage-card[data-provider="claude_code"] .op-usage-card__icon {
-  color: var(--agent-color-claude, #e0a06a);
+  color: var(--agent-claude);
 }
 
 .op-usage-card__name {
@@ -5190,12 +4899,11 @@ button.workspace-board-ref:focus-visible {
 
 .op-usage-card__plan {
   font-size: var(--type-xs, 0.72rem);
-  text-transform: uppercase;
   letter-spacing: 0.06em;
   padding: 1px 7px;
   border-radius: 999px;
-  background: var(--color-surface, rgba(127, 127, 127, 0.16));
-  color: var(--color-text-muted, #9aa0ad);
+  background: var(--color-surface);
+  color: var(--color-text-muted);
 }
 
 .op-usage-card__limit {
@@ -5207,14 +4915,14 @@ button.workspace-board-ref:focus-visible {
 
 .op-usage-card__account {
   margin: -2px 0 8px 24px;
-  color: var(--color-text-muted, #9aa0ad);
+  color: var(--color-text-muted);
   font-size: var(--type-xs, 0.72rem);
   overflow-wrap: anywhere;
 }
 
 .op-usage-card__reason {
   font-size: var(--type-sm, 0.85rem);
-  color: var(--color-text-muted, #9aa0ad);
+  color: var(--color-text-muted);
   font-style: italic;
   padding: 2px 0;
 }
@@ -5234,7 +4942,7 @@ button.workspace-board-ref:focus-visible {
 }
 
 .op-usage-win__lbl {
-  color: var(--color-text-muted, #9aa0ad);
+  color: var(--color-text-muted);
 }
 
 .op-usage-win__bar {
@@ -5248,7 +4956,7 @@ button.workspace-board-ref:focus-visible {
 
 .op-usage-win__reset {
   font-size: var(--type-xs, 0.72rem);
-  color: var(--color-text-muted, #9aa0ad);
+  color: var(--color-text-muted);
   white-space: nowrap;
 }
 
@@ -5264,9 +4972,8 @@ button.workspace-board-ref:focus-visible {
 .op-usage-sess__head {
   margin-bottom: 2px;
   font-size: var(--type-xs, 0.72rem);
-  text-transform: uppercase;
   letter-spacing: 0.06em;
-  color: var(--color-text-muted, #9aa0ad);
+  color: var(--color-text-muted);
 }
 
 .op-usage-sess__row {
@@ -5279,7 +4986,7 @@ button.workspace-board-ref:focus-visible {
 }
 
 .op-usage-sess__row[data-eligible="false"] {
-  color: var(--color-text-muted, #9aa0ad);
+  color: var(--color-text-muted);
 }
 
 .op-usage-sess__name {
@@ -5291,7 +4998,7 @@ button.workspace-board-ref:focus-visible {
 
 .op-usage-sess__model {
   font-size: var(--type-xs, 0.72rem);
-  color: var(--color-text-muted, #9aa0ad);
+  color: var(--color-text-muted);
   white-space: nowrap;
 }
 
@@ -5302,11 +5009,11 @@ button.workspace-board-ref:focus-visible {
 .op-usage-sess__ctx {
   text-align: right;
   white-space: nowrap;
-  color: var(--color-text-muted, #9aa0ad);
+  color: var(--color-text-muted);
 }
 
 .op-usage-sess__ctx[data-severity="normal"] {
-  color: var(--color-text, #e7e9ee);
+  color: var(--color-text);
 }
 
 .op-usage-sess__ctx[data-severity="warning"] {
@@ -5319,7 +5026,7 @@ button.workspace-board-ref:focus-visible {
 
 .op-usage-sess__more {
   font-size: var(--type-xs, 0.72rem);
-  color: var(--color-text-muted, #9aa0ad);
+  color: var(--color-text-muted);
 }
 
 /* Consumption grid: period × in/out/cached, right-aligned numerics. */
@@ -5337,21 +5044,19 @@ button.workspace-board-ref:focus-visible {
 
 .op-usage-cgrid__hdr {
   font-size: var(--type-xs, 0.72rem);
-  text-transform: uppercase;
   letter-spacing: 0.06em;
-  color: var(--color-text-muted, #9aa0ad);
+  color: var(--color-text-muted);
 }
 
 .op-usage-cgrid__colh {
   text-align: right;
   font-size: var(--type-xs, 0.72rem);
-  text-transform: uppercase;
   letter-spacing: 0.04em;
-  color: var(--color-text-muted, #9aa0ad);
+  color: var(--color-text-muted);
 }
 
 .op-usage-cgrid__rowh {
-  color: var(--color-text-muted, #9aa0ad);
+  color: var(--color-text-muted);
 }
 
 .op-usage-cgrid__num {
@@ -5361,7 +5066,7 @@ button.workspace-board-ref:focus-visible {
 .op-usage-bar {
   height: 8px;
   border-radius: 999px;
-  background: var(--color-surface, rgba(255, 255, 255, 0.1));
+  background: var(--color-surface);
   overflow: hidden;
 }
 
@@ -5397,12 +5102,12 @@ button.workspace-board-ref:focus-visible {
   width: 100%;
   min-height: 2px;
   border-radius: 2px 2px 0 0;
-  background: var(--color-text-muted, #9aa0ad);
+  background: var(--color-text-muted);
   opacity: 0.55;
 }
 
 .op-usage-chart__col[data-today="true"] .op-usage-chart__bar {
-  background: var(--color-accent, #6fb1ff);
+  background: var(--color-state-active);
   opacity: 1;
 }
 
@@ -5416,7 +5121,7 @@ button.workspace-board-ref:focus-visible {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: color-mix(in srgb, var(--surface-base, #0b0e14) 72%, transparent);
+  background: var(--color-overlay);
   backdrop-filter: blur(2px);
   pointer-events: all;
 }
@@ -5427,17 +5132,17 @@ button.workspace-board-ref:focus-visible {
   align-items: center;
   gap: 10px;
   padding: 28px 36px;
-  border: 1px solid var(--line-soft, rgba(255, 255, 255, 0.14));
-  border-radius: 10px;
-  background: var(--surface-raised, #131722);
-  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.45);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-2);
 }
 
 .connection-overlay__spinner {
   width: 26px;
   height: 26px;
-  border: 3px solid var(--line-soft, rgba(255, 255, 255, 0.18));
-  border-top-color: var(--accent, #7aa2f7);
+  border: 3px solid var(--color-border-strong);
+  border-top-color: var(--color-focus-ring);
   border-radius: 50%;
   animation: connection-overlay-spin 0.9s linear infinite;
 }
@@ -5838,7 +5543,7 @@ button.workspace-board-ref:focus-visible {
 .task-home { display: flex; flex-direction: column; flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; overflow-wrap: anywhere; gap: var(--space-3); padding: var(--space-3); }
 .task-home__header { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-3); }
 .task-home__header h1 { margin: 0; font-size: var(--type-xl); }
-.task-home__eyebrow { margin: 0 0 var(--space-1); color: var(--color-text-muted); font-size: var(--type-xs); letter-spacing: var(--tracking-wide); text-transform: uppercase; }
+.task-home__eyebrow { margin: 0 0 var(--space-1); color: var(--color-text-muted); font-size: var(--type-xs); letter-spacing: var(--tracking-wide); }
 .task-home__hero { padding: var(--space-3); border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-surface-elevated); }
 .task-home__hero h2 { margin: 0; font-size: var(--type-lg); }
 .task-home__hero p { margin: var(--space-1) 0 0; }
@@ -5857,18 +5562,18 @@ button.workspace-board-ref:focus-visible {
 .task-home__stale { color: var(--color-state-needs-input); }
 .task-decisions { display: flex; flex-direction: column; flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; overflow-wrap: anywhere; gap: var(--space-3); padding: var(--space-3); }
 .task-decisions__header { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-3); }
-.task-decisions__header h1 { margin: 0; font-size: var(--type-xl); }
+.task-decisions__header h1 { margin: 0; font: var(--font-section-heading); }
 .task-decisions__header h1:focus-visible { outline: 2px solid var(--color-focus-ring); outline-offset: 2px; }
-.task-decisions__eyebrow { margin: 0 0 var(--space-1); color: var(--color-text-muted); font-size: var(--type-xs); letter-spacing: var(--tracking-wide); text-transform: uppercase; }
+.task-decisions__eyebrow { margin: 0 0 var(--space-1); color: var(--color-text-muted); font-size: var(--type-xs); letter-spacing: var(--tracking-wide); }
 .task-decisions__count { margin: 0; color: var(--color-state-needs-input); font-size: var(--type-sm); }
 .task-decisions__empty h2 { margin: 0; font-size: var(--type-lg); }
 .task-decisions__empty p { margin: var(--space-1) 0 0; }
 .task-decisions__notice { margin: 0; color: var(--color-text-muted); }
 .task-decisions__error { margin: 0; color: var(--color-state-needs-input); }
-.task-decisions__card { padding: var(--space-3); border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-surface-elevated); }
+.task-decisions__card { padding: var(--space-3); border: 1px solid var(--color-border); border-radius: var(--radius-lg); background: var(--color-surface); }
 .task-decisions__card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-2); }
 .task-decisions__card-head h2 { margin: 0; font-size: var(--type-md); }
-.task-decisions__chip { flex-shrink: 0; color: var(--color-state-needs-input); font-size: var(--type-xs); }
+.task-decisions__chip { flex-shrink: 0; padding: 0 var(--space-2); border-radius: var(--radius-pill); background: var(--color-warning-soft); color: var(--color-state-needs-input); font-size: var(--type-xs); }
 .task-decisions__result { margin: var(--space-1) 0 0; }
 .task-decisions__meta { margin: var(--space-1) 0 0; color: var(--color-text-muted); font-size: var(--type-xs); }
 .task-decisions__impact { margin: var(--space-1) 0 0; }
@@ -5882,7 +5587,7 @@ button.workspace-board-ref:focus-visible {
 .task-progress { display: flex; flex-direction: column; flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; overflow-wrap: anywhere; gap: var(--space-3); padding: var(--space-3); }
 .task-progress__header { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-3); }
 .task-progress__header h1 { margin: 0; font-size: var(--type-xl); }
-.task-progress__eyebrow { margin: 0 0 var(--space-1); color: var(--color-text-muted); font-size: var(--type-xs); letter-spacing: var(--tracking-wide); text-transform: uppercase; }
+.task-progress__eyebrow { margin: 0 0 var(--space-1); color: var(--color-text-muted); font-size: var(--type-xs); letter-spacing: var(--tracking-wide); }
 .task-progress__primary { border-color: var(--color-focus-ring); }
 .task-progress__summary { margin: 0; font-size: var(--type-sm); }
 .task-progress__error { margin: 0; color: var(--color-state-needs-input); }
@@ -5954,7 +5659,7 @@ button.workspace-board-ref:focus-visible {
 .project-themes button:hover { background: var(--color-surface-elevated); }
 .project-themes button:disabled { color: var(--color-text-muted); border-color: var(--color-border); cursor: not-allowed; }
 .project-themes a { color: var(--color-link); }
-.project-themes__header h1 { margin: 0; font-size: var(--type-xl); }
+.project-themes__header h1 { margin: 0; font: var(--font-section-heading); }
 .project-themes__header h1:focus { outline: none; }
 .project-themes__lead { margin: var(--space-1) 0 0; color: var(--color-text-muted); }
 .project-themes__meta { margin: var(--space-1) 0 0; color: var(--color-text-muted); font-size: var(--type-xs); }
@@ -5993,15 +5698,15 @@ button.workspace-board-ref:focus-visible {
 .exec-env :focus-visible { outline: 2px solid var(--color-focus-ring); outline-offset: 2px; }
 .exec-env button { max-width: 100%; padding: var(--space-1) var(--space-2); border: 1px solid var(--color-border-strong); border-radius: var(--radius-sm); color: var(--color-text); background: var(--color-surface); font: inherit; cursor: pointer; }
 .exec-env button:hover { background: var(--color-surface-elevated); }
-.exec-env__header h1 { margin: 0; font-size: var(--type-xl); }
+.exec-env__header h1 { margin: 0; font: var(--font-section-heading); }
 .exec-env__header h1:focus { outline: none; }
-.exec-env__eyebrow { margin: 0 0 var(--space-1); color: var(--color-text-muted); font-size: var(--type-xs); letter-spacing: var(--tracking-wide); text-transform: uppercase; }
+.exec-env__eyebrow { margin: 0 0 var(--space-1); color: var(--color-text-muted); font-size: var(--type-xs); letter-spacing: var(--tracking-wide); }
 .exec-env__lead { margin: var(--space-1) 0 0; color: var(--color-text-muted); }
 .exec-env button.exec-env__back { margin-bottom: var(--space-2); padding: 0; border: 0; background: transparent; color: var(--color-link); }
 .exec-env__empty h2 { margin: 0; font-size: var(--type-lg); }
 .exec-env__empty p { margin: var(--space-1) 0 0; color: var(--color-text-muted); }
 .exec-env__list { display: flex; flex-direction: column; gap: var(--space-2); margin: 0; padding: 0; list-style: none; }
-.exec-env__card { padding: var(--space-3); border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-surface-elevated); }
+.exec-env__card { padding: var(--space-3); border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-surface); }
 .exec-env__card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-2); }
 .exec-env__card-head h2 { margin: 0; font-size: var(--type-md); }
 .exec-env__card-head h3 { margin: 0; font-size: var(--type-md); }
@@ -6027,7 +5732,7 @@ button.workspace-board-ref:focus-visible {
 /* Usage by provider (SPEC 7347 AC-7): every built-in provider fits; rows wrap on narrow widths. */
 .exec-env__provider-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 16rem), 1fr)); gap: var(--space-2); margin: 0; padding: 0; list-style: none; }
 .exec-env__provider { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: baseline; column-gap: var(--space-2); row-gap: var(--space-1); min-width: 0; padding: var(--space-2); border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-surface-elevated); }
-.exec-env__provider-label { flex-shrink: 0; font-family: var(--font-mono); font-size: var(--type-xs); color: var(--color-text-muted); }
+.exec-env__provider-label { flex-shrink: 0; font-family: var(--font-body); font-size: var(--type-xs); color: var(--color-text-muted); }
 .exec-env__provider-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .exec-env__provider-usage { grid-column: 2; font-variant-numeric: tabular-nums; font-size: var(--type-sm); }
 .exec-env__provider[data-severity="warning"] .exec-env__provider-usage { color: var(--color-state-needs-input); }
@@ -6037,7 +5742,21 @@ button.workspace-board-ref:focus-visible {
 .exec-env button:disabled { color: var(--color-text-muted); border-color: var(--color-border); cursor: not-allowed; }
 .exec-env button:disabled:hover { background: var(--color-surface); }
 .exec-env button.exec-env__danger:not(:disabled) { color: var(--color-state-blocked); }
-.exec-env button.exec-env__primary:not(:disabled) { border-color: var(--color-link); color: var(--color-link); }
+.exec-env button.exec-env__primary:not(:disabled) {
+  background: var(--color-button-bg);
+  border-color: var(--color-button-bg);
+  color: var(--color-button-fg);
+}
+.exec-env button.exec-env__primary:not(:disabled):hover {
+  background: var(--color-button-bg-hover);
+  border-color: var(--color-button-bg-hover);
+}
+@media (forced-colors: active) {
+  .exec-env button.exec-env__primary:not(:disabled),
+  .exec-env button.exec-env__primary:not(:disabled):hover {
+    border-color: var(--color-button-border);
+  }
+}
 .exec-env__reason { margin: var(--space-1) 0 0; color: var(--color-text-muted); font-size: var(--type-xs); }
 .exec-env__error { margin: var(--space-2) 0 0; color: var(--color-state-blocked); }
 .exec-env__status { min-height: var(--space-4); margin: 0; color: var(--color-text-muted); font-size: var(--type-xs); }

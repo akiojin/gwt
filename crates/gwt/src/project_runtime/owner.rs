@@ -178,6 +178,7 @@ pub(crate) struct AgentRuntimeRecord {
 }
 
 struct AgentOperation {
+    pane_create_timer: Option<crate::perf::RouteTimer>,
     session_id: Option<String>,
     early_events: VecDeque<TransportEvent>,
     request: serde_json::Value,
@@ -4816,6 +4817,7 @@ impl OwnerState {
             self.agent_operations.insert(
                 operation_id.clone(),
                 AgentOperation {
+                    pane_create_timer: None,
                     session_id: None,
                     early_events: VecDeque::new(),
                     request: expected_request.unwrap_or(serde_json::Value::Null),
@@ -5610,6 +5612,7 @@ impl OwnerState {
         command: OwnerCommand,
         reply: oneshot::Sender<OwnerReply>,
     ) {
+        let started = std::time::Instant::now();
         let request = match serde_json::to_value(&command) {
             Ok(request) => request,
             Err(error) => {
@@ -5669,6 +5672,10 @@ impl OwnerState {
         self.agent_operations.insert(
             operation_id.clone(),
             AgentOperation {
+                pane_create_timer: Some(crate::perf::RouteTimer::from_start(
+                    crate::perf::PerfRoute::PaneCreate,
+                    started,
+                )),
                 session_id: None,
                 early_events: VecDeque::new(),
                 request,
@@ -5804,6 +5811,7 @@ impl OwnerState {
         self.agent_operations.insert(
             operation_id.clone(),
             AgentOperation {
+                pane_create_timer: None,
                 session_id: None,
                 early_events: VecDeque::new(),
                 request,
@@ -5941,6 +5949,7 @@ impl OwnerState {
         self.agent_operations.insert(
             operation_id.clone(),
             AgentOperation {
+                pane_create_timer: None,
                 session_id: None,
                 early_events: VecDeque::new(),
                 request,
@@ -5997,6 +6006,7 @@ impl OwnerState {
         mut restore: Option<super::installation::OwnerSavedSessionRestore>,
         restore_predecessor: Option<String>,
     ) {
+        let started = std::time::Instant::now();
         if let Err(error) = &self.agent_registry {
             let _ = reply.send(Err(error.clone()));
             return;
@@ -6219,6 +6229,7 @@ impl OwnerState {
                 self.agent_operations.insert(
                     operation_id.clone(),
                     AgentOperation {
+                        pane_create_timer: None,
                         session_id: None,
                         early_events: VecDeque::new(),
                         request,
@@ -6372,6 +6383,10 @@ impl OwnerState {
         self.agent_operations.insert(
             operation_id.clone(),
             AgentOperation {
+                pane_create_timer: Some(crate::perf::RouteTimer::from_start(
+                    crate::perf::PerfRoute::PaneCreate,
+                    started,
+                )),
                 session_id: None,
                 early_events: VecDeque::new(),
                 request,
@@ -7680,6 +7695,7 @@ impl OwnerState {
 
     fn finish_agent_operation(&mut self, operation_id: &str, mut result: OwnerReply) {
         if let Some(operation) = self.agent_operations.get_mut(operation_id) {
+            drop(operation.pane_create_timer.take());
             // Exact compensation is immutable readback even if a later
             // physical/registry cleanup attempt still needs reconciliation.
             if let Some(Ok(captured)) = operation.result.as_ref().filter(|cached| {
@@ -9798,7 +9814,16 @@ impl OwnerState {
             });
         }
         let close = target.and_then(|id| {
-            if self.closing.contains_key(&id) {
+            // Correlated self-close transfers the runtime at its exact Owner
+            // commit. A stalled acceptance worker must leave the pane available.
+            if matches!(
+                request,
+                AgentFrontendRequest::CloseWindow {
+                    request_id: Some(_),
+                    ..
+                }
+            ) || self.closing.contains_key(&id)
+            {
                 return None;
             }
             let row_exists = panes.iter().any(|pane| pane.window.id == id);
@@ -13727,6 +13752,7 @@ mod worker_tests {
         owner.agent_operations.insert(
             "preparing".into(),
             AgentOperation {
+                pane_create_timer: None,
                 session_id: None,
                 early_events: VecDeque::new(),
                 request: json!({
@@ -15203,6 +15229,7 @@ mod tests {
         state.agent_operations.insert(
             "launch".into(),
             AgentOperation {
+                pane_create_timer: None,
                 session_id: Some("materialized-session".into()),
                 early_events: VecDeque::new(),
                 request: json!({}),
@@ -15739,6 +15766,7 @@ mod tests {
         state.agent_operations.insert(
             "operation".into(),
             AgentOperation {
+                pane_create_timer: None,
                 session_id: None,
                 early_events: VecDeque::new(),
                 request: json!(null),
@@ -16655,6 +16683,7 @@ mod tests {
         state.agent_operations.insert(
             "completed".into(),
             AgentOperation {
+                pane_create_timer: None,
                 session_id: Some(snapshot.id.clone()),
                 early_events: VecDeque::new(),
                 request: launch_request.clone(),
@@ -16763,6 +16792,80 @@ mod tests {
         .iter()
         .any(|row| row.id == "stopped"));
     }
+    #[tokio::test]
+    async fn stalled_self_close_worker_leaves_the_runtime_with_the_owner() {
+        use super::super::agent_frontend::{
+            set_owner_agent_dispatch_test_hook, OwnerAgentDispatchTestStage,
+        };
+
+        let root = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(root.path());
+        let (snapshot, pane) = unbound_fixture(root.path());
+        let (mut state, receiver, handle) = owner_fixture(root.path());
+        state.project_key = gwt_core::paths::project_scope_hash(root.path()).to_string();
+        let id = format!("{}::pane", state.project_key);
+        let registry = state.agent_registry.as_ref().unwrap();
+        let row = super::super::agent_dispatch::owned_process_window_state(
+            root.path(),
+            &id,
+            Some(&snapshot),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        super::super::agent_dispatch::publish_owned_process_window(
+            registry,
+            root.path(),
+            &id,
+            None,
+            row,
+            &AtomicBool::new(true),
+        )
+        .map_err(|error| error.detail)
+        .unwrap();
+        state
+            .install_pane(id.clone(), 1, pane, Arc::new(AtomicBool::new(true)))
+            .unwrap();
+        let token = state.issuer.issue(root.path(), &snapshot.id).unwrap().token;
+        let grant = state.issuer.grant_for_test(&token).unwrap();
+        let (entered, wait_for_worker) = mpsc::channel();
+        let (release, wait_for_release) = mpsc::channel::<()>();
+        let _hook = set_owner_agent_dispatch_test_hook(
+            &grant,
+            OwnerAgentDispatchTestStage::BeforeDispatch,
+            move || {
+                let _ = entered.send(());
+                let _ = wait_for_release.recv();
+            },
+        );
+        let (responder, acceptance) = crate::agent_capability::AgentSelfCloseResponder::channel();
+        state.dispatch_agent_frontend(
+            "origin".into(),
+            grant,
+            crate::agent_capability::AgentFrontendRequest::CloseWindow {
+                id: id.clone(),
+                request_id: Some(uuid::Uuid::new_v4().to_string()),
+                responder: Some(responder),
+            },
+        );
+        gwt_core::test_support::recv_event(&wait_for_worker, "self-close worker entered");
+        let owner_retained_pane =
+            state.runtimes.contains_key(&id) && !state.closing.contains_key(&id);
+        drop(acceptance);
+        drop(release);
+        let actor = spawn_owner_worker(move || run_fixture_owner(state, receiver));
+        // test-hygiene: allow-wall-clock-deadline Bound fixture shutdown after releasing the worker.
+        tokio::time::timeout(std::time::Duration::from_secs(10), handle.shutdown())
+            .await
+            .unwrap();
+        actor.join().unwrap();
+        assert!(
+            owner_retained_pane,
+            "unaccepted self-close transferred the live pane"
+        );
+    }
+
     #[tokio::test]
     async fn shutdown_keeps_accepted_self_close_explicit_before_origin_commit() {
         let root = tempfile::tempdir().unwrap();

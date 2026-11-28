@@ -412,7 +412,7 @@ pub(crate) fn run_remove_merged(
                 },
             );
             match result {
-                Ok(()) => report.removed.push(entry.clone()),
+                Ok(_) => report.removed.push(entry.clone()),
                 Err(error) => {
                     report.failed.push(RemovalKept {
                         worktree: entry.worktree.clone(),

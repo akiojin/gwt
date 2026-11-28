@@ -332,6 +332,12 @@ pub const AGENT_AUTHORITY_UNAVAILABLE_CLOSE: ClientCloseFrame = ClientCloseFrame
     code: 1011,
     reason: "execution authority is unavailable",
 };
+// Leave time for the close frame to reach pane.read before its 15 s deadline.
+const AGENT_PANE_SYNC_DEADLINE: Duration = Duration::from_secs(10);
+const AGENT_PANE_SYNC_TIMEOUT_CLOSE: ClientCloseFrame = ClientCloseFrame {
+    code: 1013,
+    reason: "pane_sync_timeout",
+};
 /// Upper bound on the in-memory access log ring buffer. The canonical sink
 /// for production is `tracing::info!(target: "gwt_access", ...)` which writes
 /// to `~/.gwt/logs/<date>/`; this in-memory ring exists only so tests (and an
@@ -698,6 +704,7 @@ pub struct ClientCloseFrame {
 pub enum DrainStep {
     Message {
         payload: String,
+        kind: &'static str,
         /// Panes whose streamed output was dropped while the queue was
         /// saturated; the session loop must request snapshot re-sends for
         /// them (SPEC-2359 W-17 FR-396).
@@ -920,6 +927,7 @@ impl ClientQueue {
         drop(state);
         Some(DrainStep::Message {
             payload: entry.payload.to_string(),
+            kind: entry.kind,
             repair_panes,
         })
     }
@@ -2918,6 +2926,13 @@ async fn send_agent_fence_close<S>(
         "Agent capability is missing, stale, or unavailable",
     )
     .await;
+    send_agent_close_frame(sender, close_frame).await;
+}
+
+async fn send_agent_close_frame<S>(sender: &mut S, close_frame: ClientCloseFrame)
+where
+    S: futures_util::Sink<Message> + Unpin,
+{
     let _ = tokio::time::timeout(
         Duration::from_secs(1),
         sender.send(Message::Close(Some(axum::extract::ws::CloseFrame {
@@ -2945,14 +2960,32 @@ async fn client_session_with_scope(
     // result reaches the front of the queue. Retain each accepted correlation
     // until its reply is sent so revocation never becomes a silent timeout.
     let mut pending_names = HashSet::new();
+    let mut pane_sync_started: Option<tokio::time::Instant> = None;
 
     let input_seq = Arc::new(AtomicU64::new(0));
 
     loop {
         tokio::select! {
+            Some(started) = async {
+                let started = pane_sync_started?;
+                tokio::time::sleep_until(started + AGENT_PANE_SYNC_DEADLINE).await;
+                Some(started)
+            } => {
+                if let ClientSessionScope::Agent(agent) = &scope {
+                    tracing::warn!(
+                        host_instance_id = %state.host_instance_id,
+                        project_root = %agent.grant.principal().canonical_project_root().display(),
+                        %client_id,
+                        elapsed_ms = started.elapsed().as_millis(),
+                        "pane sync timed out waiting for Owner completion"
+                    );
+                }
+                send_agent_close_frame(&mut sender, AGENT_PANE_SYNC_TIMEOUT_CLOSE).await;
+                break;
+            }
             step = outbound.next() => {
                 match step {
-                    DrainStep::Message { payload, repair_panes } => {
+                    DrainStep::Message { payload, kind, repair_panes } => {
                         if !scope.refresh_agent_grant(&state.agent_capabilities) {
                             send_agent_fence_close(
                                 &mut sender,
@@ -2970,6 +3003,9 @@ async fn client_session_with_scope(
                         };
                         if sender.send(Message::Text(payload.into())).await.is_err() {
                             break;
+                        }
+                        if kind == "pane_sync_complete" {
+                            pane_sync_started = None;
                         }
                         if let Some(request_id) = name_result {
                             pending_names.remove(&request_id);
@@ -3041,6 +3077,12 @@ async fn client_session_with_scope(
                                         grant,
                                         mut request,
                                     }) => {
+                                        if matches!(request, AgentFrontendRequest::Ready) {
+                                            if pane_sync_started.is_some() {
+                                                continue;
+                                            }
+                                            pane_sync_started = Some(tokio::time::Instant::now());
+                                        }
                                         if grant.principal().authorizes_producing_mutation()
                                             && request.mutates_host_state()
                                         {
@@ -3098,14 +3140,14 @@ async fn client_session_with_scope(
                                         let mut direct_pm_result = None;
                                         let direct_acceptance = match &mut request {
                                             AgentFrontendRequest::CloseWindow {
+                                                id,
                                                 request_id: Some(_),
                                                 responder,
-                                                ..
                                             } => {
                                                 let (direct_responder, acceptance) =
                                                     AgentSelfCloseResponder::channel();
                                                 *responder = Some(direct_responder);
-                                                Some(acceptance)
+                                                Some((acceptance, id.clone()))
                                             }
                                             AgentFrontendRequest::PmSendInput {
                                                 operation_id,
@@ -3248,7 +3290,7 @@ async fn client_session_with_scope(
                                             }
                                             break;
                                         }
-                                        if let Some(mut direct_acceptance) = direct_acceptance {
+                                        if let Some((mut direct_acceptance, window_id)) = direct_acceptance {
                                             // Correlated self-close is a two-phase exchange. The
                                             // runtime owner first atomically accepts or rejects the
                                             // current capability generation. Only an accepted
@@ -3270,7 +3312,23 @@ async fn client_session_with_scope(
                                                         }
                                                     }
                                                     _ = tokio::time::sleep_until(deadline) => {
-                                                        break None;
+                                                        // Keep a response that already won the send/close race.
+                                                        // Otherwise the Owner will see a closed receiver and
+                                                        // roll back any tentative self-close acceptance.
+                                                        direct_acceptance.close();
+                                                        let response = direct_acceptance.try_recv().unwrap_or_else(|_| {
+                                                            tracing::warn!(
+                                                                host_instance_id = %state.host_instance_id,
+                                                                %window_id,
+                                                                elapsed_ms = received_at.elapsed().as_millis(),
+                                                                "pane close timed out waiting for Owner acceptance"
+                                                            );
+                                                            Err(crate::agent_capability::AgentSelfCloseRefusal {
+                                                                window_id,
+                                                                reason: "pane_close_acceptance_timeout".into(),
+                                                            })
+                                                        });
+                                                        break Some(response);
                                                     }
                                                 }
                                             };
@@ -3641,8 +3699,9 @@ mod tests {
         );
         let grant = issuer.issue(project.path(), "transport-session").unwrap();
         let (events, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let clients = ClientHub::default();
         let state = TransportState::new(
-            ClientHub::default(),
+            clients.clone(),
             registry,
             "test-host".into(),
             std::sync::Arc::new(move |event| {
@@ -3715,7 +3774,9 @@ mod tests {
             "Authorization",
             format!("Bearer {}", grant.token).parse().unwrap(),
         );
-        let (mut socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+        let (mut socket, _) = tokio_tungstenite::connect_async(request.clone())
+            .await
+            .unwrap();
         socket
             .send(WireMessage::Text(r#"{"kind":"frontend_ready"}"#.into()))
             .await
@@ -3729,7 +3790,129 @@ mod tests {
                 ..
             })
         ));
-        socket.close(None).await.unwrap();
+        let fixture_deadline = std::time::Duration::from_secs(5);
+        let pane_id = "test-tab::own";
+        let workspace = serde_json::json!({
+            "kind": "workspace_state",
+            "workspace": {
+                "app_version": "test",
+                "active_tab_id": "test-tab",
+                "recent_projects": [],
+                "tabs": [{
+                    "id": "test-tab",
+                    "project_root": project.path(),
+                    "workspace": { "windows": [{ "id": pane_id }] }
+                }]
+            }
+        });
+        assert!(!clients
+            .first_agent_queue_for_test()
+            .unwrap()
+            .enqueue_workspace_for_test(workspace.to_string().into()));
+        // test-hygiene: allow-wall-clock-deadline Bound fixture I/O while workspace receipt establishes progress.
+        let workspace_reply = tokio::time::timeout(fixture_deadline, socket.next())
+            .await
+            .expect("pane workspace reply deadline")
+            .expect("transport closed before pane workspace")
+            .unwrap();
+        let workspace_reply: serde_json::Value =
+            serde_json::from_str(workspace_reply.to_text().unwrap()).unwrap();
+        assert_eq!(workspace_reply["kind"], "workspace_state");
+        assert!(!clients
+            .first_agent_queue_for_test()
+            .unwrap()
+            .enqueue(&prepare_outbound(&BackendEvent::PaneSyncComplete {
+                empty_window_ids: vec![pane_id.into()],
+                busy_window_ids: vec![],
+                unavailable_window_ids: vec![],
+                failed_window_ids: vec![],
+            })));
+        // test-hygiene: allow-wall-clock-deadline Bound fixture I/O while waiting for the completion frame.
+        let completion = tokio::time::timeout(fixture_deadline, socket.next())
+            .await
+            .expect("pane sync completion deadline")
+            .expect("transport closed before pane sync completion")
+            .unwrap();
+        let completion: serde_json::Value =
+            serde_json::from_str(completion.to_text().unwrap()).unwrap();
+        assert_eq!(completion["kind"], "pane_sync_complete");
+        assert_eq!(completion["empty_window_ids"], serde_json::json!([pane_id]));
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_secs(11)).await;
+        tokio::time::resume();
+
+        socket
+            .send(WireMessage::Text(
+                serde_json::json!({
+                    "kind": "close_window",
+                    "id": pane_id,
+                    "request_id": "stalled-close"
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        // test-hygiene: allow-wall-clock-deadline Bound fixture I/O while the queued request establishes progress.
+        let close_event = tokio::time::timeout(fixture_deadline, received.recv())
+            .await
+            .expect("pane close dispatch deadline");
+        let Some(TransportEvent::AgentFrontend {
+            request:
+                crate::agent_capability::AgentFrontendRequest::CloseWindow {
+                    responder: Some(stalled_owner),
+                    ..
+                },
+            ..
+        }) = close_event
+        else {
+            panic!("the correlated pane close must reach the Owner queue");
+        };
+        // Hold the responder without accepting the close, as a stalled Owner would.
+        // The transport is responsible for ending the wait with a failure reply.
+        // test-hygiene: allow-wall-clock-deadline Exercise the production WebSocket acceptance timeout.
+        let reply = tokio::time::timeout(fixture_deadline, socket.next())
+            .await
+            .expect("pane close reply deadline")
+            .expect("transport closed without a pane close result")
+            .unwrap();
+        let reply: serde_json::Value = serde_json::from_str(reply.to_text().unwrap()).unwrap();
+        assert_eq!(reply["kind"], "pane_close_result");
+        assert_eq!(reply["ok"], false);
+        assert_eq!(reply["window_id"], pane_id);
+        assert_eq!(reply["reason"], "pane_close_acceptance_timeout");
+        assert!(!stalled_owner.refuse(pane_id.into(), "late result".into()));
+
+        let (mut reader, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+        reader
+            .send(WireMessage::Text(r#"{"kind":"frontend_ready"}"#.into()))
+            .await
+            .unwrap();
+        // test-hygiene: allow-wall-clock-deadline Bound fixture I/O while dispatch establishes the timer start.
+        let read_event = tokio::time::timeout(fixture_deadline, received.recv())
+            .await
+            .expect("stalled pane sync dispatch deadline");
+        assert!(matches!(
+            read_event,
+            Some(TransportEvent::AgentFrontend {
+                request: crate::agent_capability::AgentFrontendRequest::Ready,
+                ..
+            })
+        ));
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_secs(11)).await;
+        tokio::time::resume();
+        // test-hygiene: allow-wall-clock-deadline Bound fixture I/O after advancing the transport timer.
+        let reply = tokio::time::timeout(fixture_deadline, reader.next())
+            .await
+            .expect("stalled pane sync must receive a transport response")
+            .expect("transport must send a close frame")
+            .unwrap();
+        let WireMessage::Close(Some(frame)) = reply else {
+            panic!("expected a pane sync timeout close frame, got {reply:?}");
+        };
+        assert_eq!(u16::from(frame.code), 1013);
+        assert_eq!(frame.reason, "pane_sync_timeout");
         server.abort();
     }
     #[test]
@@ -4539,6 +4722,7 @@ mod tests {
                 DrainStep::Message {
                     payload,
                     repair_panes,
+                    ..
                 } => {
                     payloads.push(payload);
                     repairs.extend(repair_panes);

@@ -1280,6 +1280,7 @@ mod tests {
         use crate::mobile_host::registration_client::{
             ConnectionEvent, InviteOutcome, InviteRejection, InviteRequest, OutboundSignal,
         };
+        use crate::mobile_host::signal::{BrowserSignal, HostSignal};
         use std::sync::RwLock;
         use tokio::sync::{mpsc, watch};
         let mut fixture = Fixture::new();
@@ -1373,26 +1374,120 @@ mod tests {
             // The Host learns which of its pending invites was claimed.
             assert_eq!(claimed, issued.invite_id);
             assert_ne!(claimed, invite(4, 300).0.invite_id());
-            let offer = json!({"type":"signal","payload":"offer"}).to_string();
+            let offer = json!({"type":"offer","sdp":"v=0"}).to_string();
+            let offer = json!({"type":"signal","payload":offer}).to_string();
             bounded(browser.send(Message::text(offer))).await.unwrap();
             assert_eq!(
                 bounded(connections.recv()).await,
                 Some(ConnectionEvent::Signal {
                     connection_id,
-                    payload: "offer".to_string()
+                    signal: BrowserSignal::Offer {
+                        sdp: "v=0".to_string()
+                    }
                 })
             );
-            // The Host's signal reaches this browser.
+            // The Host's answer reaches this browser on the fixed wire.
             let answer = OutboundSignal {
                 connection_id,
-                payload: "answer".to_string(),
+                signal: HostSignal::Answer {
+                    sdp: "v=0".to_string(),
+                },
             };
             bounded(signals.send(answer)).await.ok().unwrap();
+            let relayed = next_json(&mut browser).await;
+            assert_eq!(relayed["type"], json!("signal"));
             assert_eq!(
-                next_json(&mut browser).await,
-                json!({"type":"signal","payload":"answer"})
+                serde_json::from_str::<serde_json::Value>(relayed["payload"].as_str().unwrap())
+                    .unwrap(),
+                json!({"type":"answer","sdp":"v=0"})
+            );
+            // The claimed browser pairs on the same wire: its request and proof
+            // reach the Host decoded, and the Host's challenge reaches it.
+            let b64 = |bytes: &[u8]| {
+                use base64::Engine as _;
+                base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+            };
+            let request = json!({"type":"pair_request","name":"Phone",
+                                 "public_key":b64(&[4; 65]),"project":PROJECT})
+            .to_string();
+            let request = json!({"type":"signal","payload":request}).to_string();
+            bounded(browser.send(Message::text(request))).await.unwrap();
+            assert_eq!(
+                bounded(connections.recv()).await,
+                Some(ConnectionEvent::Signal {
+                    connection_id,
+                    signal: BrowserSignal::PairRequest {
+                        name: "Phone".to_string(),
+                        public_key: vec![4; 65],
+                        project: PROJECT.to_string(),
+                    }
+                })
+            );
+            let challenge = OutboundSignal {
+                connection_id,
+                signal: HostSignal::PairChallenge {
+                    request_id: "r1".to_string(),
+                    signing_payload: "[]".to_string(),
+                },
+            };
+            bounded(signals.send(challenge)).await.ok().unwrap();
+            let relayed = next_json(&mut browser).await;
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(relayed["payload"].as_str().unwrap())
+                    .unwrap(),
+                json!({"type":"pair_challenge","request_id":"r1","signing_payload":"[]"})
+            );
+            let proof = json!({"type":"pair_proof","request_id":"r1","signature":b64(&[7; 64])})
+                .to_string();
+            let proof = json!({"type":"signal","payload":proof}).to_string();
+            bounded(browser.send(Message::text(proof))).await.unwrap();
+            assert_eq!(
+                bounded(connections.recv()).await,
+                Some(ConnectionEvent::Signal {
+                    connection_id,
+                    signal: BrowserSignal::PairProof {
+                        request_id: "r1".to_string(),
+                        signature: vec![7; 64],
+                    }
+                })
             );
             bounded(browser.close(None)).await.unwrap();
+            assert_eq!(
+                bounded(connections.recv()).await,
+                Some(ConnectionEvent::Closed { connection_id })
+            );
+        }
+        assert!(host.read().unwrap().is_enabled());
+        assert_eq!(live(&sessions), 1);
+
+        // A browser signal outside the Host wire is never reported: its
+        // connection is closed and the registration stays live.
+        {
+            use futures_util::{SinkExt as _, StreamExt as _};
+            use tokio_tungstenite::tungstenite::Message;
+            let issued = issued_invite(&host, &invites).await;
+            let origin = [("origin", "https://coordinator.example".to_string())];
+            let mut browser = open_path(&fixture, addr, BROWSER_CLAIM_PATH, &origin)
+                .await
+                .unwrap();
+            let claim =
+                json!({"type":"claim_invite","secret":hex::encode(issued.secret.as_slice())})
+                    .to_string();
+            bounded(browser.send(Message::text(claim))).await.unwrap();
+            assert_eq!(next_json(&mut browser).await, json!({"type":"claimed"}));
+            let ConnectionEvent::Claimed { connection_id, .. } =
+                bounded(connections.recv()).await.unwrap()
+            else {
+                panic!("the first connection event must be the claim");
+            };
+            let snapshot = json!({"type":"signal","payload":r#"{"type":"snapshot"}"#}).to_string();
+            bounded(browser.send(Message::text(snapshot)))
+                .await
+                .unwrap();
+            assert!(matches!(
+                bounded(browser.next()).await,
+                None | Some(Err(_)) | Some(Ok(Message::Close(_)))
+            ));
             assert_eq!(
                 bounded(connections.recv()).await,
                 Some(ConnectionEvent::Closed { connection_id })
@@ -1423,9 +1518,51 @@ mod tests {
             };
             let oversized = OutboundSignal {
                 connection_id,
-                payload: "x".repeat(64 * 1024),
+                signal: HostSignal::Answer {
+                    sdp: "x".repeat(64 * 1024),
+                },
             };
             bounded(signals.send(oversized)).await.ok().unwrap();
+            assert!(matches!(
+                bounded(browser.next()).await,
+                None | Some(Err(_)) | Some(Ok(Message::Close(_)))
+            ));
+            assert_eq!(
+                bounded(connections.recv()).await,
+                Some(ConnectionEvent::Closed { connection_id })
+            );
+        }
+        assert!(host.read().unwrap().is_enabled());
+        assert_eq!(live(&sessions), 1);
+
+        // A Host signal outside the Host wire (an answer before the browser's
+        // offer) is never sent: its connection is closed and the registration
+        // stays live.
+        {
+            use futures_util::{SinkExt as _, StreamExt as _};
+            use tokio_tungstenite::tungstenite::Message;
+            let issued = issued_invite(&host, &invites).await;
+            let origin = [("origin", "https://coordinator.example".to_string())];
+            let mut browser = open_path(&fixture, addr, BROWSER_CLAIM_PATH, &origin)
+                .await
+                .unwrap();
+            let claim =
+                json!({"type":"claim_invite","secret":hex::encode(issued.secret.as_slice())})
+                    .to_string();
+            bounded(browser.send(Message::text(claim))).await.unwrap();
+            assert_eq!(next_json(&mut browser).await, json!({"type":"claimed"}));
+            let ConnectionEvent::Claimed { connection_id, .. } =
+                bounded(connections.recv()).await.unwrap()
+            else {
+                panic!("the first connection event must be the claim");
+            };
+            let early = OutboundSignal {
+                connection_id,
+                signal: HostSignal::Answer {
+                    sdp: "v=0".to_string(),
+                },
+            };
+            bounded(signals.send(early)).await.ok().unwrap();
             assert!(matches!(
                 bounded(browser.next()).await,
                 None | Some(Err(_)) | Some(Ok(Message::Close(_)))
@@ -2133,6 +2270,7 @@ mod tests {
     #[tokio::test]
     async fn host_client_paces_its_signals_to_the_announced_host_rate() {
         use crate::mobile_host::registration_client::{ConnectionEvent, OutboundSignal};
+        use crate::mobile_host::signal::HostSignal;
         use futures_util::SinkExt as _;
         use std::sync::RwLock;
         use tokio::sync::{mpsc, watch};
@@ -2187,19 +2325,47 @@ mod tests {
             panic!("the first connection event must be the claim");
         };
 
+        let offer = json!({"type":"offer","sdp":"v=0"}).to_string();
+        let offer = json!({"type":"signal","payload":offer}).to_string();
+        bounded(browser.send(Message::text(offer))).await.unwrap();
+        assert!(matches!(
+            bounded(connections.recv()).await,
+            Some(ConnectionEvent::Signal { .. })
+        ));
+
         // More signals at once than the coordinator's burst allows: the client
         // holds them to the announced rate instead of losing the registration.
+        let wire = |index: usize| {
+            if index == 0 {
+                HostSignal::Answer {
+                    sdp: "v=0".to_string(),
+                }
+            } else {
+                HostSignal::Candidate {
+                    candidate: format!("candidate-{index}"),
+                    sdp_mid: None,
+                    sdp_m_line_index: None,
+                }
+            }
+        };
         for index in 0..6 {
             let signal = OutboundSignal {
                 connection_id,
-                payload: format!("candidate-{index}"),
+                signal: wire(index),
             };
             bounded(signals.send(signal)).await.ok().unwrap();
         }
         for index in 0..6 {
+            let relayed = next_json(&mut browser).await;
+            let expected = if index == 0 {
+                json!({"type":"answer","sdp":"v=0"})
+            } else {
+                json!({"type":"candidate","candidate":format!("candidate-{index}")})
+            };
             assert_eq!(
-                next_json(&mut browser).await,
-                json!({"type":"signal","payload":format!("candidate-{index}")})
+                serde_json::from_str::<serde_json::Value>(relayed["payload"].as_str().unwrap())
+                    .unwrap(),
+                expected
             );
         }
         assert!(host.read().unwrap().is_enabled());
@@ -2216,6 +2382,7 @@ mod tests {
     #[tokio::test]
     async fn host_client_closes_only_a_browser_that_outpaces_its_signal_share() {
         use crate::mobile_host::registration_client::ConnectionEvent;
+        use crate::mobile_host::signal::BrowserSignal;
         use futures_util::SinkExt as _;
         use std::sync::RwLock;
         use tokio::sync::{mpsc, watch};
@@ -2267,7 +2434,9 @@ mod tests {
         assert_eq!(next_json(&mut browser).await, json!({"type":"claimed"}));
         // The caller does not drain: the claim and the first signal fill the
         // signal share, so the second signal closes this browser only.
-        for payload in ["0", "1"] {
+        let offer = json!({"type":"offer","sdp":"v=0"}).to_string();
+        let candidate = json!({"type":"candidate","candidate":"c"}).to_string();
+        for payload in [&offer, &candidate] {
             let text = json!({"type":"signal","payload":payload}).to_string();
             bounded(browser.send(Message::text(text))).await.unwrap();
         }
@@ -2286,7 +2455,9 @@ mod tests {
             bounded(connections.recv()).await,
             Some(ConnectionEvent::Signal {
                 connection_id,
-                payload: "0".to_string()
+                signal: BrowserSignal::Offer {
+                    sdp: "v=0".to_string()
+                }
             })
         );
         assert_eq!(
@@ -2459,6 +2630,7 @@ mod tests {
         let client_host = credential.identity().host_id;
         let (stop, stopping) = watch::channel(false);
         let (events, mut connections) = mpsc::channel(8);
+        let (signals, outbound) = mpsc::channel(1);
         let client = {
             let authority = Arc::clone(&authority);
             let tls = fixture.client_config();
@@ -2471,7 +2643,7 @@ mod tests {
                     tcp,
                     stopping,
                     mpsc::channel(1).1,
-                    mpsc::channel(1).1,
+                    outbound,
                     events,
                 )
                 .await
@@ -2541,7 +2713,72 @@ mod tests {
                 real_wall(),
             )
             .is_ok());
-        bounded(browser.close(None)).await.unwrap();
+        // A reconnected device proves its key on the same wire: the Host's
+        // challenge reaches it and its proof reaches the Host decoded. It never
+        // pairs: a pairing request then closes the connection unreported.
+        {
+            use crate::mobile_host::registration_client::OutboundSignal;
+            use crate::mobile_host::signal::{BrowserSignal, HostSignal};
+            let offer = json!({"type":"offer","sdp":"v=0"}).to_string();
+            let offer = json!({"type":"signal","payload":offer}).to_string();
+            bounded(browser.send(Message::text(offer))).await.unwrap();
+            assert_eq!(
+                bounded(connections.recv()).await,
+                Some(ConnectionEvent::Signal {
+                    connection_id,
+                    signal: BrowserSignal::Offer {
+                        sdp: "v=0".to_string()
+                    }
+                })
+            );
+            let answer = OutboundSignal {
+                connection_id,
+                signal: HostSignal::Answer {
+                    sdp: "v=0".to_string(),
+                },
+            };
+            bounded(signals.send(answer)).await.ok().unwrap();
+            assert_eq!(next_json(&mut browser).await["type"], "signal");
+            let challenge = OutboundSignal {
+                connection_id,
+                signal: HostSignal::AuthChallenge {
+                    challenge_id: "c1".to_string(),
+                    signing_payload: "[]".to_string(),
+                },
+            };
+            bounded(signals.send(challenge)).await.ok().unwrap();
+            let relayed = next_json(&mut browser).await;
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(relayed["payload"].as_str().unwrap())
+                    .unwrap(),
+                json!({"type":"auth_challenge","challenge_id":"c1","signing_payload":"[]"})
+            );
+            let b64 = |bytes: &[u8]| {
+                use base64::Engine as _;
+                base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+            };
+            let proof = json!({"type":"auth_proof","challenge_id":"c1","signature":b64(&[7; 64])})
+                .to_string();
+            let proof = json!({"type":"signal","payload":proof}).to_string();
+            bounded(browser.send(Message::text(proof))).await.unwrap();
+            assert_eq!(
+                bounded(connections.recv()).await,
+                Some(ConnectionEvent::Signal {
+                    connection_id,
+                    signal: BrowserSignal::AuthProof {
+                        challenge_id: "c1".to_string(),
+                        signature: vec![7; 64],
+                    }
+                })
+            );
+            let public_key = b64(&[4; 65]);
+            let request = json!({"type":"pair_request","name":"Phone",
+                                 "public_key":public_key,"project":PROJECT})
+            .to_string();
+            let request = json!({"type":"signal","payload":request}).to_string();
+            bounded(browser.send(Message::text(request))).await.unwrap();
+        }
+        assert!(closed(&mut browser).await);
         assert_eq!(
             bounded(connections.recv()).await,
             Some(ConnectionEvent::Closed { connection_id })

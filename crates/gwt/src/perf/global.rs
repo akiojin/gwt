@@ -287,10 +287,12 @@ pub struct RouteTimer {
 impl RouteTimer {
     /// Start timing `route`.
     pub fn start(route: PerfRoute) -> Self {
-        Self {
-            route,
-            started: Instant::now(),
-        }
+        Self::from_start(route, Instant::now())
+    }
+
+    /// Record from a boundary captured before the work was admitted.
+    pub(crate) fn from_start(route: PerfRoute, started: Instant) -> Self {
+        Self { route, started }
     }
 }
 

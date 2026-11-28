@@ -700,14 +700,19 @@ exec "$@"
         let last = argv.lines().last().expect("at least one apt-get call");
         for package in [
             "libgtk-3-dev",
-            "libwebkit2gtk-4.1-dev",
             "libayatana-appindicator3-dev",
-            "libxdo-dev",
+            "libdbus-1-dev",
             "xvfb",
         ] {
             assert!(
                 last.contains(package),
                 "`{GTK_DEPS_MODE} xvfb` must install {package}:\n{last}"
+            );
+        }
+        for package in ["libwebkit2gtk-4.1-dev", "libxdo-dev"] {
+            assert!(
+                !last.contains(package),
+                "`{GTK_DEPS_MODE} xvfb` must omit {package}:\n{last}"
             );
         }
     }

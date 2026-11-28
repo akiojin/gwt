@@ -23,6 +23,23 @@ test("first frame is reported once after two animation frames", () => {
   assert.equal(frames.length, 0);
 });
 
+test("a project navigation reports the selected workspace's first frame", () => {
+  const events = [];
+  const metrics = createStartupMetrics({
+    send: (event) => events.push(event),
+    requestAnimationFrame: (callback) => callback(),
+    now: () => 42,
+    projectSwitch: true,
+  });
+  metrics.onWorkspaceRendered();
+  metrics.onWorkspaceRendered();
+  assert.deepEqual(events, [{
+    kind: "startup_first_frame",
+    navigation_ms: 42,
+    project_switch: true,
+  }]);
+});
+
 test("each terminal handshake is reported even when a window id is reused", () => {
   const events = [];
   const metrics = createStartupMetrics({ send: (event) => events.push(event) });

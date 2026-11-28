@@ -1,0 +1,2 @@
+{"schema_version":1,"type":"sample","timestamp":"2026-11-28T01:51:03.070094Z","stream":"ui","target":"route:work_events.ingest","value":9.540375000000001,"unit":"ms","detector_version":1}
+{"schema_version":1,"type":"sample","timestamp":"2026-11-28T01:51:03.238697Z","stream":"ui","target":"phase:work_events.ingest.merge_status","value":64.8005,"unit":"ms"}

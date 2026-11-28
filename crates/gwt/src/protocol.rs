@@ -588,6 +588,8 @@ pub enum FrontendEvent {
     /// Initial workspace has had a browser rendering opportunity (#3808).
     StartupFirstFrame {
         navigation_ms: f64,
+        #[serde(default)]
+        project_switch: bool,
     },
     /// xterm can accept input; the backend also requires a live PTY writer.
     StartupTerminalReady {
