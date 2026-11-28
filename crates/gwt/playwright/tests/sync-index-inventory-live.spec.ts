@@ -5,7 +5,7 @@
 // an agent Session, and a scan against a real repository can propose GitHub
 // mutations (merged-Issue settlement). See the README for the boundary.
 // This is a measurement driver, not a regression gate. It runs only against an
-// isolated browser-check instance with GitHub credentials and writes raw
+// isolated browser-check instance with live or replayed GitHub reads and writes raw
 // samples to GWT_PERF_INVENTORY_OUT. See docs/perf/issue-3820/README.md.
 import { expect, test, type Page } from "@playwright/test";
 import { execFileSync } from "node:child_process";
@@ -15,6 +15,7 @@ import { gotoLiveGwt, readLiveHubCatalog, sendLiveGwtEvent, withLiveGwtBackendLo
 
 const SAMPLES = Number(process.env.GWT_PERF_INVENTORY_SAMPLES ?? "5");
 const REMOTE = process.env.GWT_PERF_INVENTORY_REMOTE ?? "https://github.com/akiojin/gwt.git";
+const P12_ONLY = process.env.GWT_PERF_INVENTORY_P12_ONLY === "1";
 test.use({ launchOptions: { args: ["--window-position=-32000,-32000", "--disable-backgrounding-occluded-windows",
   "--disable-renderer-backgrounding", "--disable-background-timer-throttling"] } });
 
@@ -68,15 +69,26 @@ test.describe("SPEC #3820 sync / index inventory", () => {
         await installRecorder(page);
 
         issueWindow = await createIssueWindow(page);
-        const p12 = await measureP12(page, issueWindow, home!);
-        const p11 = await measureP11(page, root);
+        if (P12_ONLY) {
+          const warmup = await measureP12(page, issueWindow, home!, 1);
+          expect(warmup.samples[0].outcome, "P12 cache warmup").toBe("refreshed");
+        }
+        const p12 = await measureP12(page, issueWindow, home!, SAMPLES);
+        if (P12_ONLY) {
+          for (const sample of p12.samples) {
+            expect(sample.outcome, sample.error ?? "P12 refresh").toBe("refreshed");
+            expect(sample.entries).toBeGreaterThan(0);
+          }
+        }
+        const p11 = P12_ONLY ? null : await measureP11(page, root);
         expect(errors, "console and page errors").toEqual([]);
         const record = {
           samples_per_path: SAMPLES, remote: REMOTE, checkout: process.env.GWT_PLAYWRIGHT_CHECKOUT_ROOT,
           recorded_at: new Date().toISOString(), P12: p12, P11: p11, console_errors: errors,
         };
         await mkdir(out!, { recursive: true });
-        await writeFile(join(out!, "sync-index.json"), JSON.stringify(record, null, 2) + "\n");
+        const filename = P12_ONLY ? `sync-${info.project.name}.json` : "sync-index.json";
+        await writeFile(join(out!, filename), JSON.stringify(record, null, 2) + "\n");
         await info.attach("sync-index", { body: JSON.stringify(record), contentType: "application/json" });
       } finally {
         if (issueWindow) await sendLiveGwtEvent(page, { kind: "close_window", id: issueWindow }).catch(() => {});
@@ -146,10 +158,10 @@ async function createIssueWindow(page: Page): Promise<string> {
 }
 
 // P12: Refresh forces the whole Issue cache sync; the end is the refreshed list
-// answering that request. The first sample is the cold sync of a fresh HOME.
-async function measureP12(page: Page, id: string, home: string) {
+// answering that request.
+async function measureP12(page: Page, id: string, home: string, count: number) {
   const samples: Array<{ ms: number; outcome: string; error: string | null; entries: number | null; gh_starts: number }> = [];
-  for (let index = 0; index < SAMPLES; index += 1) {
+  for (let index = 0; index < count; index += 1) {
     const requestId = 3_820_000 + index;
     const wallStart = new Date();
     const started = await send(page, { kind: "load_knowledge_bridge", id, knowledge_kind: "issue",
@@ -158,12 +170,12 @@ async function measureP12(page: Page, id: string, home: string) {
       .find((entry: any) => entry.t >= started && entry.payload.id === id && entry.payload.refresh === true) ?? false,
     { started, id }, { timeout: 30_000, polling: 50 }).then(handle => handle.jsonValue()) as { t: number; payload: any };
     const sentId = outgoing.payload.request_id;
-    const frame = await waitFrame(page, started,
+    const frame = await waitFrame(page, outgoing.t,
       `(["knowledge_entries", "knowledge_error"].includes(payload.kind) && payload.id === ${JSON.stringify(id)} && payload.request_id === ${JSON.stringify(sentId)})` +
       ` || (payload.kind === "window_command_error" && payload.id === ${JSON.stringify(id)})`, 2_700_000);
     expect(frame.payload.kind, JSON.stringify(frame.payload).slice(0, 300)).not.toBe("window_command_error");
     // A refused refresh is a sample too: it is the answer the user waited for.
-    samples.push({ ms: frame.t - started, outcome: frame.payload.kind === "knowledge_entries" ? "refreshed" : "error",
+    samples.push({ ms: frame.t - outgoing.t, outcome: frame.payload.kind === "knowledge_entries" ? "refreshed" : "error",
       error: frame.payload.message ?? null, entries: frame.payload.entries?.length ?? null,
       gh_starts: await countGhStarts(home, wallStart, new Date()) });
     await page.waitForTimeout(2_000);
