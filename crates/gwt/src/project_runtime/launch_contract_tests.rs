@@ -525,7 +525,14 @@ mod agent_endpoint_env_tests {
         let _env_lock = gwt_core::test_support::env_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        for recovery in ["exited-child", "stopped-holder", "interrupted-reaper"] {
+        // SPEC #3590 AC-1: "absent-runtime" is a vanished holder — durably
+        // Running, but no Host anywhere publishes a runtime for it.
+        for recovery in [
+            "exited-child",
+            "stopped-holder",
+            "interrupted-reaper",
+            "absent-runtime",
+        ] {
             let home = tempfile::tempdir().expect("home tempdir");
             let _home = ScopedEnvVar::set("HOME", home.path());
             let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
@@ -534,7 +541,7 @@ mod agent_endpoint_env_tests {
                 .sessions_dir
                 .join(format!("{}.toml", launch.session.id));
             let mut holder = gwt_agent::Session::load(&holder_path).expect("reload holder");
-            let holder_status = if recovery == "exited-child" {
+            let holder_status = if matches!(recovery, "exited-child" | "absent-runtime") {
                 gwt_agent::AgentStatus::Running
             } else {
                 gwt_agent::AgentStatus::Stopped
@@ -547,21 +554,26 @@ mod agent_endpoint_env_tests {
             let identity = gwt_agent::SessionExecutionIdentity::from_session(&holder)
                 .expect("holder identity")
                 .expect("bound holder");
-            let host_started_at = crate::process::host_process_start_time(std::process::id())
-                .expect("test Host process identity");
-            gwt_agent::SessionRuntimeState::for_execution_process(
-                holder_status,
-                &identity,
-                1,
-                host_started_at,
-                i32::MAX as u32,
-                1,
-            )
-            .save(&gwt_agent::runtime_state_path(
-                &launch.sessions_dir,
-                &holder.id,
-            ))
-            .expect("persist exited child under a live Host");
+            if recovery == "absent-runtime" {
+                std::fs::remove_dir_all(launch.sessions_dir.join("runtime"))
+                    .expect("remove every runtime sidecar of the vanished holder");
+            } else {
+                let host_started_at = crate::process::host_process_start_time(std::process::id())
+                    .expect("test Host process identity");
+                gwt_agent::SessionRuntimeState::for_execution_process(
+                    holder_status,
+                    &identity,
+                    1,
+                    host_started_at,
+                    i32::MAX as u32,
+                    1,
+                )
+                .save(&gwt_agent::runtime_state_path(
+                    &launch.sessions_dir,
+                    &holder.id,
+                ))
+                .expect("persist exited child under a live Host");
+            }
             let runtime = crate::cli::execution_state::classify_exact_session_runtime(
                 &launch.sessions_dir,
                 &identity,
@@ -569,6 +581,8 @@ mod agent_endpoint_env_tests {
             .expect("classify holder");
             assert!(if recovery == "exited-child" {
                 runtime == crate::cli::execution_state::ExactSessionRuntimeDisposition::ChildExited
+            } else if recovery == "absent-runtime" {
+                runtime == crate::cli::execution_state::ExactSessionRuntimeDisposition::Absent
             } else {
                 matches!(
                     runtime,
