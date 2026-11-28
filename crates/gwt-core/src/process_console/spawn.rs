@@ -2350,8 +2350,8 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[tokio::test]
-    async fn deadline_terminates_and_reaps_child_process_tree() {
+    #[test]
+    fn deadline_terminates_and_reaps_child_process_tree() {
         let directory = tempfile::tempdir().expect("tempdir");
         let parent_file = directory.path().join("parent.pid");
         let descendant_file = directory.path().join("descendant.pid");
@@ -2362,20 +2362,45 @@ mod tests {
             parent_file.to_string_lossy().into_owned(),
             descendant_file.to_string_lossy().into_owned(),
         ];
-        let started = std::time::Instant::now();
-        let error = spawn_logged_with_deadline(
-            &ProcessConsoleHub::new(),
-            ProcessKind::Gh,
-            "sh",
-            &args,
-            SpawnOptions::new("test deadline tree"),
-            started + Duration::from_millis(500),
+        let ready_parent = parent_file.clone();
+        let ready_descendant = descendant_file.clone();
+        // A current-thread runtime polls on this thread, so the readiness hook
+        // expires collection once both pids are recorded and alive, instead of
+        // at a fixed offset from test start that a slow `sh` startup could
+        // outrun (#4740). Only termination and reap get the hang guard.
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let error = with_spawn_stopped_at_ready_for_tests(
+            crate::deadline_budget::HANG_GUARD,
+            move || {
+                for pid in [
+                    wait_for_pid_file(&ready_parent),
+                    wait_for_pid_file(&ready_descendant),
+                ] {
+                    // SAFETY: signal 0 only probes the pid; nothing is delivered.
+                    let alive = unsafe { libc::kill(pid as libc::pid_t, 0) } == 0;
+                    assert!(
+                        alive,
+                        "fixture process {pid} must be alive before the deadline"
+                    );
+                }
+            },
+            || {
+                runtime.block_on(spawn_logged_with_deadline(
+                    &ProcessConsoleHub::new(),
+                    ProcessKind::Gh,
+                    "sh",
+                    &args,
+                    SpawnOptions::new("test deadline tree"),
+                    Instant::now(),
+                ))
+            },
         )
-        .await
         .expect_err("long-running process tree must time out");
         assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
         assert!(deadline_evidence(&error).interrupted_child_reaped());
-        assert!(started.elapsed() < Duration::from_secs(3));
 
         let parent = read_pid(&parent_file);
         let descendant = read_pid(&descendant_file);
@@ -2442,8 +2467,8 @@ mod tests {
         let error = with_spawn_stopped_at_ready_for_tests(
             crate::deadline_budget::HANG_GUARD,
             move || {
-                let parent = wait_for_pid_file_windows(&ready_parent);
-                let descendant = wait_for_pid_file_windows(&ready_descendant);
+                let parent = wait_for_pid_file(&ready_parent);
+                let descendant = wait_for_pid_file(&ready_descendant);
                 assert!(
                     process_is_alive_windows(parent),
                     "fixture root must be alive"
@@ -2472,8 +2497,8 @@ mod tests {
             deadline_evidence(&error)
         );
 
-        let parent = wait_for_pid_file_windows(&parent_file);
-        let descendant = wait_for_pid_file_windows(&descendant_file);
+        let parent = wait_for_pid_file(&parent_file);
+        let descendant = wait_for_pid_file(&descendant_file);
         wait_for_process_exit_windows(parent);
         wait_for_process_exit_windows(descendant);
     }
@@ -2498,8 +2523,8 @@ mod tests {
         let error = with_spawn_ready_for_tests(
             Duration::ZERO,
             move || {
-                let parent = wait_for_pid_file_windows(&ready_parent);
-                let descendant = wait_for_pid_file_windows(&ready_descendant);
+                let parent = wait_for_pid_file(&ready_parent);
+                let descendant = wait_for_pid_file(&ready_descendant);
                 wait_for_process_exit_windows(parent);
                 assert!(
                     process_is_alive_windows(descendant),
@@ -2523,7 +2548,7 @@ mod tests {
 
         assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
         assert!(!deadline_evidence(&error).interrupted_child_reaped());
-        let descendant = wait_for_pid_file_windows(&descendant_file);
+        let descendant = wait_for_pid_file(&descendant_file);
         wait_for_process_exit_windows(descendant);
     }
 
@@ -2573,7 +2598,7 @@ mod tests {
         .expect("root process succeeds before deadline");
         assert!(output.success());
 
-        let descendant = wait_for_pid_file_windows(&descendant_file);
+        let descendant = wait_for_pid_file(&descendant_file);
         assert!(
             process_is_alive_windows(descendant),
             "successful Job release must preserve detached descendants"
@@ -2590,8 +2615,7 @@ mod tests {
 
     /// Observe fixture readiness before starting the deadline under test.
     /// The outer guard diagnoses a hung fixture, not a slow process startup.
-    #[cfg(windows)]
-    fn wait_for_pid_file_windows(path: &std::path::Path) -> u32 {
+    fn wait_for_pid_file(path: &std::path::Path) -> u32 {
         let deadline = Instant::now() + crate::deadline_budget::HANG_GUARD;
         while std::time::Instant::now() < deadline {
             if let Some(pid) = std::fs::read_to_string(path)
