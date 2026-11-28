@@ -1,0 +1,7 @@
+gwt_sha_base=f9012ab5fddd761e98ed08c150f12bf07025f4c4 (+ P20 instrumentation, uncommitted at measurement)
+gwtd 9.179.0
+ProductName:		macOS
+ProductVersion:		27.2.1
+BuildVersion:		26B8132
+Apple M5 Max
+2026-11-28T01:58:58Z
