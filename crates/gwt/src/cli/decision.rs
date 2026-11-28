@@ -303,7 +303,7 @@ mod tests {
     /// A call without an agent session may settle a decision, but it is
     /// recorded as an unattributed CLI answer, never as the user (Issue #8083).
     #[test]
-    fn a_call_without_a_session_answers_as_cli_not_as_the_user() {
+    fn a_direct_user_call_answers_as_the_user() {
         let _lock = env_lock();
         let home = tempfile::tempdir().unwrap();
         let _home = ScopedGwtHome::set(home.path());
