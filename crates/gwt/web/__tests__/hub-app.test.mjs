@@ -115,6 +115,7 @@ test("Projects are found by name", () => {
   const open = () => [...document.querySelectorAll('[data-hub-list="open"] a')].map(link => link.textContent);
   assert.equal(open().length, 20);
   const search = document.querySelector("[data-hub-search]");
+  assert.equal(search.hidden, false, "many projects bring the search");
   search.value = "project 2";
   search.dispatchEvent(new document.defaultView.Event("input"));
   assert.deepEqual(open(), ["Project 2", "Project 20"]);
@@ -137,7 +138,84 @@ test("empty catalog states are explicit", () => {
   sockets[0].open();
   sockets[0].deliver(hubState([], []));
   assert.equal(document.querySelector('[data-hub-list="open"]').textContent, "No open projects");
-  assert.equal(document.querySelector('[data-hub-list="recent"]').textContent, "No recent projects");
+  assert.equal(document.querySelector('[data-hub-list="recent"]').textContent, "No closed projects");
+});
+
+// Issue #8079 AC-1: the list is the page; adding a project is one group below
+// it, and the search only appears once there are many projects.
+test("Issue #8079: Projects is a name-and-open list with one add group and a search only for many projects", () => {
+  const { app, document, sockets } = fixture();
+  app.showView("projects");
+  sockets[0].open();
+  sockets[0].deliver(hubState([projectA], [{ path: "/Users/me/beta", title: "Beta", kind: "git", project_key: projectB.project_key }]));
+  const view = document.querySelector("[data-hub-projects]");
+  assert.equal(view.querySelector("[data-hub-search]").hidden, true, "a short list has no search");
+  const add = view.querySelector("[data-hub-add]");
+  assert.ok(add, "one add group");
+  for (const control of ['[data-hub-action="open-folder"]', '[data-hub-action="clone"]', "[data-open-project-path]"]) {
+    assert.equal(view.querySelectorAll(control).length, 1, control);
+    assert.ok(add.querySelector(control), `${control} lives in the add group`);
+  }
+  const order = [...view.children].map(child => child.dataset.hubList ?? child.querySelector("[data-hub-list]")?.dataset.hubList ?? (child.hasAttribute("data-hub-add") ? "add" : child.tagName.toLowerCase()));
+  assert.ok(order.indexOf("open") < order.indexOf("add") && order.indexOf("recent") < order.indexOf("add"), `the add group follows the lists: ${order}`);
+  const row = view.querySelector(`[data-hub-list="open"] [data-project-row="${projectA.project_key}"]`);
+  const link = row.querySelector("a");
+  assert.equal(link.textContent, "Alpha");
+  assert.equal(link.getAttribute("href"), `/p/${projectA.project_key}`);
+});
+
+// Issue #8079 AC-2: no internal state strings, no project listed twice, and
+// no shutdown section unless a project is actually still shutting down.
+test("Issue #8079: Projects shows no internal state, lists an open project once, and hides an empty shutdown section", () => {
+  const { app, document, sockets } = fixture();
+  app.showView("projects");
+  sockets[0].open();
+  const execution = { project_key: projectA.project_key, generation: 2, revision: 4, choice: "continue",
+    effective_state: "waiting", start_reason: "user_continue", observed_at: "2026-11-03T10:00:00Z", degraded: false };
+  sockets[0].deliver(hubState([{ ...projectA, execution }], [
+    { ...projectA, path: "/fixture/alpha", execution },
+    { path: "/fixture/beta", title: "Beta", kind: "git", project_key: projectB.project_key },
+  ]));
+  const view = document.querySelector("[data-hub-projects]");
+  assert.doesNotMatch(view.textContent, /Saved choice|window open|user continue|2026-11-03|Selection pending|Observation unavailable/);
+  assert.equal(view.querySelectorAll(`a[data-project-key="${projectA.project_key}"]`).length, 1, "an open project is not repeated");
+  assert.deepEqual([...view.querySelectorAll('[data-hub-list="recent"] a')].map(link => link.textContent), ["Beta"]);
+  assert.equal(view.querySelector('[data-hub-list="orphans"]').closest("section").hidden, true);
+  assert.doesNotMatch(view.textContent, /awaiting shutdown/i);
+});
+
+// Issue #8079 AC-3: a project's states are separate, spaced items, never one
+// run-together word such as "ReadyRunning".
+test("Issue #8079: a project's states are separate items with space between them", () => {
+  const { app, document, sockets } = fixture();
+  app.showView("projects");
+  sockets[0].open();
+  sockets[0].deliver(hubState([{ ...projectA, owner_health: { project_key: projectA.project_key, state: "healthy", detail: null },
+    autonomy: { monitor_enabled: true, pm_paused: false, active_agents: 0 } }]));
+  const status = document.querySelector(`[data-project-row="${projectA.project_key}"] [data-project-status]`);
+  assert.ok(status, "the row groups its states");
+  const items = [...status.children];
+  assert.equal(items.length, 2, "health and autonomy are two items");
+  assert.equal(items[0].textContent, "Ready");
+  assert.ok(items[1].hasAttribute("data-project-autonomy"));
+  const css = readFileSync(new URL("../styles/app.css", import.meta.url), "utf8");
+  for (const selector of [".gwt-hub__row", ".gwt-hub__project-status"]) {
+    const rule = css.match(new RegExp(`\\${selector}\\s*\\{([^}]+)\\}`))?.[1] || "";
+    assert.match(rule, /display:\s*flex/, `${selector} lays its items out`);
+    assert.match(rule, /gap:\s*var\(--space-/, `${selector} spaces its items`);
+  }
+});
+
+// Issue #8079 AC-4: the footer's PM is the real name on the Projects view too.
+test("Issue #8079: the Projects view shows the PM by name", () => {
+  const { app, document, sockets } = fixture();
+  app.showView("projects");
+  sockets[0].open();
+  sockets[0].deliver({ kind: "home_conversation", request_id: 1, pm: { name: "小澤 日乃" }, projects: [] });
+  assert.equal(document.querySelector("[data-hub]").dataset.hubView, "projects");
+  const foot = document.querySelector(".app-foot").textContent;
+  assert.match(foot, /PM: 小澤 日乃/);
+  assert.doesNotMatch(foot, /PM: [—ー-]/);
 });
 
 test("Open Folder asks the runtime and then offers the new Project as a link", () => {
@@ -401,7 +479,7 @@ test("manual open and clone destination work without a native picker", () => {
   assert.deepEqual(sockets[0].sent.at(-1), { kind: 'clone_project_start', url: url.value, parent_path: parent.value });
 });
 
-test("Hub Close Project requires a choice and preserves the project execution row", () => {
+test("Hub Close Project requires a choice and keeps the project rows", () => {
   const { document, sockets } = fixture();
   sockets[0].open(); sockets[0].deliver(hubState([projectA, projectB]));
   document.querySelector(`[data-close-project="${projectA.project_key}"]`).click();
@@ -415,19 +493,6 @@ test("Hub Close Project requires a choice and preserves the project execution ro
   sockets[0].deliver({ kind: 'project_closed', project_key: projectA.project_key });
   assert.ok(document.querySelector(`[data-close-project="${projectA.project_key}"]`));
   assert.ok(document.querySelector(`[data-close-project="${projectB.project_key}"]`));
-});
-
-test("Hub shares project execution observations and marks a disconnect unknown", () => {
-  const { document, sockets } = fixture(); sockets[0].open();
-  sockets[0].deliver(hubState([{ ...projectA, execution: { project_key: projectA.project_key, generation: 2, revision: 4,
-    choice: 'continue', effective_state: 'waiting', start_reason: 'user_continue', observed_at: '2026-11-03T10:00:00Z', degraded: false } }, projectB], [{ ...projectA, path: '/fixture/alpha' }]));
-  const a = document.querySelector(`[data-project-execution="${projectA.project_key}"]`);
-  assert.match(a?.textContent || '', /Alpha.*Waiting.*Continue.*2026-11-03/);
-  assert.equal(a.querySelector('[data-project-execution-status]').dataset.state, 'waiting');
-  const b = document.querySelector(`[data-project-execution="${projectB.project_key}"]`);
-  assert.match(b?.textContent || '', /Unknown/);
-  sockets[0].handlers.close();
-  assert.match(a.textContent, /Unknown.*Last known: Waiting/);
 });
 
 test("Hub retries Close after its preview connection is lost", () => {

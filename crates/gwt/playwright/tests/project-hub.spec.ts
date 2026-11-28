@@ -286,6 +286,59 @@ test.describe("Project Hub and routes", () => {
     expect(errors).toEqual([]);
   });
 
+  // Issue #8079: the Projects list matches mock v3 — a name-and-open list,
+  // one add group below it, spaced states, no internal strings, v3 tokens.
+  test("Issue #8079 Projects is a mock v3 list with spaced states and no internal strings", async ({ page }, testInfo) => {
+    const errors = collectBrowserErrors(page);
+    const theme = testInfo.project.name.includes("light") ? "light" : "dark";
+    await page.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme), theme);
+    await installEmbeddedRoutes(page);
+    await installRouteBackend(page);
+    await page.goto(HUB_PROJECTS_URL);
+    await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+    const execution = { project_key: projectA.project_key, generation: 2, revision: 4, choice: "continue",
+      effective_state: "waiting", start_reason: "user_continue", observed_at: "2026-11-03T10:00:00Z", degraded: false };
+    await page.evaluate(({ projectA, projectB, execution }) => (window as any).__gwtHubReply({ kind: "hub_state", hub: {
+      app_version: "9.9.9",
+      projects: [{ ...projectA, execution, owner_health: { project_key: projectA.project_key, state: "healthy", detail: null },
+        autonomy: { monitor_enabled: true, pm_paused: false, active_agents: 0 } }],
+      recent_projects: [{ ...projectA, path: "/fixture/alpha", execution }, { ...projectB, path: "/fixture/beta" }],
+      orphan_daemons: [],
+    } }), { projectA, projectB, execution });
+    await page.evaluate(() => (window as any).__gwtHubReply({ kind: "home_conversation", request_id: 1, pm: { name: "Hikari" }, projects: [] }));
+    const view = page.locator("[data-hub-projects]");
+    const row = view.locator(`[data-hub-list="open"] [data-project-row="${projectA.project_key}"]`);
+    await expect(row.locator("a")).toHaveText("Alpha");
+    await expect(view.locator(`a[data-project-key="${projectA.project_key}"]`)).toHaveCount(1);
+    await expect(view.locator('[data-hub-list="recent"] a')).toHaveText(["Beta"]);
+    await expect(view.locator("[data-hub-search]")).toBeHidden();
+    await expect(view.locator('[data-hub-list="orphans"]')).toBeHidden();
+    await expect(view).not.toContainText(/Saved choice|window open|awaiting shutdown|2026-11-03/i);
+    const add = view.locator("[data-hub-add]");
+    await expect(add.locator('[data-hub-action="open-folder"]')).toBeVisible();
+    await expect(add.locator('[data-hub-action="clone"]')).toBeVisible();
+    await expect(page.locator(".app-foot")).toContainText("PM: Hikari");
+    // "Ready" and "Running" are two items with space between them.
+    const ready = row.locator("[data-project-health]");
+    const running = row.locator("[data-project-autonomy-state]");
+    await expect(ready).toHaveText("Ready");
+    await expect(running).toHaveText("Running");
+    const [a, b] = [await ready.boundingBox(), await running.boundingBox()];
+    expect(b!.x - (a!.x + a!.width), "the states do not touch").toBeGreaterThanOrEqual(4);
+    // The v3 taste: no grid texture and no uppercase headings.
+    const look = await page.evaluate(() => {
+      const style = (selector: string) => getComputedStyle(document.querySelector(selector)!);
+      return {
+        backgrounds: [style("body").backgroundImage, style(".gwt-hub-page").backgroundImage, style(".gwt-hub").backgroundImage],
+        transforms: [...document.querySelectorAll(".gwt-hub h1, .gwt-hub h2")].map(element => getComputedStyle(element).textTransform),
+      };
+    });
+    expect(look.backgrounds).toEqual(["none", "none", "none"]);
+    expect(new Set(look.transforms)).toEqual(new Set(["none"]));
+    await page.screenshot({ path: testInfo.outputPath(`issue-8079-projects-${theme}.png`), fullPage: true });
+    expect(errors).toEqual([]);
+  });
+
   test("Project hub catalog pulls consecutive snapshots without replacing active controls", async ({ page }, testInfo) => {
     const errors = collectBrowserErrors(page);
     const theme = testInfo.project.name.includes("light") ? "light" : "dark";
@@ -464,7 +517,8 @@ test.describe("Project Hub and routes", () => {
     await expect(open).toHaveCount(2);
     await expect(open.nth(0)).toHaveAttribute("href", "/p/0123456789abcdef");
     await expect(open.nth(1)).toHaveAttribute("href", "/p/fedcba9876543210");
-    await expect(page.locator('[data-hub-list="recent"] a')).toHaveAttribute("href", "/p/fedcba9876543210");
+    // Issue #8079 AC-2: Beta is open, so it is not repeated among the closed projects.
+    await expect(page.locator('[data-hub-list="recent"] a')).toHaveCount(0);
     const links = page.locator("[data-hub] a");
     for (const link of await links.all()) {
       await expect(link).toHaveAttribute("target", "_blank");
