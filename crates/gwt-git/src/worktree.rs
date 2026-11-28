@@ -1411,7 +1411,10 @@ impl WorktreeManager {
     /// The function is idempotent against missing worktrees, missing
     /// branches, and orphaned worktree metadata: a `git worktree prune`
     /// fallback handles entries whose on-disk path has already vanished.
-    pub fn cleanup_branch(&self, branch: &str) -> Result<()> {
+    ///
+    /// Returns the rescue ref that preserves uncommitted work when the
+    /// removed worktree was dirty (Issue #3649).
+    pub fn cleanup_branch(&self, branch: &str) -> Result<Option<String>> {
         self.cleanup_branch_with_force_filesystem_delete(branch, false)
     }
 
@@ -1426,7 +1429,7 @@ impl WorktreeManager {
         &self,
         branch: &str,
         force_filesystem_delete: bool,
-    ) -> Result<()> {
+    ) -> Result<Option<String>> {
         let worktree_path = self
             .list()?
             .into_iter()
@@ -1451,7 +1454,7 @@ impl WorktreeManager {
         branch: &str,
         expected_path: &Path,
         force_filesystem_delete: bool,
-    ) -> Result<()> {
+    ) -> Result<Option<String>> {
         let current_path = self
             .list()?
             .into_iter()
@@ -1492,8 +1495,14 @@ impl WorktreeManager {
         branch: &str,
         worktree_path: Option<&Path>,
         force_filesystem_delete: bool,
-    ) -> Result<()> {
+    ) -> Result<Option<String>> {
+        let mut rescue_ref = None;
         if let Some(path) = worktree_path {
+            // Issue #3649: fail closed — never force-remove a worktree whose
+            // uncommitted work could not be preserved first.
+            if path.exists() {
+                rescue_ref = self.rescue_uncommitted_work(path, branch)?;
+            }
             let remove_result = if force_filesystem_delete {
                 self.remove_force_twice(path)
             } else {
@@ -1515,7 +1524,79 @@ impl WorktreeManager {
         }
 
         crate::branch::delete_local_branch(&self.repo_path, branch, true)?;
-        Ok(())
+        Ok(rescue_ref)
+    }
+
+    /// Snapshot the uncommitted work of the worktree at `path` (tracked
+    /// edits, staged files and untracked non-ignored files) into a commit
+    /// whose parent is the worktree HEAD, and point
+    /// `refs/gwt/rescue/<branch>/<UTC timestamp>-<short sha>` at it
+    /// (Issue #3649). The worktree, its index and the branch are untouched.
+    /// Returns `None` when the worktree has nothing uncommitted.
+    pub fn rescue_uncommitted_work(&self, path: &Path, branch: &str) -> Result<Option<String>> {
+        if !self.is_worktree_dirty(path)? {
+            return Ok(None);
+        }
+        let git = |args: &[&str], index: Option<&Path>| -> Result<String> {
+            let mut command = gwt_core::process::hidden_command("git");
+            command.args(args).current_dir(path);
+            if let Some(index) = index {
+                command.env("GIT_INDEX_FILE", index);
+            }
+            let output = command
+                .output()
+                .map_err(|e| GwtError::Git(format!("rescue git {args:?}: {e}")))?;
+            if !output.status.success() {
+                return Err(GwtError::Git(format!(
+                    "rescue git {args:?} in {}: {}",
+                    path.display(),
+                    command_stderr(&output)
+                )));
+            }
+            Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+        };
+
+        let head = git(&["rev-parse", "--verify", "--quiet", "HEAD"], None).ok();
+        let git_dir = PathBuf::from(git(&["rev-parse", "--absolute-git-dir"], None)?);
+        let index = git_dir.join("gwt-rescue-index");
+        let _ = std::fs::remove_file(&index);
+        let snapshot = (|| {
+            if head.is_some() {
+                git(&["read-tree", "HEAD"], Some(&index))?;
+            }
+            git(&["add", "-A", "--", "."], Some(&index))?;
+            git(&["write-tree"], Some(&index))
+        })();
+        let _ = std::fs::remove_file(&index);
+        let tree = snapshot?;
+
+        let message = format!("gwt rescue: uncommitted work of {branch}");
+        let mut commit_args = vec!["commit-tree", tree.as_str(), "-m", message.as_str()];
+        if let Some(head) = head.as_deref() {
+            commit_args.extend(["-p", head]);
+        }
+        let commit = git(&commit_args, None)?;
+        let timestamp = time::OffsetDateTime::now_utc()
+            .format(time::macros::format_description!(
+                "[year][month][day]T[hour][minute][second]Z"
+            ))
+            .map_err(|e| GwtError::Git(format!("rescue timestamp: {e}")))?;
+        let short = commit.get(..12).unwrap_or(commit.as_str());
+        let rescue_ref = format!(
+            "refs/gwt/rescue/{}/{timestamp}-{short}",
+            branch.trim_matches('/')
+        );
+        git(
+            &["update-ref", rescue_ref.as_str(), commit.as_str(), ""],
+            None,
+        )?;
+        tracing::warn!(
+            branch,
+            worktree = %path.display(),
+            rescue_ref,
+            "saved uncommitted worktree changes before removal"
+        );
+        Ok(Some(rescue_ref))
     }
 }
 
@@ -3613,6 +3694,93 @@ prunable gitdir file points to non-existent location
         assert!(manager.remove(&worktree_path).is_err());
         manager.remove_force(&worktree_path).unwrap();
         assert!(!worktree_path.exists());
+    }
+
+    fn git_stdout(path: &Path, args: &[&str]) -> String {
+        let output = gwt_core::process::run_git_logged(args, Some(path)).unwrap();
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    #[test]
+    fn cleanup_branch_rescues_uncommitted_work_before_removing_worktree() {
+        // Issue #3649: Branch Cleanup force-removes the worktree and deletes
+        // the branch, so a dirty worktree must be snapshotted to a rescue ref
+        // first (tracked edits, staged files, untracked files, branch commits).
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_path = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo_path).unwrap();
+        init_git_repo(&repo_path);
+        std::fs::write(repo_path.join("tracked.txt"), "base\n").unwrap();
+        gwt_core::process::run_git_logged(&["add", "tracked.txt"], Some(&repo_path)).unwrap();
+        git_commit_allow_empty(&repo_path, "initial commit");
+
+        let manager = WorktreeManager::new(&repo_path);
+        let worktree_path = sibling_worktree_path(&repo_path, "work/rescue");
+        manager
+            .create_from_base("main", "work/rescue", &worktree_path)
+            .or_else(|_| manager.create_from_base("master", "work/rescue", &worktree_path))
+            .unwrap();
+        git_commit_allow_empty(&worktree_path, "unpushed branch commit");
+        let branch_head = git_stdout(&worktree_path, &["rev-parse", "HEAD"]);
+
+        std::fs::write(worktree_path.join("tracked.txt"), "edited\n").unwrap();
+        std::fs::write(worktree_path.join("staged.txt"), "staged\n").unwrap();
+        gwt_core::process::run_git_logged(&["add", "staged.txt"], Some(&worktree_path)).unwrap();
+        std::fs::write(worktree_path.join("untracked.txt"), "untracked\n").unwrap();
+
+        let rescue_ref = manager
+            .cleanup_branch("work/rescue")
+            .unwrap()
+            .expect("a dirty worktree must produce a rescue ref");
+
+        assert!(!worktree_path.exists());
+        assert!(
+            rescue_ref.starts_with("refs/gwt/rescue/work/rescue/"),
+            "unexpected rescue ref: {rescue_ref}"
+        );
+        assert_eq!(
+            git_stdout(&repo_path, &["rev-parse", &format!("{rescue_ref}^")]),
+            branch_head,
+            "the rescue commit must keep the deleted branch's commits reachable"
+        );
+        for (file, content) in [
+            ("tracked.txt", "edited"),
+            ("staged.txt", "staged"),
+            ("untracked.txt", "untracked"),
+        ] {
+            assert_eq!(
+                git_stdout(&repo_path, &["show", &format!("{rescue_ref}:{file}")]),
+                content
+            );
+        }
+    }
+
+    #[test]
+    fn cleanup_branch_does_not_create_rescue_ref_for_clean_worktree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_path = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo_path).unwrap();
+        init_git_repo(&repo_path);
+        git_commit_allow_empty(&repo_path, "initial commit");
+
+        let manager = WorktreeManager::new(&repo_path);
+        let worktree_path = sibling_worktree_path(&repo_path, "work/clean");
+        manager
+            .create_from_base("main", "work/clean", &worktree_path)
+            .or_else(|_| manager.create_from_base("master", "work/clean", &worktree_path))
+            .unwrap();
+
+        assert_eq!(manager.cleanup_branch("work/clean").unwrap(), None);
+        assert!(!worktree_path.exists());
+        assert_eq!(
+            git_stdout(&repo_path, &["for-each-ref", "refs/gwt/rescue/"]),
+            ""
+        );
     }
 
     #[test]
