@@ -195,7 +195,7 @@
 .works-fleet circle,
 .work-spark circle { fill: currentColor; }
 .work-state,
-.roster-state { display: inline-flex; align-items: center; gap: var(--space-1); border: 1px solid currentColor; border-radius: var(--radius-pill); padding: var(--space-0-5) var(--space-2); color: var(--color-state-active); }
+.roster-state { display: inline-flex; align-items: center; gap: var(--space-1); border-radius: var(--radius-pill); padding: var(--space-0-5) var(--space-2); background: var(--color-accent-soft); color: var(--color-state-active); }
 .work-state::before,
 .roster-state::before { content: ""; flex: 0 0 6px; width: 6px; height: 6px; border-radius: var(--radius-pill); background: currentColor; }
 .work-row[data-state="waiting"] .work-state,
@@ -210,6 +210,10 @@
 .work-row[data-state="interrupted"] .work-state,
 .work-row[data-state="error"] .work-spark,
 .work-row[data-state="interrupted"] .work-spark { color: var(--color-state-blocked); }
+.work-row[data-state="waiting"] .work-state { background: var(--color-warning-soft); }
+.work-row:is([data-state="idle"], [data-state="stopped"], [data-state="unknown"]) .work-state,
+.roster-state { background: var(--color-neutral-soft); }
+.work-row:is([data-state="error"], [data-state="interrupted"]) .work-state { background: var(--color-danger-soft); }
 .work-stats { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: var(--space-2) var(--space-4); min-width: 0; padding-top: var(--space-2); border-top: 1px dashed var(--color-border); overflow-wrap: anywhere; }
 .work-stats span { max-width: 100%; }
 .works-empty { margin: 0; padding: var(--space-3); color: var(--color-text-muted); }
@@ -257,7 +261,7 @@
 .agents-surface button.roster-assignment { align-self: flex-start; padding: 0; border: 0; background: transparent; color: var(--color-link); text-align: start; }
 .roster-assignments { display: flex; flex-direction: column; gap: var(--space-1); min-width: 0; }
 .roster-assignments .roster-assignment { max-width: 100%; font-size: var(--type-xs); white-space: normal; overflow-wrap: anywhere; }
-.roster-state { max-width: 100%; color: var(--color-state-idle); font-family: var(--font-mono); font-size: var(--type-xs); }
+.roster-state { max-width: 100%; color: var(--color-state-idle); font-family: var(--font-body); font-size: var(--type-xs); }
 .agents-surface .roster-current { border-radius: var(--radius-pill); border-color: currentColor; color: var(--color-state-active); text-align: start; }
 .roster-stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--space-2); }
 .roster-stat { min-width: 0; border: 1px solid var(--color-border); padding: var(--space-2); overflow-wrap: anywhere; }

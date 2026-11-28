@@ -1205,12 +1205,6 @@ button.op-status-strip__cell {
   background: var(--color-state-active);
   display: inline-block;
   margin-right: var(--space-1);
-  animation: op-live-pulse var(--motion-pulse) ease-in-out infinite;
-}
-
-@keyframes op-live-pulse {
-  0%, 100% { opacity: 1; transform: scale(1); }
-  50% { opacity: 0.4; transform: scale(0.85); }
 }
 
 .op-status-strip__cell--running .op-status-strip__value {
@@ -1585,7 +1579,7 @@ button.op-runtime-health-detail__process {
 }
 
 /* ============================================================
-   Living Telemetry — agent pulse rim on active windows
+   Agent state outlines
    ============================================================ */
 
 [data-agent-state] {
@@ -1596,15 +1590,13 @@ button.op-runtime-health-detail__process {
 
 [data-agent-state="running"] {
   --agent-color: var(--current-agent, var(--color-state-active));
-  box-shadow: var(--shadow-glow-active);
-  animation: op-rim-pulse var(--motion-pulse) ease-in-out infinite;
+  box-shadow: 0 0 0 1px var(--agent-color);
 }
 
 [data-agent-state="idle"] {
   /* SPEC-2356 — idle state tints with the agent colour at 50% chroma so
      observers can still identify the agent (claude/codex/hermes/...) even
-     when nothing is happening. The pulse animation is suppressed; only a
-     static rim remains. */
+     when nothing is happening. */
   --agent-color: color-mix(in oklab, var(--current-agent, var(--color-state-idle)) 55%, var(--color-state-idle));
   box-shadow: 0 0 0 1px var(--agent-color);
 }
@@ -1623,20 +1615,12 @@ button.op-runtime-health-detail__process {
 
 [data-agent-state="error"] {
   --agent-color: var(--color-state-blocked);
-  box-shadow: 0 0 0 1px var(--agent-color),
-              0 0 14px 0 color-mix(in oklab, var(--agent-color) 50%, transparent);
-  animation: op-rim-alert calc(var(--motion-pulse) * 0.5) ease-in-out infinite;
+  box-shadow: 0 0 0 1px var(--agent-color);
 }
 
-/* FR-039 (anshin) — waiting is a LOUD your-turn rim: it pulses like
-   error (so the operator notices it) but uses the warm amber state colour
-   instead of error red. Reuses the op-rim-alert keyframe, which is driven
-   by --agent-color, so the glow tracks the needs-input token. */
 [data-agent-state="waiting"] {
   --agent-color: var(--color-state-needs-input);
-  box-shadow: 0 0 0 1px var(--agent-color),
-              0 0 14px 0 color-mix(in oklab, var(--agent-color) 50%, transparent);
-  animation: op-rim-alert calc(var(--motion-pulse) * 0.5) ease-in-out infinite;
+  box-shadow: 0 0 0 1px var(--agent-color);
 }
 
 [data-agent-state="stopped"] {
@@ -1647,34 +1631,6 @@ button.op-runtime-health-detail__process {
 [data-agent-state="interrupted"] {
   --agent-color: var(--color-state-blocked);
   box-shadow: 0 0 0 1px var(--agent-color);
-}
-
-@keyframes op-rim-pulse {
-  0%, 100% { box-shadow: 0 0 0 1px var(--agent-color),
-                          0 0 12px 0 color-mix(in oklab, var(--agent-color) 35%, transparent); }
-  50% { box-shadow: 0 0 0 1px var(--agent-color),
-                     0 0 22px 2px color-mix(in oklab, var(--agent-color) 55%, transparent); }
-}
-
-@keyframes op-rim-alert {
-  0%, 100% { box-shadow: 0 0 0 1px var(--agent-color),
-                          0 0 14px 0 color-mix(in oklab, var(--agent-color) 50%, transparent); }
-  50%      { box-shadow: 0 0 0 2px var(--agent-color),
-                          0 0 22px 1px color-mix(in oklab, var(--agent-color) 70%, transparent); }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  [data-agent-state="running"],
-  [data-agent-state="error"],
-  [data-agent-state="waiting"] {
-    animation: none;
-  }
-  /* SPEC-2356 — Status Strip live dot pulses to signal "system is alive".
-     Motion-sensitive users get a static dot that still indicates online
-     state via colour, just without the scale+opacity pulse. */
-  .op-status-strip__live-dot {
-    animation: none;
-  }
 }
 
 /* ============================================================
@@ -1897,7 +1853,7 @@ kbd.op-kbd {
   flex-direction: column;
   justify-content: center;
   align-items: center;
-  font-family: var(--font-mono);
+  font-family: var(--font-body);
   color: var(--color-text-muted);
   font-size: var(--type-sm);
   /* SPEC-2356 — splash should accept click-to-dismiss (`pointer-events`
@@ -1919,60 +1875,12 @@ kbd.op-kbd {
 }
 
 .op-briefing__title {
-  font-family: var(--font-display);
-  font-weight: 700;
-  letter-spacing: var(--tracking-normal);
-  color: var(--color-display-fg);
-  font-size: var(--type-3xl);
-  margin: 0 0 var(--space-6);
-}
-
-.op-briefing__lines {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: var(--space-1);
-  margin-bottom: var(--space-6);
-}
-
-.op-briefing__line {
-  opacity: 0;
-  animation: op-briefing-line-in var(--motion-slow) var(--motion-curve) forwards;
-}
-
-.op-briefing__line[data-state="ok"]::after {
-  content: " ok";
-  color: var(--color-state-active);
-}
-
-.op-briefing__online {
-  font-family: var(--font-display);
-  font-weight: 700;
-  letter-spacing: var(--tracking-normal);
-  color: var(--color-state-active);
-  font-size: var(--type-md);
-  opacity: 0;
-  animation: op-briefing-online-in var(--motion-slow) ease-out forwards;
-  animation-delay: calc(var(--motion-slow) * 4);
-}
-
-@keyframes op-briefing-line-in {
-  from { opacity: 0; transform: translateY(4px); }
-  to   { opacity: 1; transform: translateY(0); }
-}
-
-@keyframes op-briefing-online-in {
-  from { opacity: 0; }
-  to   { opacity: 1; }
+  margin: 0;
+  font: var(--font-section-heading);
+  color: var(--color-text);
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .op-briefing__line,
-  .op-briefing__online {
-    animation: none;
-    opacity: 1;
-    transform: none;
-  }
   .op-briefing { transition: none; }
 }
 
@@ -1982,8 +1890,6 @@ kbd.op-kbd {
 
 @media (forced-colors: active) {
   body::before, body::after { display: none; }
-  [data-agent-state] { animation: none; }
-  .op-status-strip__live-dot { animation: none; }
   /* SPEC-2017 US-9 — Kanban surface in forced-colors mode. Drop our
      token-derived backgrounds so system colors paint the columns,
      cards, and chips. Borders fall back to ButtonText so the column
@@ -2505,7 +2411,6 @@ kbd.op-kbd {
 .workspace-overview-row[data-status="active"] .workspace-overview-status::before,
 .workspace-overview-row[data-status="running"] .workspace-overview-status::before {
   background: var(--color-state-active);
-  box-shadow: 0 0 6px 0 color-mix(in oklab, var(--color-state-active) 55%, transparent);
 }
 
 .workspace-overview-row[data-status="blocked"] .workspace-overview-status::before {
@@ -3495,53 +3400,6 @@ button.workspace-board-ref:focus-visible {
   color: inherit;
 }
 
-.op-briefing__stamp {
-  font-family: var(--font-mono);
-  font-size: var(--type-xs);
-  letter-spacing: var(--tracking-mono);
-  color: var(--color-text-muted);
-  margin-bottom: var(--space-4);
-}
-
-/* ============================================================
-   Project Bar accent — subtle gradient strip under the bar.
-
-   The accent line sits at the bottom edge of the Project Bar and
-   flows along the agent state token's chroma so that the chrome
-   reads as part of the Mission Control system. The line is
-   render-cheap (1px linear-gradient) and silent under
-   `forced-colors: active`.
-   ============================================================ */
-
-:root[data-theme] .project-bar::after {
-  content: "";
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: -1px;
-  height: 1px;
-  background: linear-gradient(
-    to right,
-    transparent 0%,
-    color-mix(in oklab, var(--color-state-active) 56%, transparent) 18%,
-    color-mix(in oklab, var(--agent-codex) 36%, transparent) 50%,
-    color-mix(in oklab, var(--color-state-active) 56%, transparent) 82%,
-    transparent 100%
-  );
-  pointer-events: none;
-  opacity: 0.55;
-}
-
-@media (forced-colors: active) {
-  :root[data-theme] .project-bar::after {
-    background: none;
-  }
-}
-
-.project-bar {
-  position: relative; /* anchor the ::after accent line */
-}
-
 /* Mission-control blinking colons in the live clock */
 @keyframes op-strip-clock-blink {
   0%, 60% { opacity: 1; }
@@ -3566,61 +3424,6 @@ button.workspace-board-ref:focus-visible {
     animation: none;
   }
 }
-
-/* ============================================================
-   Mission Briefing intro — animated progress bar between lines.
-
-   While the staged reveal lines come in, a subtle progress bar
-   sweeps from 0 → 100% behind the message column, finishing as
-   the OPERATOR ONLINE marker fades in. Visual, no functional
-   meaning; reduced-motion / forced-colors environments hide it.
-   ============================================================ */
-.op-briefing__progress {
-  position: relative;
-  width: min(360px, 64vw);
-  height: 2px;
-  background: color-mix(in oklab, var(--color-text-muted) 16%, transparent);
-  border-radius: var(--radius-pill);
-  overflow: hidden;
-  margin-bottom: var(--space-4);
-}
-
-.op-briefing__progress::after {
-  content: "";
-  position: absolute;
-  top: 0;
-  left: 0;
-  height: 100%;
-  background: linear-gradient(
-    to right,
-    transparent 0%,
-    var(--color-state-active) 35%,
-    var(--agent-codex) 65%,
-    transparent 100%
-  );
-  width: 100%;
-  transform: translateX(-100%);
-  animation: op-briefing-sweep 1.4s ease-out forwards;
-}
-
-@keyframes op-briefing-sweep {
-  from { transform: translateX(-100%); }
-  to   { transform: translateX(0); }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .op-briefing__progress::after {
-    animation: none;
-    transform: translateX(0);
-  }
-}
-
-@media (forced-colors: active) {
-  .op-briefing__progress { display: none; }
-}
-
-/* SPEC-3038: the legacy sidebar row vocabulary is retired — rail items carry
-   icons. */
 
 /* SPEC-2356 — universal focus ring on input/select/textarea elements
    without their own dedicated focus rule. Token-driven, never overrides
@@ -4980,7 +4783,7 @@ button.workspace-board-ref:focus-visible {
 }
 
 :root[data-theme] .workspace-resume-picker-row-tag.is-conversation {
-  background: color-mix(in oklab, var(--color-state-active) 12%, var(--color-surface));
+  background: var(--color-accent-soft);
   color: var(--color-state-active);
 }
 
@@ -5770,7 +5573,7 @@ button.workspace-board-ref:focus-visible {
 .task-decisions__card { padding: var(--space-3); border: 1px solid var(--color-border); border-radius: var(--radius-lg); background: var(--color-surface); }
 .task-decisions__card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-2); }
 .task-decisions__card-head h2 { margin: 0; font-size: var(--type-md); }
-.task-decisions__chip { flex-shrink: 0; color: var(--color-state-needs-input); font-size: var(--type-xs); }
+.task-decisions__chip { flex-shrink: 0; padding: 0 var(--space-2); border-radius: var(--radius-pill); background: var(--color-warning-soft); color: var(--color-state-needs-input); font-size: var(--type-xs); }
 .task-decisions__result { margin: var(--space-1) 0 0; }
 .task-decisions__meta { margin: var(--space-1) 0 0; color: var(--color-text-muted); font-size: var(--type-xs); }
 .task-decisions__impact { margin: var(--space-1) 0 0; }

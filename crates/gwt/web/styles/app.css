@@ -297,9 +297,8 @@ body {
 }
 
 .workspace-window.surface-terminal {
-  /* Terminal chrome follows the app theme; xterm content stays on the
-     Dark Operator palette for terminal readability. */
-  background: var(--color-surface);
+  background: var(--color-canvas-dark);
+  border-color: var(--color-terminal-border);
 }
 
 .workspace-window.surface-agent-kanban,
@@ -327,9 +326,13 @@ body {
 }
 
 .surface-terminal .titlebar {
-  background: var(--color-surface-elevated);
-  color: var(--color-text);
-  border-bottom: 1px solid var(--color-border);
+  background: var(--color-terminal-header);
+  color: var(--color-terminal-header-text);
+  border-bottom: 1px solid var(--color-terminal-border);
+}
+
+:root[data-theme] .surface-terminal .title-text {
+  color: var(--color-terminal-header-text);
 }
 
 .surface-agent-kanban .titlebar,
@@ -539,8 +542,7 @@ body {
    continuous with the mock v3 terminal background. If
    Light theme leaks var(--color-canvas) here, the xterm region picks
    up a pale gray frame around the dark terminal and the window looks
-   double-framed. Chrome (titlebar) still follows the
-   overall theme; this override is scoped to the body only. */
+   double-framed. The titlebar uses a separate shared terminal surface. */
 .surface-terminal .window-body {
   background: var(--color-canvas-dark);
   color: var(--color-terminal-text);
@@ -1555,8 +1557,7 @@ body {
   background: var(--color-text-disabled);
 }
 .board-destination-chip[data-signed-in="false"] .board-destination-dot {
-  background: var(--color-state-needs-input);
-  box-shadow: 0 0 0 3px color-mix(in oklab, var(--color-state-needs-input) 22%, transparent);
+  background: var(--color-warning);
 }
 
 .board-destination-text {
@@ -3565,9 +3566,9 @@ body {
   align-items: center;
   min-height: 18px;
   padding: 2px 6px;
-  border: 1px solid color-mix(in oklab, var(--agent-claude) 52%, var(--color-border));
+  border: 1px solid var(--color-info);
   border-radius: var(--radius-sm);
-  background: color-mix(in oklab, var(--agent-claude) 12%, var(--color-surface));
+  background: var(--color-info-soft);
   color: var(--color-text);
   font-family: var(--font-body);
   font-size: var(--type-2xs);
@@ -7184,7 +7185,6 @@ body.route-body--chat {
 
 .gwt-home__chip {
   padding: 0 var(--space-2);
-  border: 1px solid currentColor;
   border-radius: var(--radius-pill);
   font-size: var(--type-xs);
   font-weight: 700;
@@ -7192,10 +7192,12 @@ body.route-body--chat {
 }
 
 .gwt-home__chip--waiting {
+  background: var(--color-warning-soft);
   color: var(--color-state-needs-input);
 }
 
 .gwt-home__chip--done {
+  background: var(--color-neutral-soft);
   color: var(--color-state-done);
 }
 

@@ -9,6 +9,9 @@
   /* The mock's terminal body stays dark with both application themes. */
   --color-canvas-dark: #14181f;
   --color-terminal-text: #b9c4cf;
+  --color-terminal-header: #1b2027;
+  --color-terminal-header-text: #c8d0da;
+  --color-terminal-border: #2a3038;
 
   /* SPEC #3206 FR-015 — persistent canvas chrome (lower = further back).
      The rail and the drawers that dock to it stay below every shared
@@ -70,6 +73,14 @@
   --color-link: #97ded0;
   --color-link-hover: #b2e9de;
 
+  --color-accent-soft: #25433e;
+  --color-warning: #fbbf24;
+  --color-warning-soft: #473820;
+  --color-danger-soft: #482628;
+  --color-info: #9ab9ff;
+  --color-info-soft: #293b58;
+  --color-neutral-soft: #2d3139;
+
   --color-state-active: #76cbbc;
   --color-state-idle: #929cab;
   --color-state-blocked: #f87171;
@@ -89,7 +100,6 @@
   /* Shadow */
   --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.22);
   --shadow-2: 0 10px 30px rgba(0, 0, 0, 0.36), 0 2px 6px rgba(0, 0, 0, 0.22);
-  --shadow-glow-active: 0 0 0 1px var(--agent-color, var(--color-state-active));
 
   /* Layout primitives */
   --space-0-5: 2px;
@@ -148,6 +158,14 @@
   --color-link: #0b5a53;
   --color-link-hover: #0f766e;
 
+  --color-accent-soft: #e2f1ee;
+  --color-warning: #b45309;
+  --color-warning-soft: #fbf0dd;
+  --color-danger-soft: #fbe9e7;
+  --color-info: #2563eb;
+  --color-info-soft: #e5ecfd;
+  --color-neutral-soft: #eceef1;
+
   --color-state-active: #0f766e;
   --color-state-idle: #4b5563;
   --color-state-blocked: #b3261e;
@@ -167,7 +185,6 @@
   /* Shadow */
   --shadow-1: 0 1px 2px rgba(20, 26, 38, 0.05);
   --shadow-2: 0 10px 30px rgba(20, 26, 38, 0.10), 0 2px 6px rgba(20, 26, 38, 0.06);
-  --shadow-glow-active: 0 0 0 1px var(--agent-color, var(--color-state-active));
 
   /* Layout primitives — match dark for parity */
   --space-0-5: 2px;
@@ -237,6 +254,13 @@
     --color-link: LinkText;
     --color-link-hover: LinkText;
 
+    --color-accent-soft: Canvas;
+    --color-warning: Highlight;
+    --color-warning-soft: Canvas;
+    --color-danger-soft: Canvas;
+    --color-info: LinkText;
+    --color-info-soft: Canvas;
+    --color-neutral-soft: Canvas;
     --color-state-active: Highlight;
     --color-state-idle: GrayText;
     --color-state-blocked: Mark;
@@ -255,7 +279,6 @@
 
     --shadow-1: none;
     --shadow-2: none;
-    --shadow-glow-active: 0 0 0 2px Highlight;
   }
 }
 

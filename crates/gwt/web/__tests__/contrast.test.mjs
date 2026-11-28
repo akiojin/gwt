@@ -29,6 +29,11 @@ const REQUIRED_PAIRS = [
   ["--color-display-fg", "--color-surface-elevated", LARGE_AA, "display text on surface-elevated (drawer / palette / hotkey card titles)"],
   ["--color-status-strip-fg", "--color-status-strip-bg", NORMAL_AA, "status strip text"],
   ["--color-button-fg", "--color-button-bg", NORMAL_AA, "primary button label"],
+  ["--color-state-active", "--color-accent-soft", NORMAL_AA, "active badge label"],
+  ["--color-state-needs-input", "--color-warning-soft", NORMAL_AA, "waiting badge label"],
+  ["--color-state-blocked", "--color-danger-soft", NORMAL_AA, "blocked badge label"],
+  ["--color-state-idle", "--color-neutral-soft", NORMAL_AA, "idle badge label"],
+  ["--color-text", "--color-info-soft", NORMAL_AA, "information badge label"],
   ["--color-button-fg", "--color-button-bg-hover", NORMAL_AA, "primary button label on hover"],
   ["--color-link", "--color-canvas", NORMAL_AA, "link on canvas"],
   ["--color-link", "--color-surface", NORMAL_AA, "link on surface"],
@@ -123,6 +128,7 @@ for (const themeName of ["dark", "light"]) {
 test("v3 chrome uses a plain canvas and the shared state palette", () => {
   const css = readFileSync(resolve(here, "../styles/components.css"), "utf8");
   assert.doesNotMatch(css, /--bg-(?:scan-grid|grain|depth-glow)/);
+  assert.doesNotMatch(css, /op-rim-(?:pulse|alert)|op-briefing-sweep|\.project-bar::after/);
   const stripBlock = css.match(/\.op-status-strip\s*\{([\s\S]*?)\n\}/);
   assert.ok(stripBlock, "expected .op-status-strip block");
   assert.doesNotMatch(stripBlock[1], /--color-state-[\w-]+:/);
@@ -143,6 +149,8 @@ test("light v3 tokens preserve the reference palette", () => {
     bg: "canvas", panel: "surface", panel2: "surface-elevated", ink: "text",
     ink2: "text-muted", line: "border", line2: "border-strong",
     accent: "focus-ring", "accent-ink": "link",
+    "accent-soft": "accent-soft", amber: "warning", "amber-soft": "warning-soft",
+    "red-soft": "danger-soft", blue: "info", "blue-soft": "info-soft", "gray-soft": "neutral-soft",
   };
   for (const [reference, token] of Object.entries(pairs)) {
     assert.equal(light[`--color-${token}`], mock.match(new RegExp(`--${reference}:(#[0-9a-f]+);`))?.[1], reference);

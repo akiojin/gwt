@@ -167,6 +167,9 @@ test.describe('T-036 v3 regression (isolated checkout)', () => {
       await expect(page.locator('[data-home-waitjump]')).toHaveText('2 decisions waiting');
       await expect(page.locator('article[data-home-topic]').filter({ hasText: QUESTIONS[2] })).toHaveCount(1);
 
+      const waitingBadge = page.locator('.gwt-home__chip--waiting').first();
+      const waitingFill = theme === 'light' ? 'rgb(251, 240, 221)' : 'rgb(71, 56, 32)';
+      await expect(waitingBadge).toHaveCSS('background-color', waitingFill);
       await compare(page, 'home', 'start');
 
       // Answering one from Home resolves it everywhere.

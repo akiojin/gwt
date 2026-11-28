@@ -1252,12 +1252,10 @@ test("head loads tokens, typography, components, and Operator modules", () => {
   );
 });
 
-test("body markup wires Mission Briefing reveal lines (US-1 AS-1)", () => {
-  const lines = document.querySelectorAll(".op-briefing__line");
-  assert.ok(lines.length >= 4, `expected >=4 briefing lines, got ${lines.length}`);
-  const online = document.querySelector(".op-briefing__online");
-  assert.ok(online, "expected OPERATOR ONLINE marker");
-  assert.match(online.textContent, /OPERATOR ONLINE/);
+test("startup uses a single plain status message", () => {
+  const briefing = document.getElementById("op-briefing");
+  assert.equal(briefing.textContent.trim(), "Starting gwt…");
+  assert.doesNotMatch(briefing.innerHTML, /animation-delay|op-briefing__progress/);
 });
 
 test("head suppresses the browser's implicit favicon request", () => {
@@ -1649,7 +1647,7 @@ test("xterm content uses the shared dark terminal palette across app theme chang
   assert.doesNotMatch(
     appSource,
     /XTERM_THEME_LIGHT/,
-    "xterm content must not define a light palette; only the terminal chrome follows app theme",
+    "xterm content uses the shared dark terminal palette in both themes",
   );
   assert.doesNotMatch(
     appSource,
