@@ -835,7 +835,7 @@ fn home_dir_from_env() -> Option<PathBuf> {
 }
 
 fn non_empty_env_path(key: &str) -> Option<PathBuf> {
-    std::env::var_os(key)
+    crate::env::var_os(key)
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
 }

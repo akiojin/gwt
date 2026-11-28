@@ -117,8 +117,8 @@ fn load_from(path: &Path) -> io::Result<Vec<UserHook>> {
 }
 
 fn home_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
+    gwt_core::env::var_os("HOME")
+        .or_else(|| gwt_core::env::var_os("USERPROFILE"))
         .filter(|home| !home.is_empty())
         .map(PathBuf::from)
 }

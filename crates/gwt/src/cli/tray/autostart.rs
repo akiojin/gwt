@@ -334,9 +334,9 @@ fn home_dir() -> Option<PathBuf> {
     // logic by reading the same env vars. Falling back through env keeps
     // this dependency-light.
     if cfg!(target_os = "windows") {
-        std::env::var_os("USERPROFILE").map(PathBuf::from)
+        gwt_core::env::var_os("USERPROFILE").map(PathBuf::from)
     } else {
-        std::env::var_os("HOME").map(PathBuf::from)
+        gwt_core::env::var_os("HOME").map(PathBuf::from)
     }
 }
 

@@ -52,7 +52,7 @@ pub struct IssueCache {
 impl IssueCache {
     /// Create a cache instance using the default directory (`~/.gwt/cache/issues/`).
     pub fn new() -> Result<Self> {
-        let home = dirs::home_dir()
+        let home = gwt_core::paths::home_dir()
             .ok_or_else(|| GwtError::Other("Cannot determine home directory".into()))?;
         let cache_dir = home.join(".gwt").join("cache").join("issues");
         fs::create_dir_all(&cache_dir).map_err(|e| GwtError::Other(e.to_string()))?;

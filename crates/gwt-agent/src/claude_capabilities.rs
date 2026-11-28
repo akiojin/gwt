@@ -194,9 +194,9 @@ fn env_truthy(value: Option<&str>) -> bool {
 }
 
 fn home_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME")
+    gwt_core::env::var_os("HOME")
         .filter(|value| !value.is_empty())
-        .or_else(|| std::env::var_os("USERPROFILE").filter(|value| !value.is_empty()))
+        .or_else(|| gwt_core::env::var_os("USERPROFILE").filter(|value| !value.is_empty()))
         .map(PathBuf::from)
 }
 

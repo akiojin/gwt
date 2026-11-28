@@ -526,7 +526,7 @@ fn copilot_executable(
         {
             return None;
         }
-        std::env::var_os(key).filter(|value| !value.is_empty())
+        gwt_core::env::var_os(key).filter(|value| !value.is_empty())
     };
     if let Some(path) = value("PATH") {
         for directory in std::env::split_paths(&path) {

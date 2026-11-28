@@ -744,7 +744,7 @@ fn run_daemon_hook_inner<E: CliEnv>(
                     crate::managed_assets::process_stable_codex_config_path_for_worktree_with(
                         &project_root,
                         std::env::var_os("CODEX_HOME").as_deref(),
-                        dirs::home_dir().as_deref(),
+                        gwt_core::paths::home_dir().as_deref(),
                     );
                 if let Some(explicit_config) = explicit_config {
                     if !explicit_config.is_absolute() {

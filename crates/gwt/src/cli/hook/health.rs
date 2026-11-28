@@ -161,7 +161,7 @@ pub fn read_hook_configuration_audit(input: &ManagedHookHealthInput) -> HookConf
             .into_iter()
             .map(|path| observe_hook_config("codex", path)),
     );
-    let nonempty_env = |name| std::env::var_os(name).filter(|value| !value.is_empty());
+    let nonempty_env = |name| gwt_core::env::var_os(name).filter(|value| !value.is_empty());
     HookConfigurationAudit {
         asset_root,
         gwt_bin_path: nonempty_env("GWT_BIN_PATH")

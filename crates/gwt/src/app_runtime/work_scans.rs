@@ -164,7 +164,7 @@ impl ExternalGitInputs {
         if !global_locations_known {
             return None;
         }
-        let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
+        let home = gwt_core::env::var_os("HOME").or_else(|| gwt_core::env::var_os("USERPROFILE"));
         if let Some(config_home) = std::env::var_os("XDG_CONFIG_HOME")
             .filter(|path| !path.is_empty())
             .map(PathBuf::from)

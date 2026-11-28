@@ -830,6 +830,99 @@ fn smuggles_the_marker() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// SPEC #4072 AC-3: production reads the user home only through the seam, so
+// a test's thread-local ScopedGwtHome pin is what every reader observes.
+// ---------------------------------------------------------------------------
+
+/// The seam itself: the one place allowed to consult the process env.
+const HOME_SEAM: &str = "crates/gwt-config/src/home.rs";
+
+#[test]
+fn production_code_reads_the_user_home_only_through_the_seam() {
+    let root = workspace_root();
+    let direct_reads: Vec<String> = target_sources(&root)
+        .into_iter()
+        .filter(|source| {
+            source.kind == SourceKind::CfgTestBlocksOnly && source.relative_path != HOME_SEAM
+        })
+        .flat_map(|source| {
+            let text = fs::read_to_string(root.join(&source.relative_path))
+                .unwrap_or_else(|error| panic!("read {}: {error}", source.relative_path));
+            hygiene::production_home_reads(&text)
+                .into_iter()
+                .map(move |(line, snippet)| format!("{}:{line}: {snippet}", source.relative_path))
+        })
+        .collect();
+    assert!(
+        direct_reads.is_empty(),
+        "production code reads the user home past the seam, so a test's \
+         ScopedGwtHome pin is invisible to it (SPEC #4072 AC-3). Read \
+         `gwt_core::env::var_os(\"HOME\")` or call `gwt_core::paths::home_dir()` \
+         instead of std::env / dirs::home_dir. A read of the process env itself \
+         declares `// home-seam: allow <reason>`:\n{}",
+        direct_reads.join("\n")
+    );
+}
+
+#[test]
+fn production_home_reads_skip_tests_comments_and_the_seam_readers() {
+    let reads = hygiene::production_home_reads(
+        r#"
+pub fn direct() -> Option<PathBuf> {
+    std::env::var_os("HOME").or_else(|| env::var_os("USERPROFILE")).map(PathBuf::from)
+}
+pub fn fallback() -> Option<PathBuf> { dirs::home_dir() }
+pub fn through_the_seam() -> Option<PathBuf> {
+    // dirs::home_dir() and std::env::var("HOME") are only mentioned here.
+    gwt_core::env::var_os("HOME").map(PathBuf::from).or_else(gwt_core::paths::home_dir)
+}
+#[cfg(test)]
+mod tests {
+    fn reads_the_real_home() { let _ = dirs::home_dir(); }
+}
+"#,
+    );
+    let lines: Vec<usize> = reads.iter().map(|(line, _)| *line).collect();
+    assert_eq!(lines, vec![3, 5], "unexpected reads: {reads:?}");
+
+    // A helper that forwards its key to std::env hides the literal from the
+    // direct pattern, so a file that names HOME reports its dynamic reads too.
+    let indirect = hygiene::production_home_reads(
+        r#"
+fn home() -> Option<PathBuf> { env_path("HOME") }
+fn env_path(key: &str) -> Option<PathBuf> {
+    std::env::var_os(key).map(PathBuf::from)
+}
+fn through_the_seam(key: &str) -> Option<OsString> { gwt_core::env::var_os(key) }
+"#,
+    );
+    let lines: Vec<usize> = indirect.iter().map(|(line, _)| *line).collect();
+    assert_eq!(lines, vec![4], "unexpected reads: {indirect:?}");
+    let declared = hygiene::production_home_reads(
+        r#"
+const KEY: &str = "HOME";
+fn save(key: &str) -> Option<OsString> {
+    // home-seam: allow this guard restores the process env itself
+    std::env::var_os(key)
+}
+fn bare(key: &str) -> Option<OsString> {
+    // home-seam: allow
+    std::env::var_os(key)
+}
+"#,
+    );
+    let lines: Vec<usize> = declared.iter().map(|(line, _)| *line).collect();
+    assert_eq!(lines, vec![9], "a marker needs a reason: {declared:?}");
+    let unrelated = hygiene::production_home_reads(
+        "fn dir(key: &str) -> Option<OsString> { std::env::var_os(key) }\n",
+    );
+    assert!(
+        unrelated.is_empty(),
+        "a file that never names HOME is not a home reader: {unrelated:?}"
+    );
+}
+
 #[test]
 fn only_cfg_test_blocks_are_scanned_in_crate_sources() {
     let text = r#"
@@ -2267,6 +2360,75 @@ mod hygiene {
         RE.get_or_init(|| {
             Regex::new(
                 r"\b(?:env\s*::\s*(?:set_var|remove_var)|ScopedEnvVar\s*::\s*(?:set|unset))\s*\(",
+            )
+            .expect("valid regex")
+        })
+    }
+
+    /// Lines (1-based) of production code, outside `#[cfg(test)]` blocks and
+    /// comments, that read HOME / USERPROFILE from `std::env` or call
+    /// `dirs::home_dir()` directly (SPEC #4072 AC-3). One finding per line.
+    ///
+    /// A helper that forwards its key (`fn env_path(key) { std::env::var_os(key) }`)
+    /// hides the literal, so in a file whose production code names HOME or
+    /// USERPROFILE every dynamic-key `std::env` read is reported as well.
+    pub fn production_home_reads(text: &str) -> Vec<(usize, String)> {
+        let raw: Vec<&str> = text.lines().collect();
+        let lexical = lex_source(&raw);
+        let code: Vec<_> = lexical.iter().map(|(line, _)| line.clone()).collect();
+        let depths = brace_depths(&code);
+        let tests = scannable_lines(&code, &depths, SourceKind::CfgTestBlocksOnly);
+        let production: Vec<(usize, &str)> = raw
+            .iter()
+            .zip(&lexical)
+            .enumerate()
+            .filter(|(index, _)| !tests[*index])
+            .map(|(index, (line, (_, comment)))| (index, &line[..comment.unwrap_or(line.len())]))
+            .collect();
+        let names_home = production
+            .iter()
+            .any(|(_, line)| line.contains("\"HOME\"") || line.contains("\"USERPROFILE\""));
+        production
+            .into_iter()
+            .filter(|(_, line)| {
+                direct_home_read_regex().is_match(line)
+                    || (names_home && dynamic_env_read_regex().is_match(line))
+            })
+            .filter(|(index, _)| !home_seam_allowed(&raw, *index))
+            .map(|(index, _)| (index + 1, raw[index].trim().to_string()))
+            .collect()
+    }
+
+    /// A read whose subject is the process env itself (a guard restoring it)
+    /// is declared on the line or the line above, with a reason.
+    fn home_seam_allowed(raw: &[&str], index: usize) -> bool {
+        const MARKER: &str = "// home-seam: allow";
+        [Some(index), index.checked_sub(1)]
+            .into_iter()
+            .flatten()
+            .any(|line| {
+                raw[line]
+                    .split_once(MARKER)
+                    .is_some_and(|(_, reason)| reason.starts_with(' ') && !reason.trim().is_empty())
+            })
+    }
+
+    fn dynamic_env_read_regex() -> &'static Regex {
+        static RE: OnceLock<Regex> = OnceLock::new();
+        RE.get_or_init(|| {
+            Regex::new(
+                r"(?:\bstd::|(?:^|[^:\w]))env::var(?:_os)?\s*\(\s*[&*]*[a-z_][a-z0-9_]*\s*\)",
+            )
+            .expect("valid regex")
+        })
+    }
+
+    fn direct_home_read_regex() -> &'static Regex {
+        static RE: OnceLock<Regex> = OnceLock::new();
+        RE.get_or_init(|| {
+            // `env::` qualified by another crate (gwt_core::env) is the seam.
+            Regex::new(
+                r#"(?:\bstd::|(?:^|[^:\w]))env::var(?:_os)?\s*\(\s*"(?:HOME|USERPROFILE)"|\bdirs::home_dir\s*\("#,
             )
             .expect("valid regex")
         })
