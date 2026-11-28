@@ -1609,7 +1609,8 @@ mod tests {
                             program,
                             &["-c", "exit 0"],
                             SpawnOptions::new("readiness retry").forward_output(false),
-                            Instant::now() + QUICK_PROCESS_FIXTURE_BUDGET,
+                            // The readiness hook starts the budget after a child spawns.
+                            Instant::now(),
                         )
                     };
                     let error = spawn(directory.path().join("missing").as_os_str()).unwrap_err();
@@ -2326,7 +2327,7 @@ mod tests {
             "sh",
             &args,
             SpawnOptions::new("test expired deadline"),
-            std::time::Instant::now() - Duration::from_millis(1),
+            Instant::now(),
         )
         .await
         .expect_err("expired deadline must fail before spawn");

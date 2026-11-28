@@ -13664,8 +13664,21 @@ impl AppRuntime {
     /// elevation checks. Hydrate it as ready on every connection, including
     /// a fresh process whose release poll is suppressed by that manifest.
     fn staged_update_sync_events(&mut self, client_id: &str) -> Vec<OutboundEvent> {
+        let current_exe = std::env::current_exe().ok();
+        self.staged_update_sync_events_for_exe(client_id, current_exe.as_deref())
+    }
+
+    /// Issue #3807 (AC-1): `current_exe` locates the installed bundle whose
+    /// version decides whether the staged release is still an update.
+    fn staged_update_sync_events_for_exe(
+        &mut self,
+        client_id: &str,
+        current_exe: Option<&std::path::Path>,
+    ) -> Vec<OutboundEvent> {
+        let current_version =
+            gwt_core::update::effective_current_version_for(env!("CARGO_PKG_VERSION"), current_exe);
         let Some(manifest) = gwt_core::update::load_pending_update_manifest().filter(|manifest| {
-            gwt_core::update::pending_version_is_newer(&manifest.version, env!("CARGO_PKG_VERSION"))
+            gwt_core::update::pending_version_is_newer(&manifest.version, &current_version)
                 && !matches!(&self.pending_update,
                     Some(gwt_core::update::UpdateState::Available { latest, .. })
                         if gwt_core::update::pending_version_is_newer(latest, &manifest.version))
@@ -13673,7 +13686,7 @@ impl AppRuntime {
             return Vec::new();
         };
         let state = gwt_core::update::UpdateState::Available {
-            current: env!("CARGO_PKG_VERSION").into(),
+            current: current_version,
             latest: manifest.version.clone(),
             release_url: manifest.asset_url.clone(),
             asset_url: Some(manifest.asset_url.clone()),
@@ -13690,8 +13703,8 @@ impl AppRuntime {
             ),
         ];
         if manifest.origin == gwt_core::update::PendingUpdateOrigin::Automatic
-            && std::env::current_exe().map_or(true, |exe| {
-                gwt_core::update::prepared_payload_requires_elevation(&manifest.payload, &exe)
+            && current_exe.is_none_or(|exe| {
+                gwt_core::update::prepared_payload_requires_elevation(&manifest.payload, exe)
             })
         {
             events.push(OutboundEvent::reply(

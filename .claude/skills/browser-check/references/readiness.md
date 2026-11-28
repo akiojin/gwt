@@ -104,3 +104,22 @@
 
    - Manual inspection does not need the keeper; the user's browser holds
      the session. Requires Node 22 or later for the global `WebSocket`.
+
+3. For real Shell checks, use a linked Git worktree as the Project fixture.
+   Open it through the Hub, then keep its `/p/<project_key>` view connected.
+   A standalone `git init` fixture has a `.git/` directory and enters gwt's
+   migration flow, which delays the long-lived project owner connection.
+   Before sending Shell input or resize, require a Healthy
+   `project_owner_health` event on the Project scope. Treat
+   `migration_detected` or a readiness timeout as a setup error and report
+   that GUI presence could not be confirmed.
+
+   With `GWT_PLAYWRIGHT_BASE_URL` and `GWT_PLAYWRIGHT_CHECK_HOME` pointing to
+   the isolated instance, run this check in headed Chromium. It creates its
+   own linked worktree and verifies the same owner and real Shell PTY after
+   the 15-second attach grace.
+
+   ```bash
+   bash scripts/run-visual-tests.sh terminal-grid-responsiveness-live.spec.ts \
+     --grep 'Issue #8043' --workers=1 --headed
+   ```

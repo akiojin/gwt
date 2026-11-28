@@ -227,19 +227,17 @@ for (const width of [1440, 390]) {
     await writeFile(metrics, JSON.stringify({ theme, width, history: history.length, initialMs, samples }, null, 2));
     await info.attach("PM history metrics", { path: metrics, contentType: "application/json" });
 
-    for (let attempt = 0; attempt < 4 && (await entry(2999).count()) === 0; attempt++) {
-      const last = await messages.last().textContent();
-      await log.evaluate(async node => {
-        // Landing at the bottom after an anchor adjustment can make a direct
-        // scroll to the same offset a no-op. Cross the paging threshold anew.
+    for (const nextLast of [2949, 2999]) {
+      if (await entry(nextLast).count()) continue;
+      await log.evaluate(node => new Promise<void>(resolve => {
         const bottom = node.scrollHeight - node.clientHeight;
-        if (bottom - node.scrollTop <= 16) {
-          node.scrollTop = bottom - 64;
-          await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
-        }
-        node.scrollTop = node.scrollHeight;
-      });
-      await expect(messages.last()).not.toHaveText(last!);
+        // The anchor can have moved scrollTop since the last delivered event.
+        // Observe an off-bottom scroll before asking Chromium to report bottom again.
+        node.addEventListener("scroll", () => resolve(), { once: true });
+        node.scrollTop = bottom - (node.scrollTop === bottom - 64 ? 96 : 64);
+      }));
+      await log.evaluate(node => { node.scrollTop = node.scrollHeight; });
+      await expect(messages.last()).toHaveText(history[nextLast].text);
     }
     await log.evaluate(node => { node.scrollTop = node.scrollHeight; });
     await expect(entry(2999)).toBeInViewport();
