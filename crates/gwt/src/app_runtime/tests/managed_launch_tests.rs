@@ -4994,8 +4994,11 @@ fn provider_usage_limit_keeps_the_pane_out_of_the_done_state() {
     };
     use tracing_subscriber::layer::SubscriberExt as _;
 
-    // Park the real reader outside the Pane mutex, before it can read the
-    // final refusal. Arm only after READY so ConPTY startup queries proceed.
+    // ConPTY handles cursor queries internally. On macOS the child may stay
+    // in "trying to exit" until the PTY reader drains its final output.
+    let park_reader = !cfg!(any(windows, target_os = "macos"));
+
+    // Park the reader outside the Pane mutex before it can read the refusal.
     struct ReaderGate {
         armed: Arc<AtomicBool>,
         entered: mpsc::Sender<()>,
@@ -5047,6 +5050,20 @@ fn provider_usage_limit_keeps_the_pane_out_of_the_done_state() {
     } else {
         "quota-codex"
     });
+    let cursor_gate = if park_reader {
+        "printf '\\033[6n'; read finish; "
+    } else {
+        ""
+    };
+    let posix_runner = format!(
+        concat!(
+            "#!/bin/sh\n",
+            "case \"$*\" in *--version*) printf '1.2.3\\n'; exit 0;; *'features list'*) exit 0;; esac\n",
+            "stty -echo; printf 'GWT_MANAGED_EXIT_READY\\n'; read ready; ",
+            "{}printf '%s\\n' \"$GWT_EXIT_FIXTURE_OUTPUT\"; exit 0\n",
+        ),
+        cursor_gate,
+    );
     write_executable_test_file(
         &runner,
         if cfg!(windows) {
@@ -5063,7 +5080,7 @@ fn provider_usage_limit_keeps_the_pane_out_of_the_done_state() {
             "powershell -NoProfile -Command \"[Console]::WriteLine('GWT_MANAGED_EXIT_READY'); $null = [Console]::ReadLine(); [Console]::WriteLine($env:GWT_EXIT_FIXTURE_OUTPUT); exit 0\"\r\n",
         )
         } else {
-            "#!/bin/sh\ncase \"$*\" in *--version*) printf '1.2.3\\n'; exit 0;; *'features list'*) exit 0;; esac\nstty -echo; printf 'GWT_MANAGED_EXIT_READY\\n'; read ready; printf '\\033[6n'; read finish; printf '%s\\n' \"$GWT_EXIT_FIXTURE_OUTPUT\"; exit 0\n"
+            &posix_runner
         },
     );
     let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
@@ -5124,16 +5141,14 @@ fn provider_usage_limit_keeps_the_pane_out_of_the_done_state() {
     ))
     .unwrap();
     let mut observed = owner.subscribe();
-    if cfg!(windows) {
-        // ConPTY consumes a Console-written cursor query internally. Keep
-        // the original native Windows acceptance; POSIX controls the race.
+    if !park_reader {
         let _ = finish_managed_exit(&owner, &probe, &mut runtime, &mut observed);
     } else {
         armed.store(true, Ordering::Release);
         let input = || gwt::project_runtime::events::OwnerCommand::Input {
             id: probe.id.clone(),
             incarnation: probe.incarnation,
-            data: if cfg!(windows) { b"exit\r" } else { b"exit\n" }.to_vec(),
+            data: b"exit\n".to_vec(),
         };
         owner_fixture_block_on(owner.command(input())).unwrap();
         query
