@@ -885,10 +885,9 @@ body {
   border-radius: var(--radius-md);
   background: transparent;
   color: var(--color-text);
-  font-family: var(--font-mono);
-  font-size: var(--type-xs);
-  font-weight: 600;
-  letter-spacing: var(--tracking-mono);
+  font-family: var(--font-body);
+  font-size: var(--type-caption);
+  font-weight: 700;
   text-transform: none;
   white-space: nowrap;
   cursor: pointer;
@@ -5995,7 +5994,15 @@ button.workspace-board-ref:focus-visible {
 .exec-env button:disabled { color: var(--color-text-muted); border-color: var(--color-border); cursor: not-allowed; }
 .exec-env button:disabled:hover { background: var(--color-surface); }
 .exec-env button.exec-env__danger:not(:disabled) { color: var(--color-state-blocked); }
-.exec-env button.exec-env__primary:not(:disabled) { border-color: var(--color-link); color: var(--color-link); }
+.exec-env button.exec-env__primary:not(:disabled) {
+  background: var(--color-button-bg);
+  border-color: var(--color-button-bg);
+  color: var(--color-button-fg);
+}
+.exec-env button.exec-env__primary:not(:disabled):hover {
+  background: var(--color-button-bg-hover);
+  border-color: var(--color-button-bg-hover);
+}
 .exec-env__reason { margin: var(--space-1) 0 0; color: var(--color-text-muted); font-size: var(--type-xs); }
 .exec-env__error { margin: var(--space-2) 0 0; color: var(--color-state-blocked); }
 .exec-env__status { min-height: var(--space-4); margin: 0; color: var(--color-text-muted); font-size: var(--type-xs); }

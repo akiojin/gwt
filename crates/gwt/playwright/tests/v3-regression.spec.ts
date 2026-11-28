@@ -118,11 +118,11 @@ test.describe('T-036 v3 regression (isolated checkout)', () => {
       ])).toEqual(['none', 'none']);
       const [reference, actual] = await Promise.all([mock, product].map(view => view.screenshot({ animations: 'disabled' })));
       const image = (buffer: Buffer, label: string) =>
-        `<figure style="margin:0"><figcaption>${label}</figcaption><img style="width:100%" src="data:image/png;base64,${buffer.toString('base64')}" alt=""></figure>`;
-      await comparison.setContent(`<main style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font:16px system-ui">
+        `<figure style="margin:0"><figcaption>${label}</figcaption><img style="display:block;width:100%" src="data:image/png;base64,${buffer.toString('base64')}" alt=""></figure>`;
+      await comparison.setContent(`<main style="display:grid;grid-template-columns:1fr 1fr;gap:8px;padding:8px;background:white;color:black;font:16px system-ui">
         ${image(reference, 'Mock v3 · Light')}${image(actual, `Product · ${theme}`)}</main>`);
       const path = info.outputPath(`${name}-${theme}-comparison.png`);
-      await comparison.screenshot({ path });
+      await comparison.locator('main').screenshot({ path });
       await info.attach(`${name}-${theme}-comparison`, { path, contentType: 'image/png' });
     };
     const openProject = () => gotoLiveGwt(page, target.url, { enableTestBridge: true, projectKey });

@@ -6471,10 +6471,10 @@ body.route-body {
   width: min(640px, calc(100vw - 2 * var(--space-6)));
   margin: var(--space-12) auto;
   padding: var(--space-6);
-  border: 1px solid var(--color-border-strong);
+  border: 1px solid var(--color-border);
   border-radius: var(--radius-lg);
-  background: var(--color-surface-elevated);
-  box-shadow: var(--shadow-2);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-1);
 }
 
 .gwt-hub__header {
@@ -6520,10 +6520,9 @@ body.route-body {
 .gwt-hub__section-title {
   margin: 0 0 var(--space-2);
   color: var(--color-text-muted);
-  font-family: var(--font-mono);
-  font-size: var(--type-xs);
-  letter-spacing: var(--tracking-mono);
-  text-transform: uppercase;
+  font-family: var(--font-body);
+  font-size: var(--type-caption);
+  font-weight: 700;
 }
 
 .gwt-hub__list {
