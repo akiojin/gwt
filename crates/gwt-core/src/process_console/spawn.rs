@@ -2409,8 +2409,8 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[tokio::test]
-    async fn deadline_covers_descendant_held_output_pipe_without_reader_task_leak() {
+    #[test]
+    fn deadline_covers_descendant_held_output_pipe_without_reader_task_leak() {
         let directory = tempfile::tempdir().expect("tempdir");
         let descendant_file = directory.path().join("descendant.pid");
         let args = vec![
@@ -2420,23 +2420,41 @@ mod tests {
             descendant_file.to_string_lossy().into_owned(),
         ];
         let hub = ProcessConsoleHub::new();
-        let started = std::time::Instant::now();
-        let error = spawn_logged_with_deadline(
-            &hub,
-            ProcessKind::Gh,
-            "sh",
-            &args,
-            SpawnOptions::new("test descendant pipe"),
-            started + Duration::from_millis(500),
+        let ready_descendant = descendant_file.clone();
+        // A current-thread runtime polls on this thread, so the readiness hook
+        // starts the budget once the pipe-holding descendant is recorded and
+        // alive, not at a fixed offset from test start that a slow `sh`
+        // startup could outrun (#4740). The descendant sleeps far past the
+        // budget, so only the deadline can end the wait for pipe EOF.
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let error = with_spawn_ready_for_tests(
+            Duration::from_secs(2),
+            move || {
+                let pid = wait_for_pid_file(&ready_descendant);
+                // SAFETY: signal 0 only probes the pid; nothing is delivered.
+                let alive = unsafe { libc::kill(pid as libc::pid_t, 0) } == 0;
+                assert!(alive, "pipe-holding descendant {pid} must be alive");
+            },
+            || {
+                runtime.block_on(spawn_logged_with_deadline(
+                    &hub,
+                    ProcessKind::Gh,
+                    "sh",
+                    &args,
+                    SpawnOptions::new("test descendant pipe"),
+                    Instant::now(),
+                ))
+            },
         )
-        .await
         .expect_err("descendant-held pipe must share the deadline");
         assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
         assert!(!deadline_evidence(&error).interrupted_child_reaped());
-        assert!(started.elapsed() < Duration::from_secs(3));
         wait_for_process_exit(read_pid(&descendant_file));
         let line_count = hub.snapshot_kind(ProcessKind::Gh).len();
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        runtime.block_on(async { tokio::time::sleep(Duration::from_millis(100)).await });
         assert_eq!(hub.snapshot_kind(ProcessKind::Gh).len(), line_count);
     }
 
