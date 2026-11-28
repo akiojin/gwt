@@ -2203,6 +2203,8 @@ mod tests {
             ("sleep", vec!["30"])
         };
         let _delay = PostReapDelayGuard::set(Duration::from_secs(2));
+        // The readiness hook replaces the caller deadline with a 1s budget
+        // started after spawn, so the passed instant is never consulted.
         let error = with_spawn_ready_for_tests(
             Duration::from_secs(1),
             || {},
@@ -2213,7 +2215,7 @@ mod tests {
                     program,
                     &args,
                     SpawnOptions::new("deadline cleanup incomplete"),
-                    Instant::now() + crate::deadline_budget::HANG_GUARD,
+                    Instant::now(),
                 )
             },
         )
