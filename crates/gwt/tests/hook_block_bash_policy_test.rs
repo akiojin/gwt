@@ -73,7 +73,7 @@ fn expected_existing_hook_output(
                 format!(
                     "GitHub reads may use direct `gh` commands. Route GitHub writes through gwt JSON-envelope operations so workflow gates and audit state see them.\n\n\
 Recommended alternatives:\n\
-- Permission stage: instruction_or_approval for bounded PM operations. Pass a scoped instruction_id or approval_id to the canonical operation; obtain native approval with pm.approval.request. An id never permits a raw API write or bypasses CI/ownership/reviewer gates. Irreversible third-party destruction, secret exfiltration and unsupported destructive deletion remain unavailable.\n\
+- Permission stage: autonomous for bounded PM operations. Call the canonical operation directly without an approval stop; each run is audited, shown in Reports and, for lasting changes, left as a keep-or-undo Decide card. It never permits a raw API write or bypasses CI/ownership/reviewer gates. Irreversible third-party destruction, secret exfiltration and unsupported destructive deletion remain unavailable.\n\
 - Discussions/Board: JSON operations `discussion.create`, `board.config.set`\n\
 - Required checks: JSON operation `repository.required_checks.update` (develop/main contexts only)\n\
 - Branch protection toggles: JSON operation `repository.branch_protection.update` (develop/main; allow_force_pushes, required_conversation_resolution, enforce_admins, strict only)\n\
@@ -83,7 +83,7 @@ Recommended alternatives:\n\
 - Issues/SPECs: JSON operations `issue.create`, `issue.edit`, `issue.comment`, `issue.close`, `issue.reopen`, `issue.spec.*`\n\
 - PRs: JSON operations `pr.create`, `pr.edit`, `pr.ready`, `pr.comment`, `pr.reopen`, `pr.review.submit`, `pr.review_threads.reply_and_resolve`; authorized `pr.close` uses `pm.operation.execute`\n\
 - Merges: existing merge automation and CI/review gates decide delivery; gwtd has no direct merge operation\n\
-- External fork PRs: a delegated PM can use `pr.auto_merge.enable` with the exact PR number, reviewed_head_sha and scoped instruction_id or approval_id. Repository automation may exclude external forks; if this authorized route is unavailable, a human must merge the PR.\n\
+- External fork PRs: a delegated PM can use `pr.auto_merge.enable` with the exact PR number, reviewed_head_sha; no instruction or approval id is needed. Repository automation may exclude external forks; if this authorized route is unavailable, a human must merge the PR.\n\
 - Actions: JSON operations `actions.rerun` (`run_id` + `failed_only`, or `job_id`) and `actions.cancel` (`run_id`)\n\
 Use the corresponding JSON-envelope operation for other writes.\n\n\
 Blocked command: {command}"
@@ -96,7 +96,7 @@ Blocked command: {command}"
                 format!(
                     "GitHub writes must go through the canonical gwt operations so the completion/PR gates and audit state see them (SPEC-3248 P10, T-217).\n\n\
 Recommended alternatives:\n\
-- Permission stage: instruction_or_approval for bounded PM operations. Pass a scoped instruction_id or approval_id to the canonical operation; obtain native approval with pm.approval.request. An id never permits a raw API write or bypasses CI/ownership/reviewer gates. Irreversible third-party destruction, secret exfiltration and unsupported destructive deletion remain unavailable.\n\
+- Permission stage: autonomous for bounded PM operations. Call the canonical operation directly without an approval stop; each run is audited, shown in Reports and, for lasting changes, left as a keep-or-undo Decide card. It never permits a raw API write or bypasses CI/ownership/reviewer gates. Irreversible third-party destruction, secret exfiltration and unsupported destructive deletion remain unavailable.\n\
 - Repository settings/archive: JSON operation `repository.settings.set` (typed reversible fields; fixed repository)\n\
 - Discussions/Board: JSON operations `discussion.create`, `board.config.set`\n\
 - Required checks: JSON operation `repository.required_checks.update` (develop/main contexts only)\n\

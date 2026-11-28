@@ -1,4 +1,9 @@
-//! Repository-scoped PM instructions, explicit native approvals and mutation audits.
+//! Repository-scoped PM instructions, legacy approvals and mutation audits.
+//!
+//! Issue #8083: the PM never stops for an operation permission. Without an
+//! instruction or approval id an operation runs under the `autonomous` stage;
+//! every run is audited, reported to Reports, and — for lasting changes — left
+//! as a Decide card where the owner keeps or undoes it afterwards.
 use crate::timestamp::UtcTimestamp;
 
 use std::{
@@ -33,6 +38,26 @@ pub const OPERATIONS: &[&str] = &[
     "repository.branch_protection.update",
     "project.execution.choose",
 ];
+
+/// Permission stage of an operation that ran without a human authority id.
+pub const AUTONOMOUS: &str = "autonomous";
+
+/// Operations whose autonomous runs leave a keep-or-undo Decide card.
+/// Routine PR delivery stays gated by CI, reviewers and branch protection,
+/// message relay and build-artifact cleanup have nothing to undo, and a
+/// rollback is itself the undo of an earlier change.
+pub fn needs_ratification(operation: &str) -> bool {
+    OPERATIONS.contains(&operation)
+        && !matches!(
+            operation,
+            "pr.auto_merge.enable"
+                | "pr.review.submit"
+                | "pm.message.send"
+                | "worktree.gc_build_artifacts"
+                | "actions.release_policy.rollback"
+                | "actions.diagnostic.policy.rollback"
+        )
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -240,11 +265,14 @@ pub struct Attempt {
     pub permission_stage: String,
     pub caller_session: Option<String>,
     pub before: Value,
+    /// Redacted effect parameters, so Reports can name the operation's target.
+    #[serde(default)]
+    pub params: Value,
 }
 
 fn permission_denied(detail: &str) -> io::Error {
     io::Error::new(io::ErrorKind::PermissionDenied, format!(
-        "permission_stage=instruction_or_approval: {detail}; pass an active scoped instruction_id or approval_id, or use pm.approval.request with operation, params, reason and rollback"))
+        "permission_stage=instruction_or_approval: {detail}; omit instruction_id and approval_id to run the operation under autonomous PM authority"))
 }
 
 struct Selection {
@@ -270,6 +298,19 @@ fn select_authority(
     let matches_attempt = |id: &str, stage: &str| {
         replay.is_none_or(|attempt| attempt.authority_id == id && attempt.permission_stage == stage)
     };
+    // Issue #8083: no id means the PM proceeds without asking. A replay of a
+    // receipt accepted under a legacy stored approval keeps its own source.
+    if authorization.instruction_id.is_none()
+        && authorization.approval_id.is_none()
+        && replay.is_none_or(|attempt| attempt.permission_stage == AUTONOMOUS)
+    {
+        return Ok(Selection {
+            id: AUTONOMOUS.into(),
+            stage: AUTONOMOUS,
+            consume_instruction: None,
+            consume_approval: None,
+        });
+    }
     if let Some(id) = &authorization.instruction_id {
         let instructions = crate::user_instruction::load(repo).map_err(io::Error::other)?;
         let instruction = instructions
@@ -350,7 +391,9 @@ pub fn check_authorization(
     authorization: &Authorization,
 ) -> io::Result<Authorization> {
     let selected = select_authority(repo, &load(repo)?, &intent.scope()?, authorization, None)?;
-    Ok(if selected.stage == "instruction" {
+    Ok(if selected.stage == AUTONOMOUS {
+        Authorization::default()
+    } else if selected.stage == "instruction" {
         Authorization {
             instruction_id: Some(selected.id),
             approval_id: None,
@@ -409,6 +452,10 @@ pub fn authorize(
                 .find(|attempt| attempt.scope == scope)
             {
                 let same_source = match attempt.permission_stage.as_str() {
+                    AUTONOMOUS => {
+                        authorization.instruction_id.is_none()
+                            && authorization.approval_id.is_none()
+                    }
                     "instruction" => {
                         authorization.instruction_id.as_ref() == Some(&attempt.authority_id)
                     }
@@ -447,6 +494,7 @@ pub fn authorize(
             } else {
                 before
             },
+            params: crate::user_instruction::redact_json(intent.params.clone()),
         };
         audit(
             repo,
@@ -517,6 +565,7 @@ pub fn validate_project_choice_attempt(
 
 fn validate_project_choice_source(repo: &Path, store: &Store, attempt: &Attempt) -> io::Result<()> {
     let active = match attempt.permission_stage.as_str() {
+        AUTONOMOUS => attempt.authority_id == AUTONOMOUS,
         "instruction" => crate::user_instruction::load(repo)
             .map_err(io::Error::other)?
             .iter()
@@ -542,17 +591,73 @@ fn validate_project_choice_source(repo: &Path, store: &Store, attempt: &Attempt)
 }
 
 impl Attempt {
+    /// Audit the outcome, then surface it in Reports and, for an autonomous
+    /// lasting change, as a keep-or-undo Decide card. The audit is canonical:
+    /// a Reports or Decide failure is logged and never undoes the effect.
     pub fn finish(&self, repo: &Path, succeeded: bool, after: Value) -> io::Result<()> {
+        let at = UtcTimestamp::now();
         locked(repo, |_| {
             audit(
                 repo,
                 serde_json::json!({
-                    "event":if succeeded {"succeeded"} else {"failed"}, "at":UtcTimestamp::now(),
+                    "event":if succeeded {"succeeded"} else {"failed"}, "at":at,
                     "attempt_id":self.id, "operation":self.scope.operation,
+                    "params":self.params, "permission_stage":self.permission_stage,
                     "authority_id":self.authority_id, "before":self.before, "after":after,
                 }),
             )
-        })
+        })?;
+        let report = self.report_body(repo, succeeded, at);
+        if let Err(error) = crate::pm_report::post_report(
+            repo,
+            crate::pm_report::PmReportKind::Progress,
+            &report,
+            None,
+        ) {
+            tracing::warn!(attempt = %self.id, %error, "PM operation report was not posted");
+        }
+        if succeeded
+            && self.permission_stage == AUTONOMOUS
+            && needs_ratification(&self.scope.operation)
+        {
+            if let Err(error) = crate::decision_queue::register_pm_ratification(
+                repo,
+                &self.scope.operation,
+                &format!("- {at}: {} (attempt {})", self.target(), self.id),
+            ) {
+                tracing::warn!(attempt = %self.id, %error, "PM operation Decide card was not registered");
+            }
+        }
+        Ok(())
+    }
+
+    fn target(&self) -> String {
+        let mut target = serde_json::to_string(&self.params).unwrap_or_default();
+        if target.len() > 2048 {
+            let mut end = 2048;
+            while !target.is_char_boundary(end) {
+                end -= 1;
+            }
+            target.truncate(end);
+            target.push('…');
+        }
+        target
+    }
+
+    fn report_body(&self, repo: &Path, succeeded: bool, at: UtcTimestamp) -> String {
+        let authority = match self.permission_stage.as_str() {
+            "instruction" => format!("instruction `{}`", self.authority_id),
+            "approval" => format!("legacy approval `{}`", self.authority_id),
+            _ => "autonomous PM execution (no instruction id)".to_string(),
+        };
+        format!(
+            "PM operation {}: `{}`\n\n- Target: `{}`\n- At: {at}\n- Authority: {authority}\n- Attempt: {}\n- Audit: {}",
+            if succeeded { "executed" } else { "failed" },
+            self.scope.operation,
+            self.target(),
+            self.id,
+            audit_path(repo).display(),
+        )
     }
 }
 
@@ -601,7 +706,11 @@ mod tests {
             params: serde_json::json!({"auto_apply_updates":true}),
         };
         let before = authority_bytes(&repo);
-        assert!(check_authorization(&repo, &intent, &Authorization::default()).is_err());
+        // Issue #8083: without an id the preflight selects autonomous authority.
+        assert_eq!(
+            check_authorization(&repo, &intent, &Authorization::default()).unwrap(),
+            Authorization::default()
+        );
         assert_eq!(before, authority_bytes(&repo));
         let approval =
             record_approval(&repo, &intent, "Enable updates", "Disable updates", false).unwrap();
@@ -768,7 +877,7 @@ mod tests {
             };
             let before = authority_bytes(&repo);
             assert_eq!(
-                check_authorization(&repo, &intent, &Authorization::default()).unwrap(),
+                check_authorization(&repo, &intent, &authorization).unwrap(),
                 authorization
             );
             assert_eq!(before, authority_bytes(&repo));
@@ -782,14 +891,7 @@ mod tests {
             assert!(authorize(&repo, &changed, &authorization, Some("pm"), Value::Null).is_err());
             changed = intent.clone();
             changed.params["request_id"] = "cbd15e96-bc2b-478c-a354-302baf307de4".into();
-            assert!(authorize(
-                &repo,
-                &changed,
-                &Authorization::default(),
-                Some("pm"),
-                Value::Null
-            )
-            .is_err());
+            assert!(authorize(&repo, &changed, &authorization, Some("pm"), Value::Null).is_err());
             assert_eq!(
                 before,
                 (
@@ -1097,14 +1199,7 @@ mod tests {
         changed.params["reviewed_head_sha"] = "b".repeat(40).into();
         assert!(authorize(&repo, &changed, &authorization, Some("pm"), Value::Null).is_err());
         changed.params = serde_json::json!({"number":18,"reviewed_head_sha":"a".repeat(40)});
-        assert!(authorize(
-            &repo,
-            &changed,
-            &Authorization::default(),
-            Some("pm"),
-            Value::Null
-        )
-        .is_err());
+        assert!(authorize(&repo, &changed, &authorization, Some("pm"), Value::Null).is_err());
     }
 
     #[test]
@@ -1156,5 +1251,83 @@ mod tests {
             serde_json::from_str::<Value>(line).unwrap();
         }
         assert!(audit.contains("retain this state") && audit.contains("retain this result"));
+    }
+
+    /// Issue #8083 AC-1/3/6: no permission id, no stop — audited, reported
+    /// and left as a keep-or-undo Decide card for lasting changes.
+    #[test]
+    fn operations_run_without_authority_ids_and_leave_reports_and_decide_cards() {
+        use crate::decision_queue::{self, DecisionKind, DecisionStatus, Waiter};
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let repo = home.path().join("repo");
+        let auto_merge = OperationIntent {
+            operation: "pr.auto_merge.enable".into(),
+            params: serde_json::json!({"number":8083,"reviewed_head_sha":"a".repeat(40)}),
+        };
+        let settings = OperationIntent {
+            operation: "update.settings.set".into(),
+            params: serde_json::json!({"auto_apply_updates":true}),
+        };
+        for intent in [&auto_merge, &settings, &settings] {
+            assert_eq!(
+                check_authorization(&repo, intent, &Authorization::default()).unwrap(),
+                Authorization::default()
+            );
+            let attempt = authorize(
+                &repo,
+                intent,
+                &Authorization::default(),
+                Some("pm"),
+                Value::Null,
+            )
+            .unwrap();
+            assert_eq!(attempt.permission_stage, AUTONOMOUS);
+            attempt.finish(&repo, true, Value::Null).unwrap();
+            authorize_replay(&repo, intent, &Authorization::default(), &attempt).unwrap();
+        }
+
+        let audit = fs::read_to_string(audit_path(&repo)).unwrap();
+        let finished: Vec<Value> = audit
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .filter(|row: &Value| row["event"] == "succeeded")
+            .collect();
+        assert_eq!(finished.len(), 3);
+        assert_eq!(finished[0]["operation"], "pr.auto_merge.enable");
+        assert_eq!(finished[0]["params"]["number"], 8083);
+        assert_eq!(finished[0]["permission_stage"], AUTONOMOUS);
+        assert!(finished[0]["at"].is_string());
+
+        let reports = crate::pm_report::load_reports(&repo).unwrap();
+        assert_eq!(reports.len(), 3);
+        assert!(reports[0].body.contains("`pr.auto_merge.enable`"));
+        assert!(reports[0].body.contains("8083"));
+        assert!(reports[0].body.contains("no instruction id"));
+
+        // Routine PR delivery leaves no card; repeated settings runs share one.
+        let open = decision_queue::list(&repo, None, false).unwrap();
+        assert_eq!(open.len(), 1, "{open:?}");
+        let card = &open[0];
+        assert_eq!(card.kind, DecisionKind::PmDecision);
+        assert_eq!(card.target, "pm-operation:update.settings.set");
+        assert_eq!(card.waiters, vec![Waiter::Pm]);
+        assert_eq!(card.options.len(), 2);
+        assert_eq!(card.materials.lines().count(), 2);
+        assert_eq!(decision_queue::snapshot(&repo).unwrap().waiting_count, 1);
+
+        // The owner's answer decides keep or undo and reaches the PM.
+        let answered = decision_queue::answer(
+            &repo,
+            &card.id,
+            decision_queue::PM_RATIFICATION_OPTIONS[1],
+            decision_queue::AnsweredBy::User,
+        )
+        .unwrap();
+        assert_eq!(answered.status, DecisionStatus::Answered);
+        let deliveries = decision_queue::pending_deliveries(&repo).unwrap();
+        assert_eq!(deliveries.len(), 1);
+        assert_eq!(deliveries[0].waiter, Waiter::Pm);
+        assert!(deliveries[0].message.contains("Undo"));
     }
 }

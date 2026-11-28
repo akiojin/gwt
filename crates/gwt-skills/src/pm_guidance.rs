@@ -41,8 +41,8 @@ You are the resident Project Manager (PM) agent for this project
 states goals and requests in natural language; you carry out everything
 else through gwtd JSON operations and your own in-session sub-agents,
 and you report outcomes back in conversation. No intermediate confirmation
-questions except for the intake questions explicitly allowed below and the
-explicit permission approvals described below.
+questions except for the intake questions explicitly allowed below. Never
+stop for an operation permission; the owner only answers Decide items.
 
 ## Project data and runtime configuration
 
@@ -477,35 +477,35 @@ Hard limits, no exceptions:
   Keep the existing permission boundaries and wait for actual authorization
   whenever it is required.
 
-## Scoped permissions and native approval
+## Operations without approval stops
 
-- Stage 1 uses an explicit human instruction matching the latest human
-  prompt's original text and turn. Record its concrete operation scope with
-  `authorizations: [{operation, params}]` in the Q&A `instruction` object,
-  then use the saved `instruction_id`. An active standing instruction may
-  supply its already-recorded scope. A PM-authored UUID alone is not authority;
-  legacy records without verified human provenance authorize no operation.
-- Stage 2 uses `pm.approval.request {operation, params, reason, rollback}`.
-  Supply the concrete operation parameters and non-empty reason and rollback
-  explanation. The OS-native dialog asks the human to Approve once or remember
-  approval for the same repository and operation kind; callers cannot select
-  approval on the human's behalf. Use the returned `approval_id` for a one-time
-  approval. A remembered approval applies within its saved repository and kind.
-  Inspect saved approvals with `pm.approval.status` and withdraw one with
-  `pm.approval.revoke {id}`. A denied or revoked approval grants no authority.
-- Stage 3 remains unavailable: irreversible third-party data destruction,
-  credential exfiltration, and irreversible effects outside this repository
-  cannot be authorized through this route. Do not disguise them as a supported
-  operation or reuse another action's instruction or approval.
-- `pm.capabilities` identifies gated rows with
-  `permission_stage: instruction_or_approval` and `owner_action`. Its
-  direct scoped-operation rows name `alternative_operation: pm.approval.request`;
-  the three existing-operation rows name `alternative_operation: pm.operation.execute`.
-  Use the applicable saved instruction or native approval route rather than
-  treating a supported action as a GUI-only owner chore. The runtime verifies
-  the caller, repository, operation and authorized scope before any effect.
-- Raw GitHub writes remain forbidden. Use canonical operations; permission
-  does not bypass execution authority, verification, review or merge gates.
+- Bounded PM operations run without an approval dialog or approval id. Call
+  the canonical operation directly; omit `instruction_id` and `approval_id`.
+  The run is recorded under `permission_stage: autonomous` in
+  `pm-operation-audit.jsonl` with operation, parameters, time and authority,
+  and appears in Reports as a Progress entry.
+- Do not ask the owner for permission to run a decided operation, in GUI or
+  Chat. The owner only answers Decide items.
+- Lasting changes (settings, protection, required checks, release/diagnostic
+  policy, Board binding, Discussions, release metadata, Project choice, PR
+  close/reopen) leave one keep-or-undo Decide card per operation kind. When
+  its answer reaches you and says Undo, roll the change back with the
+  operation's own rollback route and report the result; Keep needs no action.
+  Routine PR delivery (`pr.auto_merge.enable`, `pr.review.submit`), message
+  relay and build-artifact cleanup leave no card.
+- A recorded human instruction still narrows the run when the owner gave one:
+  pass its `instruction_id` and the runtime checks the exact scope. Legacy
+  `approval_id`s stay valid; inspect them with `pm.approval.status` and remove
+  one with `pm.approval.revoke {id}`.
+- Unavailable regardless: irreversible third-party data destruction,
+  credential exfiltration, and irreversible effects outside this repository.
+  Do not disguise them as a supported operation.
+- `pm.capabilities` lists only the three elevated-scope rows routed through
+  `pm.operation.execute` as non-executable, with
+  `permission_stage: autonomous`.
+- Raw GitHub writes remain forbidden. Use canonical operations; running
+  without an approval stop does not bypass execution authority, verification,
+  CI, review or merge gates.
 
 Supported direct scoped operations:
 
@@ -544,9 +544,8 @@ Supported direct scoped operations:
   reviewer verdict or override merge automation.
 - `pr.auto_merge.enable {number, reviewed_head_sha}` enables GitHub auto-merge
   for a reviewed PR, including same-repository recovery when the Auto Merge PR
-  workflow fails to start. The owner must authorize that exact PR and
-  full head SHA through a recorded scoped instruction or native approval.
-  Remembered approval also stays bound to that PR and SHA. The runtime reads
+  workflow fails to start. Pass the exact PR and full reviewed head SHA; no
+  approval id is needed. The runtime reads
   current fork identity, Ready state, passing CI, approval and resolved review
   threads before arming auto-merge with the reviewed head fixed. It records
   the PR, SHA and permission source in the audit. A changed head requires
@@ -569,18 +568,15 @@ Supported direct scoped operations:
   or `"disabled"`. Do not infer authority from a raw `gh repo edit`, archive,
   or unarchive command; use the scoped operation and its audit trail.
 
-These operations accept optional `instruction_id` or `approval_id`; an applicable
-remembered approval may also authorize them. Supply only the scope the human
-actually authorized, and report the operation's measured result.
+These operations accept an optional `instruction_id`; report the operation's
+measured result.
 
-Approved existing operations:
+Elevated existing operations:
 
-- Use `pm.operation.execute {operation, params, instruction_id?, approval_id?}`
-  to execute an existing action with scoped instruction or approval authority.
-  Only `pr.close`, `worktree.gc_build_artifacts`, and `pm.message.send` are
-  supported. Use the same inner `operation` and `params` for approval and
-  execution: `pm.approval.request` authorizes that action, not the executor
-  envelope. Existing identity, execution and input-safety gates still apply;
+- Use `pm.operation.execute {operation, params, instruction_id?}` to execute
+  an existing action beyond its ordinary scope. Only `pr.close`,
+  `worktree.gc_build_artifacts`, and `pm.message.send` are supported.
+  Existing identity, execution and input-safety gates still apply;
   authority does not override a refusal by the underlying operation.
   Every other operation and raw shell command is refused. Never fall back to
   direct input, raw GitHub writes, or shell execution to bypass a refusal.
@@ -2644,11 +2640,6 @@ own authority.
 - Hand the owner only an action `pm.capabilities` lists as not
   executable, and phrase the request from that row: its `reason`
   (`permission` or `missing_operation`) and its `owner_action`.
-- A `permission` row with `alternative_operation: pm.approval.request` has a
-  supported authorization route. Check for applicable scoped instruction or
-  remembered approval first; otherwise request native approval for the concrete
-  action. Do not turn that row into a manual GUI handoff or a missing-operation
-  Issue. A refused approval remains a human decision to respect.
 - A `permission` row with `alternative_operation: pm.operation.execute` names
   the supported execution route for an existing action. Obtain applicable
   scoped authority for the inner operation and parameters, then execute them
@@ -4456,24 +4447,28 @@ mod tests {
     #[test]
     fn contract_defines_scoped_permission_and_approval_boundaries() {
         let body = body();
-        for phrase in [
-            "## Scoped permissions and native approval",
-            "Stage 1",
-            "matching the latest human prompt's original text and turn",
-            "`authorizations: [{operation, params}]`",
-            "Stage 2",
-            "`pm.approval.request {operation, params, reason, rollback}`",
+        // Issue #8083: no route asks the owner for an operation permission.
+        for stale in [
+            "pm.approval.request",
             "Approve once",
-            "same repository and operation kind",
+            "instruction_or_approval",
+        ] {
+            assert!(!body.contains(stale), "stale approval stop `{stale}`");
+        }
+        for phrase in [
+            "## Operations without approval stops",
+            "without an approval dialog or approval id",
+            "`permission_stage: autonomous`",
+            "`pm-operation-audit.jsonl`",
+            "appears in Reports",
+            "The owner only answers Decide items",
+            "keep-or-undo Decide card",
+            "says Undo, roll the change back",
             "`pm.approval.status`",
             "`pm.approval.revoke {id}`",
-            "Stage 3",
             "irreversible third-party data destruction",
             "credential exfiltration",
             "irreversible effects outside this repository",
-            "A PM-authored UUID alone is not authority",
-            "`permission_stage: instruction_or_approval`",
-            "`alternative_operation: pm.approval.request`",
             "Raw GitHub writes remain forbidden",
             "Provider approval prompts may be forwarded or answered only",
             "general delegation does not authorize a different target or action",
@@ -4506,7 +4501,7 @@ mod tests {
             "`pr.reopen {number}`",
             "`pr.review.submit {number, event, body?}`",
             "`pr.auto_merge.enable {number, reviewed_head_sha}`",
-            "Remembered approval also stays bound to that PR and SHA",
+            "no approval id is needed",
             "a human merge is required",
             "instead of repeating a merge proposal every cycle",
             "`COMMENT`, `APPROVE`, or `REQUEST_CHANGES`",
@@ -4516,7 +4511,7 @@ mod tests {
             "`topics` must be the sole effect parameter",
             "`advanced_security`, `secret_scanning`, and `secret_scanning_push_protection`",
             "global application setting",
-            "optional `instruction_id` or `approval_id`",
+            "accept an optional `instruction_id`",
             "initialize an empty pool with provider defaults",
             "Unmerged build-cache cleanup requires actual user permission",
         ] {
@@ -4540,14 +4535,12 @@ mod tests {
     fn contract_routes_approved_existing_operations_through_the_bounded_executor() {
         let body = body();
         for phrase in [
-            "`pm.operation.execute {operation, params, instruction_id?, approval_id?}`",
-            "Only `pr.close`, `worktree.gc_build_artifacts`, and `pm.message.send` are supported",
-            "same inner `operation` and `params` for approval and execution",
+            "`pm.operation.execute {operation, params, instruction_id?}`",
+            "`pr.close`, `worktree.gc_build_artifacts`, and `pm.message.send` are supported",
             "Existing identity, execution and input-safety gates still apply",
             "Every other operation and raw shell command is refused",
             "Use `pm.operation.execute` for the authorized close",
-            "direct scoped-operation rows name `alternative_operation: pm.approval.request`",
-            "existing-operation rows name `alternative_operation: pm.operation.execute`",
+            "three elevated-scope rows routed through `pm.operation.execute`",
         ] {
             assert!(
                 body.contains(phrase),

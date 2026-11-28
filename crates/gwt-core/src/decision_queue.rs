@@ -397,6 +397,74 @@ pub fn register(repo_path: &Path, input: &Registration) -> Result<RegisterOutcom
     })
 }
 
+/// Options of the keep-or-undo card a PM operation leaves (Issue #8083).
+pub const PM_RATIFICATION_OPTIONS: [&str; 2] = [
+    "Keep — ratify what the PM did",
+    "Undo — the PM rolls the change back",
+];
+
+/// Leave an autonomous PM operation for the user to keep or undo afterwards.
+///
+/// The PM ran the operation without stopping for permission; this card is
+/// where the user decides on it later. One open card per operation kind
+/// collects every run (newest last, oldest dropped past 16 KiB), and the
+/// answer is delivered to whichever PM is registered.
+pub fn register_pm_ratification(
+    repo_path: &Path,
+    operation: &str,
+    entry: &str,
+) -> Result<DecisionItem> {
+    let (operation, entry) = (operation.trim(), entry.trim());
+    if operation.is_empty() || entry.is_empty() {
+        return invalid("PM ratification requires an operation and an entry");
+    }
+    let target = format!("pm-operation:{operation}");
+    update(repo_path, |queue| {
+        let key = target_key(&target);
+        if let Some(existing) = queue.items.iter_mut().find(|item| {
+            item.status == DecisionStatus::Open
+                && item.kind == DecisionKind::PmDecision
+                && target_key(&item.target) == key
+        }) {
+            existing.materials = keep_tail(format!("{}\n{entry}", existing.materials));
+            return Ok((existing.clone(), true));
+        }
+        let mut item = new_item(
+            DecisionKind::PmDecision,
+            target.clone(),
+            format!("Keep or undo the PM's `{operation}` changes?"),
+            keep_tail(entry.to_string()),
+        );
+        item.options = PM_RATIFICATION_OPTIONS.map(str::to_owned).to_vec();
+        item.recommendation = Some(PM_RATIFICATION_OPTIONS[0].to_string());
+        item.reason = Some(
+            "The PM already ran this without waiting; CI, branch protection and ownership gates still applied."
+                .to_string(),
+        );
+        item.waiters.push(Waiter::Pm);
+        queue.items.push(item.clone());
+        Ok((item, true))
+    })
+}
+
+fn keep_tail(mut text: String) -> String {
+    while text.len() > MAX_TEXT_BYTES {
+        match text.find('\n') {
+            Some(end) => {
+                text.drain(..=end);
+            }
+            None => {
+                let mut start = text.len() - MAX_TEXT_BYTES;
+                while !text.is_char_boundary(start) {
+                    start += 1;
+                }
+                text.drain(..start);
+            }
+        }
+    }
+    text
+}
+
 fn open_index(queue: &QueueFile, id: &str) -> Result<usize> {
     let Some(index) = queue.items.iter().position(|item| item.id == id) else {
         return invalid(format!("decision {id} was not found"));
