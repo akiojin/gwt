@@ -202,9 +202,13 @@ mod tests {
     #[test]
     fn snapshot_all_is_time_sorted() {
         let hub = ProcessConsoleHub::new();
-        let l1 = ProcessLine::new(ProcessKind::Git, 1, ProcessStream::Stdout, "first");
-        std::thread::sleep(std::time::Duration::from_millis(2));
-        let l2 = ProcessLine::new(ProcessKind::Docker, 2, ProcessStream::Stdout, "second");
+        // Explicit timestamps instead of sleeping between `now()` calls, and
+        // the earlier line on the kind that comes later in `ProcessKind::ALL`
+        // so the assertion proves time ordering rather than kind order.
+        let mut l1 = ProcessLine::new(ProcessKind::Docker, 1, ProcessStream::Stdout, "first");
+        l1.timestamp = crate::timestamp::UtcTimestamp::from_timestamp(1_000, 0).unwrap();
+        let mut l2 = ProcessLine::new(ProcessKind::Git, 2, ProcessStream::Stdout, "second");
+        l2.timestamp = crate::timestamp::UtcTimestamp::from_timestamp(1_000, 1).unwrap();
         hub.push(l2.clone());
         hub.push(l1.clone());
         let merged = hub.snapshot_all();
