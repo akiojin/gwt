@@ -216,6 +216,18 @@ test.describe('T-036 v3 regression (isolated checkout)', () => {
       await header.getByRole('button', { name: 'Environments', exact: true }).click();
       await expect(project.getByRole('heading', { name: 'Execution environments', exact: true })).toBeVisible();
       await compare(project, 'environments', 'tools', 'tools-env');
+      await project.emulateMedia({ forcedColors: 'active' });
+      const environmentAction = project.getByRole('button', { name: 'Add an execution environment' });
+      try {
+        await environmentAction.hover();
+        const { backgroundColor, borderTopColor } = await environmentAction.evaluate(button => {
+          const style = getComputedStyle(button);
+          return { backgroundColor: style.backgroundColor, borderTopColor: style.borderTopColor };
+        });
+        expect(borderTopColor).not.toBe(backgroundColor);
+      } finally {
+        await project.emulateMedia({ forcedColors: null });
+      }
       await project.getByRole('button', { name: 'Accounts', exact: true }).click();
       // Tool-side providers may appear in the usage summary, but cannot have account pools.
       const accounts = project.getByRole('region', { name: 'Execution environments' });

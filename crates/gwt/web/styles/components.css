@@ -6003,6 +6003,12 @@ button.workspace-board-ref:focus-visible {
   background: var(--color-button-bg-hover);
   border-color: var(--color-button-bg-hover);
 }
+@media (forced-colors: active) {
+  .exec-env button.exec-env__primary:not(:disabled),
+  .exec-env button.exec-env__primary:not(:disabled):hover {
+    border-color: var(--color-button-border);
+  }
+}
 .exec-env__reason { margin: var(--space-1) 0 0; color: var(--color-text-muted); font-size: var(--type-xs); }
 .exec-env__error { margin: var(--space-2) 0 0; color: var(--color-state-blocked); }
 .exec-env__status { min-height: var(--space-4); margin: 0; color: var(--color-text-muted); font-size: var(--type-xs); }
