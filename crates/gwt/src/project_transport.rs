@@ -3098,14 +3098,14 @@ async fn client_session_with_scope(
                                         let mut direct_pm_result = None;
                                         let direct_acceptance = match &mut request {
                                             AgentFrontendRequest::CloseWindow {
+                                                id,
                                                 request_id: Some(_),
                                                 responder,
-                                                ..
                                             } => {
                                                 let (direct_responder, acceptance) =
                                                     AgentSelfCloseResponder::channel();
                                                 *responder = Some(direct_responder);
-                                                Some(acceptance)
+                                                Some((acceptance, id.clone()))
                                             }
                                             AgentFrontendRequest::PmSendInput {
                                                 operation_id,
@@ -3248,7 +3248,7 @@ async fn client_session_with_scope(
                                             }
                                             break;
                                         }
-                                        if let Some(mut direct_acceptance) = direct_acceptance {
+                                        if let Some((mut direct_acceptance, window_id)) = direct_acceptance {
                                             // Correlated self-close is a two-phase exchange. The
                                             // runtime owner first atomically accepts or rejects the
                                             // current capability generation. Only an accepted
@@ -3270,7 +3270,23 @@ async fn client_session_with_scope(
                                                         }
                                                     }
                                                     _ = tokio::time::sleep_until(deadline) => {
-                                                        break None;
+                                                        // Keep a response that already won the send/close race.
+                                                        // Otherwise the Owner will see a closed receiver and
+                                                        // roll back any tentative self-close acceptance.
+                                                        direct_acceptance.close();
+                                                        let response = direct_acceptance.try_recv().unwrap_or_else(|_| {
+                                                            tracing::warn!(
+                                                                host_instance_id = %state.host_instance_id,
+                                                                %window_id,
+                                                                elapsed_ms = received_at.elapsed().as_millis(),
+                                                                "pane close timed out waiting for Owner acceptance"
+                                                            );
+                                                            Err(crate::agent_capability::AgentSelfCloseRefusal {
+                                                                window_id,
+                                                                reason: "pane_close_acceptance_timeout".into(),
+                                                            })
+                                                        });
+                                                        break Some(response);
                                                     }
                                                 }
                                             };
@@ -3641,8 +3657,9 @@ mod tests {
         );
         let grant = issuer.issue(project.path(), "transport-session").unwrap();
         let (events, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let clients = ClientHub::default();
         let state = TransportState::new(
-            ClientHub::default(),
+            clients.clone(),
             registry,
             "test-host".into(),
             std::sync::Arc::new(move |event| {
@@ -3729,7 +3746,76 @@ mod tests {
                 ..
             })
         ));
-        socket.close(None).await.unwrap();
+        let fixture_deadline = std::time::Duration::from_secs(5);
+        let pane_id = "test-tab::own";
+        let workspace = serde_json::json!({
+            "kind": "workspace_state",
+            "workspace": {
+                "app_version": "test",
+                "active_tab_id": "test-tab",
+                "recent_projects": [],
+                "tabs": [{
+                    "id": "test-tab",
+                    "project_root": project.path(),
+                    "workspace": { "windows": [{ "id": pane_id }] }
+                }]
+            }
+        });
+        assert!(!clients
+            .first_agent_queue_for_test()
+            .unwrap()
+            .enqueue_workspace_for_test(workspace.to_string().into()));
+        // test-hygiene: allow-wall-clock-deadline Bound fixture I/O while workspace receipt establishes progress.
+        let workspace_reply = tokio::time::timeout(fixture_deadline, socket.next())
+            .await
+            .expect("pane workspace reply deadline")
+            .expect("transport closed before pane workspace")
+            .unwrap();
+        let workspace_reply: serde_json::Value =
+            serde_json::from_str(workspace_reply.to_text().unwrap()).unwrap();
+        assert_eq!(workspace_reply["kind"], "workspace_state");
+
+        socket
+            .send(WireMessage::Text(
+                serde_json::json!({
+                    "kind": "close_window",
+                    "id": pane_id,
+                    "request_id": "stalled-close"
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        // test-hygiene: allow-wall-clock-deadline Bound fixture I/O while the queued request establishes progress.
+        let close_event = tokio::time::timeout(fixture_deadline, received.recv())
+            .await
+            .expect("pane close dispatch deadline");
+        let Some(TransportEvent::AgentFrontend {
+            request:
+                crate::agent_capability::AgentFrontendRequest::CloseWindow {
+                    responder: Some(stalled_owner),
+                    ..
+                },
+            ..
+        }) = close_event
+        else {
+            panic!("the correlated pane close must reach the Owner queue");
+        };
+        // Hold the responder without accepting the close, as a stalled Owner would.
+        // The transport is responsible for ending the wait with a failure reply.
+        // test-hygiene: allow-wall-clock-deadline Exercise the production WebSocket acceptance timeout.
+        let reply = tokio::time::timeout(fixture_deadline, socket.next())
+            .await
+            .expect("pane close reply deadline")
+            .expect("transport closed without a pane close result")
+            .unwrap();
+        let reply: serde_json::Value = serde_json::from_str(reply.to_text().unwrap()).unwrap();
+        assert_eq!(reply["kind"], "pane_close_result");
+        assert_eq!(reply["ok"], false);
+        assert_eq!(reply["window_id"], pane_id);
+        assert_eq!(reply["reason"], "pane_close_acceptance_timeout");
+        assert!(!stalled_owner.refuse(pane_id.into(), "late result".into()));
         server.abort();
     }
     #[test]

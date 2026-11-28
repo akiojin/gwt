@@ -5727,6 +5727,7 @@ impl AppRuntime {
         thread::spawn(move || {
             let mut context = context;
             loop {
+                let pass_started = std::time::Instant::now();
                 let project_root = context.project_root.clone();
                 let proxy = proxy.for_project(context.clone());
                 let mut merge_cache = merge_cache
@@ -5736,6 +5737,12 @@ impl AppRuntime {
                     Self::prepare_work_merge_status_scan(&context, &mut merge_cache)
                 {
                     proxy.send(event);
+                    // SPEC #3820 P20: once per pass, on the worker thread.
+                    gwt::perf::record_route_phase(
+                        gwt::perf::PerfRoute::WorkEventsIngest,
+                        gwt::perf::WORK_MERGE_STATUS_PHASE,
+                        pass_started.elapsed(),
+                    );
                 }
                 if merge_cache.measured {
                     match gwt_git::refs::branch_tip_subjects(&project_root) {
