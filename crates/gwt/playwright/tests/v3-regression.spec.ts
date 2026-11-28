@@ -217,11 +217,15 @@ test.describe('T-036 v3 regression (isolated checkout)', () => {
       await expect(project.getByRole('heading', { name: 'Execution environments', exact: true })).toBeVisible();
       await compare(project, 'environments', 'tools', 'tools-env');
       await project.getByRole('button', { name: 'Accounts', exact: true }).click();
-      // Design item 234: no tool-side account rows on the accounts screen.
+      // Tool-side providers may appear in the usage summary, but cannot have account pools.
       const accounts = project.getByRole('region', { name: 'Execution environments' });
       await expect(accounts.getByRole('heading', { name: 'Accounts', level: 1 })).toBeVisible();
-      await expect(accounts).not.toContainText(/Hermes Agent|OpenClaw|OpenCode/);
+      await expect(accounts.getByRole('heading', { name: 'Usage by provider' })).toBeVisible();
+      await expect(accounts.getByRole('region', { name: /^(Hermes Agent|OpenClaw|OpenCode) accounts$/ })).toHaveCount(0);
       await compare(project, 'accounts', 'tools', 'tools-pool');
+      await accounts.getByRole('button', { name: 'Tool management' }).click();
+      await expect(project.locator('.surface-area')).toContainText(/Tools/i);
+      await compare(project, 'tool-management', 'tools', 'tools-supported');
       await header.getByRole('button', { name: 'Menu ▾' }).click();
       await project.getByRole('menuitem', { name: 'Settings' }).click();
       await expect(project.locator('.surface-area')).toContainText(/Settings/i);
