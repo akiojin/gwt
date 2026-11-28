@@ -170,6 +170,65 @@ p50 9.013 / p95 14.798 ms。
 - `p20-idle-samples.jsonl`: 6 分間の待機観測の生サンプル。
 - `p20-environment.txt`: checkout SHA、version、OS、CPU、採取時刻。
 
+## P11 index 構築 / P12 GitHub 同期
+
+### 結論
+
+PM の指示（2026-11-28）で、inventory の定義どおりの起点・終点で再計測した。P11 は暫定値が得られた。
+P12 は強制 refresh が 3 回とも失敗で返り、成功した同期の所要時間は得られなかった。
+
+| 行 | 経路 | n | p50 ms | p95 ms | 最悪 ms | 判定（暫定） |
+|---|---|---:|---:|---:|---:|---|
+| P11 | index 構築（Issues cell） | 3 | 1640.9 | 1071055.9 | 1071055.9 | 判定不能（バジェット未定義） |
+| P12 | GitHub 同期（強制 refresh） | 3 | — | — | — | 未測定（成功 0 / 失敗 3） |
+
+p50 / p95 は nearest-rank。n=3 のため p95 は最悪値と同じ。
+
+- P11 の 1 回目（1071 秒）は、fresh HOME の初回 Issue 同期と index coordinator の待ちを含む。
+  2・3 回目は 1494〜1641 ms。要求の受付（楽観的な `repair_started_at` の到着）は 3 回とも 2 ms 未満。
+- P12 の 3 回はすべて `knowledge_error` で返った。内容は `cached Issue #<n> changed during refresh` で、
+  所要時間は 59827 / 2881 / 5516 ms。初回同期（約 15 分、Issue 約 8000 件）と並行して index 側の Issue cache refresh も
+  走っており、`crates/gwt/src/issue_cache.rs` は entry を楽観的に書き込み、競合した 1 件で同期全体を失敗にする。
+  ユーザーの Refresh が初回同期の間に失敗し続けうる不具合の候補として PM に報告した。
+
+### 計測の起点と終点
+
+- P12 起点: Issue window の `load_knowledge_bridge`（`refresh:true`）が socket に出た時点。app が request id を振り直すため、
+  送信側で実際の id を読む。終点: 同じ id への `knowledge_entries`（成功）または `knowledge_error`（失敗）の到着。
+- P11 起点: `rebuild_index_cell`（scope `issues`）の送信。終点: その後の `project_index_status` のうち、
+  `repair_started_at` が無く `scopes.issues.healthy` が true になった最初のもの。
+- どちらも browser の受信時刻であり、画面の描画は含まない。
+
+### 条件
+
+- 対象: checkout `019f8d4594`（P20 計装を含む）の `target/debug/gwt`（debug build、gwtd 9.179.0）。
+- host: macOS 27.2.1、Apple M5 Max。2026-11-28T03:34Z〜03:54Z（`sync-index-environment.txt`）。
+- 起動: `--no-tray --no-open`、fresh HOME。`~/.gwt/runtime`、`.gitconfig`、`.config`、`.cache`（embedding model）を symlink した。
+  GitHub token は環境変数で渡した。PM auto start と Issues の自動実行は無効にした。
+- fixture: 空 commit の repo に `origin` として `https://github.com/akiojin/gwt.git` を設定し（fetch / push はしない）、
+  その linked worktree を project として開いた。Issue は実 repo の約 8000 件。
+- driver: `crates/gwt/playwright/tests/sync-index-inventory-live.spec.ts`（headed Chromium、dark の 1 project）。
+  P12 → P11 の順に各 3 回。console / page error は 0 件。
+
+### 限界
+
+- `~/.gwt/runtime` は実ホストと共有しており、index coordinator の待ちは稼働中の fleet と競合する。P11 の値はその条件を含む。
+- P12 の外部 API 消費量は未測定。同期は `gh` を起動しないため、`gh` 起動数（各 sample 0）は消費量の代わりにならない。
+- 1 project・dark テーマだけで測った。経路は画面描画を含まないため、テーマの差は扱わない。
+
+### P10 Issue Monitor scan を測らなかった理由
+
+- 外から scan を要求する経路は `issue.monitor.reconcile` と agent listener の `agent_issue_monitor_scan_now` だけで、
+  どちらも agent Session の資格（`GWT_PANE_WS_URL`）を必要とする。
+- 実 repo に対する scan は Monitor が無効でも `issue-settlement` 段で merge 済み Issue の close などを提案し、
+  executor が GitHub を変更しうる。隔離 HOME からでもリポジトリ外への副作用になるため実行しなかった。
+- inventory の暫定値（`docs/perf/issue-6979/`、終点が durable state commit）は境界差ありのまま残す。
+
+### ファイル
+
+- `sync-index.json`: P12 / P11 の生サンプル（outcome、error、受付時間を含む）。
+- `sync-index-environment.txt`: checkout SHA、version、OS、CPU、採取時刻。
+
 ## 計測できなかった行
 
 ### P19（worktree picker 列挙）
