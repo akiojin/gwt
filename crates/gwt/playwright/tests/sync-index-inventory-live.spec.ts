@@ -1,7 +1,7 @@
 // SPEC #3820 T-006e: provisional latency samples for inventory paths
 // P12 (GitHub sync: refresh request -> refreshed Issue list delivered) and
 // P11 (index build: rebuild request -> requested cell reported healthy).
-// P10 (Issue Monitor scan) is not driven here: its only external trigger needs
+// P10 (Issues scan) is not driven here: its only external trigger needs
 // an agent Session, and a scan against a real repository can propose GitHub
 // mutations (merged-Issue settlement). See the README for the boundary.
 // This is a measurement driver, not a regression gate. It runs only against an

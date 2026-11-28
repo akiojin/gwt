@@ -216,7 +216,7 @@ p50 / p95 は nearest-rank。n=3 のため p95 は最悪値と同じ。
 - P12 の外部 API 消費量は未測定。同期は `gh` を起動しないため、`gh` 起動数（各 sample 0）は消費量の代わりにならない。
 - 1 project・dark テーマだけで測った。経路は画面描画を含まないため、テーマの差は扱わない。
 
-### P10 Issue Monitor scan を測らなかった理由
+### P10 Issues scan を測らなかった理由
 
 - 外から scan を要求する経路は `issue.monitor.reconcile` と agent listener の `agent_issue_monitor_scan_now` だけで、
   どちらも agent Session の資格（`GWT_PANE_WS_URL`）を必要とする。
