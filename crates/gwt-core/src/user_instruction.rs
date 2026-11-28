@@ -462,7 +462,7 @@ mod tests {
     }
 
     #[test]
-    fn native_approval_is_scoped_and_remembered_permission_can_be_revoked() {
+    fn legacy_approval_ids_stay_scoped_and_revocable() {
         use crate::pm_authorization::{self, Authorization, OperationIntent};
         let home = tempfile::tempdir().unwrap();
         let _home = ScopedGwtHome::set(home.path());
@@ -471,14 +471,6 @@ mod tests {
             operation: "discussion.create".into(),
             params: serde_json::json!({"title":"Board", "body":"Content", "category":"General", "sync_board":true}),
         };
-        assert!(pm_authorization::authorize(
-            &repo,
-            &intent,
-            &Authorization::default(),
-            None,
-            serde_json::Value::Null
-        )
-        .is_err());
         let one = pm_authorization::record_approval(
             &repo,
             &intent,
@@ -525,10 +517,14 @@ mod tests {
             true,
         )
         .unwrap();
+        let standing_id = Authorization {
+            instruction_id: None,
+            approval_id: Some(standing.id.clone()),
+        };
         assert!(pm_authorization::authorize(
             &repo,
             &other,
-            &Authorization::default(),
+            &standing_id,
             None,
             serde_json::Value::Null
         )
@@ -537,7 +533,7 @@ mod tests {
         assert!(pm_authorization::authorize(
             &repo,
             &other,
-            &Authorization::default(),
+            &standing_id,
             None,
             serde_json::Value::Null
         )

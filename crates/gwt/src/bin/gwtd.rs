@@ -554,7 +554,7 @@ fn format_actions_help() -> String {
         "  run_id, job_id",
         "  failed_only  actions.rerun with run_id: re-run only the failed jobs",
         "  request_id (UUID), expected_token, reason   Fixed workflow policy mutations",
-        "  instruction_id | approval_id              Exact scoped human authority, registered PM only",
+        "  instruction_id | approval_id              Optional scoped human authority; omit for audited autonomous PM runs",
         "  added_by                                  rollback: the original successful add request_id",
         "  profile_id, expected_profile_digest        Fixed diagnostic profile; request_id is a UUID",
         "  expected_run_id, expected_revision         Diagnostic cancellation requires current binding",

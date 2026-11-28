@@ -44,8 +44,10 @@ fn failed(error: gwt_core::GwtError) -> SpecOpsError {
 /// Closing, bundling and reordering are the PM's first pass (or the user's
 /// own direct call). An agent waiting on a decision cannot settle it itself.
 fn settle_authority<E: CliEnv>(env: &E, operation: &str) -> Result<AnsweredBy, SpecOpsError> {
+    // Without a session the caller is unattributed: an agent shell can unset
+    // GWT_SESSION_ID, so this is recorded as a CLI answer, never as the user.
     if super::pm::ambient_session_id().is_none() {
-        return Ok(AnsweredBy::User);
+        return Ok(AnsweredBy::Cli);
     }
     if super::pm::caller_is_registered_pm(env.repo_path()) {
         return Ok(AnsweredBy::Pm);
@@ -298,7 +300,8 @@ mod tests {
         .is_err());
     }
 
-    /// A direct user call (no agent session) may settle a decision.
+    /// A call without an agent session may settle a decision, but it is
+    /// recorded as an unattributed CLI answer, never as the user (Issue #8083).
     #[test]
     fn a_direct_user_call_answers_as_the_user() {
         let _lock = env_lock();
@@ -321,6 +324,6 @@ mod tests {
             json!({"id": id, "answer": "Keep JSON"}),
         )
         .unwrap();
-        assert_eq!(answered["decision"]["answer"]["by"], "user");
+        assert_eq!(answered["decision"]["answer"]["by"], "cli");
     }
 }

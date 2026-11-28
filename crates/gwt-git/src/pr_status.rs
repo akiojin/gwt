@@ -1002,7 +1002,7 @@ fn decide_for_class(fields: &PrInventoryFields, class: PrLifecycleClass) -> PrLi
     let default_action_executable =
         !external_merge_route_required && !(class.relaunches_owner() && blocker.is_some());
     let fallback = if external_merge_route_required {
-        Some("After owner delegation and review, use pr.auto_merge.enable with number, reviewed_head_sha and scoped instruction_id or approval_id; otherwise human merge required. Report once and wait for delegation or changed PR state.".to_string())
+        Some("After owner delegation and review, use pr.auto_merge.enable with number and reviewed_head_sha (no approval id needed); otherwise human merge required. Report once and wait for delegation or changed PR state.".to_string())
     } else {
         (!default_action_executable).then(|| PR_FALLBACK_WHEN_NOT_EXECUTABLE.to_string())
     };
