@@ -6413,7 +6413,7 @@ body.route-body {
 
 .gwt-hub,
 .route-not-found {
-  width: min(640px, calc(100vw - 2 * var(--space-6)));
+  width: min(760px, calc(100vw - 2 * var(--space-6)));
   margin: var(--space-12) auto;
   padding: var(--space-6);
   border: 1px solid var(--color-border);
@@ -6424,10 +6424,20 @@ body.route-body {
 
 .gwt-hub__header {
   display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: var(--space-4);
+  flex-direction: column;
+  gap: var(--space-1);
   margin-bottom: var(--space-4);
+}
+
+.gwt-hub__lead,
+.gwt-hub__section-copy {
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: var(--type-sm);
+}
+
+.gwt-hub__section-copy {
+  margin-bottom: var(--space-2);
 }
 
 .gwt-hub__title,
@@ -6470,38 +6480,84 @@ body.route-body {
   font-weight: 700;
 }
 
+/* Issue #8079: one bordered list, rows divided by a rule (mock v3). */
 .gwt-hub__list {
-  display: grid;
-  gap: var(--space-1);
   margin: 0;
-  padding: 0;
+  padding: 0 var(--space-4);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
   list-style: none;
+}
+
+.gwt-hub__item {
+  padding: var(--space-2) 0;
+}
+
+.gwt-hub__item + .gwt-hub__item {
+  border-top: 1px solid var(--color-border);
+}
+
+.gwt-hub__row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-3);
+}
+
+.gwt-hub__row > .gwt-hub__project {
+  flex: 1 1 12rem;
+  min-width: 0;
+}
+
+.gwt-hub__project-status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.gwt-hub__project-status .project-owner-health,
+.gwt-hub__project-status .project-autonomy__state {
+  padding: var(--space-0-5) var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-pill);
+  font-family: var(--font-body);
+  font-weight: 700;
+  white-space: nowrap;
 }
 
 .gwt-hub__project,
 .gwt-hub__notice-link {
   display: block;
-  padding: var(--space-2) var(--space-3);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  background: var(--color-surface);
-  color: var(--color-link);
+  padding: var(--space-1) 0;
+  color: var(--color-text-strong);
+  font-weight: 700;
   text-decoration: none;
   overflow-wrap: anywhere;
+}
+
+/* The name is the Open action: it opens the project in a new tab. */
+a.gwt-hub__project::after {
+  content: " \2197" / "";
+  color: var(--color-text-muted);
+  font-weight: 400;
+}
+
+.gwt-hub__add .gwt-hub__actions {
+  margin-bottom: var(--space-2);
 }
 
 .gwt-hub__notice-link {
   display: inline;
   padding: 0;
-  border: 0;
-  background: none;
+  color: var(--color-link);
+  font-weight: 400;
   text-decoration: underline;
 }
 
-.gwt-hub__project:hover,
+a.gwt-hub__project:hover,
 .gwt-hub__notice-link:hover {
   color: var(--color-link-hover);
-  border-color: var(--color-border-strong);
 }
 
 .gwt-hub__project:focus-visible,
