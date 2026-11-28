@@ -6591,6 +6591,7 @@ body.route-body {
   .issue-bridge-root .knowledge-row-select,
   .issue-bridge-root .knowledge-row-actions button,
   .issue-bridge-root .knowledge-row-menu-item { min-height: 44px; }
+  .issue-bridge-root .knowledge-monitor-controls .issue-monitor-limit input { min-width: 44px; }
   .issue-bridge-root .knowledge-row-select { align-content: center; }
   .issue-bridge-root .knowledge-row-menu > summary {
     display: grid;

@@ -381,7 +381,7 @@
    lines. Keep three rows: the controls, then meta and usage on one line each.
    The full text stays in the DOM. */
 @media (max-width: 600px) {
-  .works-full-header { gap: var(--space-1) var(--space-2); padding: var(--space-1) var(--space-2); }
+  .works-full-header { gap: var(--space-0-5) var(--space-2); padding: var(--space-1) var(--space-2); }
   .works-full-header > button { min-width: 44px; min-height: 44px; }
   .works-full-header > [data-action="previous"],
   .works-full-header > [data-action="next"] { order: 1; }
