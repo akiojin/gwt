@@ -3578,6 +3578,27 @@ impl SessionMemberSnapshot {
             .find(|member| designation.names(&member.agent_member_id, &member.name))
     }
 
+    /// Issue #8086: the `(name, avatar)` of the PM Home and the Projects list
+    /// name. The device's first-run designation decides it; a machine without
+    /// one (set up before the designation existed) names the ledger PM of the
+    /// first open project that has one, as that project's own page does.
+    pub fn home_pm(
+        &self,
+        designation: Option<crate::first_run_setup::PmDesignation>,
+        open_projects: &[ProjectKey],
+    ) -> Option<(String, crate::agent_names::AgentAvatar)> {
+        if let Some(designation) = designation {
+            return Some(match self.designated_pm(&designation) {
+                Some(member) => (member.name.clone(), member.avatar.clone()),
+                None => (designation.name, Default::default()),
+            });
+        }
+        open_projects.iter().find_map(|key| {
+            let member = self.configured_pm_member(key).ok()??;
+            Some((member.name, member.avatar))
+        })
+    }
+
     pub fn project_snapshot(&self, key: &ProjectKey) -> io::Result<IssueMonitorPrefs> {
         let registry = self
             .registry
@@ -8369,6 +8390,38 @@ mod tests {
         let second = reserve_new_pm_member(&root, &sessions, &worktree, "two").unwrap();
         assert_eq!(second.member.agent_member_id, member_id);
         assert_eq!(load().unwrap().unwrap().roster.unwrap().members.len(), 1);
+    }
+
+    /// Issue #8086 AC-3: without a first-run designation, Home names the
+    /// ledger PM of an open project instead of leaving the PM unnamed.
+    #[test]
+    fn home_pm_falls_back_to_the_open_project_ledger_pm_without_a_designation() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        measured_machine_budget(4);
+        let (root, worktree) = fresh_pm_project("home-pm-fallback");
+        let reserved = reserve_new_pm_member(&root, &sessions, &worktree, "one").unwrap();
+        let key = gwt_core::paths::project_scope_hash(&root);
+        let unopened =
+            gwt_core::paths::project_scope_hash(&gwt_core::paths::gwt_home().join("closed"));
+        let snapshot = SessionMemberSnapshot::load().unwrap();
+
+        assert_eq!(
+            snapshot
+                .home_pm(None, &[unopened.clone(), key.clone()])
+                .map(|(name, _)| name),
+            Some(reserved.member.name.clone())
+        );
+        assert_eq!(snapshot.home_pm(None, &[unopened]), None);
+        let designated = snapshot.home_pm(
+            Some(crate::first_run_setup::PmDesignation {
+                member_id: None,
+                name: "Aoi".into(),
+            }),
+            &[key],
+        );
+        assert_eq!(designated.map(|(name, _)| name), Some("Aoi".to_owned()));
     }
 
     /// Issue #7731: a designation that names nobody usable — the member left
