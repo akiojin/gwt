@@ -1,6 +1,100 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.180.0] - 2026-11-28
+
+### Bug Fixes
+
+- **mobile:** End_of_candidates の未知 field を拒否する
+- **test:** Wait for Home history page transitions
+- **test:** Require GUI presence in isolated Shell checks
+- **test:** Store_consolidation fixture の bare repo で自動 maintenance を止める
+- **work:** Require source evidence for portable containers
+- **perf:** Restore production route measurements
+- **pane:** Report self-close acceptance timeouts
+- **pane:** Bound authenticated snapshot sync (#3760)
+- **pane:** Retain runtime until self-close commits
+- **issue-monitor:** 死亡した review / 未紐付 pane を max_active 枠から外す
+- **pm:** Verify ruling delivery and agent resumption (#3843)
+- **issue-monitor:** 重複起動ガードを生存判定に揃え、死亡 pane で再起動を止めない
+- **web:** Align refreshed screens with mock v3
+- **web:** Preserve the mock body type scale
+- **web:** Use v3 headings and account usage colors
+- **web:** Match v3 navigation and surface treatment
+- **web:** Match v3 conversation and decision surfaces
+- **web:** Preserve primary button boundaries in forced colors
+- **web:** Remove legacy chrome colors and typography
+- **web:** Use neutral controls in the project header
+- **web:** Match v3 settings and environment card surfaces
+- **web:** Preserve compact mobile headers and tap targets
+- **web:** Match mock status tones and remove visual effects
+- **gui:** Show mid-turn owner PM messages and the PM name in every tab
+- **web:** Projects 一覧をモック v3 の構成に揃え、状態の連結表示をなくす
+
+### Documentation
+
+- **perf:** P07 / P17 / P18 の暫定値を隔離インスタンスで計測して記録する (#3820)
+- **perf:** P11 / P12 を定義どおりの起点・終点で再計測して記録する (#3820)
+- **perf:** P11 / P12 の記録で旧サーフェス名を Issues に改める (#3820)
+- **perf:** P03 / P04 / P06 を #8040 の計装修復後の production route で計測して記録する (#3820)
+- **perf:** Record successful P12 refresh on a replay fixture
+- **web:** Record mock v3 visual comparisons
+- **web:** Refresh v3 comparison evidence after review
+- **web:** Capture final v3 header comparisons
+- **web:** Record v3 neutral surfaces in both themes
+
+### Features
+
+- **mobile:** Host受信signalを限定wireで検査し違反connectionを閉じる
+- **mobile:** Host送信signalを限定wireで検査し違反connectionを閉じる
+- **mobile:** Claim接続の初回pairingを限定signal wireで通す
+- **perf:** Workspace merge 状態 scan を ingest の phase として計測する (#3820)
+- **git:** Worktree 強制削除前に未コミット成果を rescue ref へ退避する
+- **mobile:** 再接続端末の鍵所持proofを限定signal wireで通す
+- **issue-monitor:** Tasks 領域にだけある AC を理由付きで readiness 拒否する (#3836)
+
+### Miscellaneous Tasks
+
+- **work:** SPEC #3820 の Work event を記録する
+- **work:** SPEC #3820 の棚卸し検証イベントを記録する
+- **work:** SPEC #4740 の PR #8047 関連付けを記録する
+- **work:** Issue #6476 の Work イベントを記録する
+- **work:** Issue #6476 の Work イベントを記録する
+- **work:** Issue #6476 の Work イベントを記録する
+- **work:** Issue #6476 の Work イベントを記録する
+- **work:** SPEC #3820 の Work event を記録する
+- **work:** SPEC #3820 T-006a の Work event を記録する
+- **work:** Issue #8042 の Work イベントを記録する
+- **work:** Issue #8042 の Work イベントを記録する
+- **work:** ASYNC-READY の Work イベントを記録する (#4740)
+- **work:** SPEC #3820 T-006c/d/e の Work event を記録する
+- **work:** UNUSED-DEADLINE の Work イベントを記録する (#4740)
+- **work:** Issue #6476 の Work イベントを記録する
+- **work:** Issue #6476 の Work イベントを記録する
+- **work:** Issue #3836 の Work イベントを記録する
+- **work:** SPEC #3820 T-006c/d/e 完了の Work event を記録する
+- **work:** WIN-DETACHED の Work イベントを記録する (#4740)
+- **work:** #3590 AC-3 スライスの Work 記録
+- **work:** #3590 AC-8 スライスの Work 記録
+- **work:** #4740 の期限テスト引き継ぎ記録を保存する
+
+### Refactor
+
+- **terminal:** Share screen tail extraction
+
+### Testing
+
+- **process:** 起動リトライの事前期限を外す (#4740)
+- **process:** 非同期 spawn の成功テストを readiness フックへ移す (#4740)
+- **process:** 期限超過 cleanup テストの未使用な期限引数を除く (#4740)
+- **pane:** Preserve transport fixture deadline hygiene
+- **process:** Windows の detached 成功テストの期限起点を spawn 後へ移す (#4740)
+- **process:** Unix の期限ツリーテストの期限起点を fixture 準備後へ移す (#4740)
+- **web:** Select mock comparison panes deterministically
+- **web:** Cover provider usage and tool management
+- **web:** Check motion overrides without a minimum animation count
+- **process:** 子孫保持 pipe の期限テストの起点を fixture 準備後へ移す (#4740)
+
 ## [9.179.0] - 2026-11-27
 
 ### Bug Fixes
