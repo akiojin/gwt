@@ -70,6 +70,7 @@
   --type-2xl: 2rem;
   --type-3xl: 2.75rem;
   --leading-body: 1.65;
+  --font-section-heading: 800 var(--type-lg)/1.35 var(--font-body);
 
   /* Tracking */
   --tracking-tight: -0.01em;

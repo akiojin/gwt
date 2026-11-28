@@ -6489,11 +6489,7 @@ body.route-body {
 .route-not-found__title {
   margin: 0;
   color: var(--color-display-fg);
-  font-family: var(--font-display);
-  font-stretch: 75%;
-  font-weight: 700;
-  letter-spacing: var(--tracking-display);
-  text-transform: uppercase;
+  font: var(--font-section-heading);
 }
 
 .gwt-hub__actions {

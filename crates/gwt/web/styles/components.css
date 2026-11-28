@@ -5134,11 +5134,11 @@ button.workspace-board-ref:focus-visible {
 }
 
 .op-usage-card[data-provider="codex"] .op-usage-card__icon {
-  color: var(--agent-color-codex, #6fb1ff);
+  color: var(--agent-codex);
 }
 
 .op-usage-card[data-provider="claude_code"] .op-usage-card__icon {
-  color: var(--agent-color-claude, #e0a06a);
+  color: var(--agent-claude);
 }
 
 .op-usage-card__name {
@@ -5152,8 +5152,8 @@ button.workspace-board-ref:focus-visible {
   letter-spacing: 0.06em;
   padding: 1px 7px;
   border-radius: 999px;
-  background: var(--color-surface, rgba(127, 127, 127, 0.16));
-  color: var(--color-text-muted, #9aa0ad);
+  background: var(--color-surface);
+  color: var(--color-text-muted);
 }
 
 .op-usage-card__limit {
@@ -5165,14 +5165,14 @@ button.workspace-board-ref:focus-visible {
 
 .op-usage-card__account {
   margin: -2px 0 8px 24px;
-  color: var(--color-text-muted, #9aa0ad);
+  color: var(--color-text-muted);
   font-size: var(--type-xs, 0.72rem);
   overflow-wrap: anywhere;
 }
 
 .op-usage-card__reason {
   font-size: var(--type-sm, 0.85rem);
-  color: var(--color-text-muted, #9aa0ad);
+  color: var(--color-text-muted);
   font-style: italic;
   padding: 2px 0;
 }
@@ -5192,7 +5192,7 @@ button.workspace-board-ref:focus-visible {
 }
 
 .op-usage-win__lbl {
-  color: var(--color-text-muted, #9aa0ad);
+  color: var(--color-text-muted);
 }
 
 .op-usage-win__bar {
@@ -5206,7 +5206,7 @@ button.workspace-board-ref:focus-visible {
 
 .op-usage-win__reset {
   font-size: var(--type-xs, 0.72rem);
-  color: var(--color-text-muted, #9aa0ad);
+  color: var(--color-text-muted);
   white-space: nowrap;
 }
 
@@ -5224,7 +5224,7 @@ button.workspace-board-ref:focus-visible {
   font-size: var(--type-xs, 0.72rem);
   text-transform: uppercase;
   letter-spacing: 0.06em;
-  color: var(--color-text-muted, #9aa0ad);
+  color: var(--color-text-muted);
 }
 
 .op-usage-sess__row {
@@ -5237,7 +5237,7 @@ button.workspace-board-ref:focus-visible {
 }
 
 .op-usage-sess__row[data-eligible="false"] {
-  color: var(--color-text-muted, #9aa0ad);
+  color: var(--color-text-muted);
 }
 
 .op-usage-sess__name {
@@ -5249,7 +5249,7 @@ button.workspace-board-ref:focus-visible {
 
 .op-usage-sess__model {
   font-size: var(--type-xs, 0.72rem);
-  color: var(--color-text-muted, #9aa0ad);
+  color: var(--color-text-muted);
   white-space: nowrap;
 }
 
@@ -5260,11 +5260,11 @@ button.workspace-board-ref:focus-visible {
 .op-usage-sess__ctx {
   text-align: right;
   white-space: nowrap;
-  color: var(--color-text-muted, #9aa0ad);
+  color: var(--color-text-muted);
 }
 
 .op-usage-sess__ctx[data-severity="normal"] {
-  color: var(--color-text, #e7e9ee);
+  color: var(--color-text);
 }
 
 .op-usage-sess__ctx[data-severity="warning"] {
@@ -5277,7 +5277,7 @@ button.workspace-board-ref:focus-visible {
 
 .op-usage-sess__more {
   font-size: var(--type-xs, 0.72rem);
-  color: var(--color-text-muted, #9aa0ad);
+  color: var(--color-text-muted);
 }
 
 /* Consumption grid: period × in/out/cached, right-aligned numerics. */
@@ -5297,7 +5297,7 @@ button.workspace-board-ref:focus-visible {
   font-size: var(--type-xs, 0.72rem);
   text-transform: uppercase;
   letter-spacing: 0.06em;
-  color: var(--color-text-muted, #9aa0ad);
+  color: var(--color-text-muted);
 }
 
 .op-usage-cgrid__colh {
@@ -5305,11 +5305,11 @@ button.workspace-board-ref:focus-visible {
   font-size: var(--type-xs, 0.72rem);
   text-transform: uppercase;
   letter-spacing: 0.04em;
-  color: var(--color-text-muted, #9aa0ad);
+  color: var(--color-text-muted);
 }
 
 .op-usage-cgrid__rowh {
-  color: var(--color-text-muted, #9aa0ad);
+  color: var(--color-text-muted);
 }
 
 .op-usage-cgrid__num {
@@ -5319,7 +5319,7 @@ button.workspace-board-ref:focus-visible {
 .op-usage-bar {
   height: 8px;
   border-radius: 999px;
-  background: var(--color-surface, rgba(255, 255, 255, 0.1));
+  background: var(--color-surface);
   overflow: hidden;
 }
 
@@ -5355,12 +5355,12 @@ button.workspace-board-ref:focus-visible {
   width: 100%;
   min-height: 2px;
   border-radius: 2px 2px 0 0;
-  background: var(--color-text-muted, #9aa0ad);
+  background: var(--color-text-muted);
   opacity: 0.55;
 }
 
 .op-usage-chart__col[data-today="true"] .op-usage-chart__bar {
-  background: var(--color-accent, #6fb1ff);
+  background: var(--color-state-active);
   opacity: 1;
 }
 
@@ -5815,7 +5815,7 @@ button.workspace-board-ref:focus-visible {
 .task-home__stale { color: var(--color-state-needs-input); }
 .task-decisions { display: flex; flex-direction: column; flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; overflow-wrap: anywhere; gap: var(--space-3); padding: var(--space-3); }
 .task-decisions__header { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-3); }
-.task-decisions__header h1 { margin: 0; font-size: var(--type-xl); }
+.task-decisions__header h1 { margin: 0; font: var(--font-section-heading); }
 .task-decisions__header h1:focus-visible { outline: 2px solid var(--color-focus-ring); outline-offset: 2px; }
 .task-decisions__eyebrow { margin: 0 0 var(--space-1); color: var(--color-text-muted); font-size: var(--type-xs); letter-spacing: var(--tracking-wide); text-transform: uppercase; }
 .task-decisions__count { margin: 0; color: var(--color-state-needs-input); font-size: var(--type-sm); }
@@ -5912,7 +5912,7 @@ button.workspace-board-ref:focus-visible {
 .project-themes button:hover { background: var(--color-surface-elevated); }
 .project-themes button:disabled { color: var(--color-text-muted); border-color: var(--color-border); cursor: not-allowed; }
 .project-themes a { color: var(--color-link); }
-.project-themes__header h1 { margin: 0; font-size: var(--type-xl); }
+.project-themes__header h1 { margin: 0; font: var(--font-section-heading); }
 .project-themes__header h1:focus { outline: none; }
 .project-themes__lead { margin: var(--space-1) 0 0; color: var(--color-text-muted); }
 .project-themes__meta { margin: var(--space-1) 0 0; color: var(--color-text-muted); font-size: var(--type-xs); }
@@ -5951,7 +5951,7 @@ button.workspace-board-ref:focus-visible {
 .exec-env :focus-visible { outline: 2px solid var(--color-focus-ring); outline-offset: 2px; }
 .exec-env button { max-width: 100%; padding: var(--space-1) var(--space-2); border: 1px solid var(--color-border-strong); border-radius: var(--radius-sm); color: var(--color-text); background: var(--color-surface); font: inherit; cursor: pointer; }
 .exec-env button:hover { background: var(--color-surface-elevated); }
-.exec-env__header h1 { margin: 0; font-size: var(--type-xl); }
+.exec-env__header h1 { margin: 0; font: var(--font-section-heading); }
 .exec-env__header h1:focus { outline: none; }
 .exec-env__eyebrow { margin: 0 0 var(--space-1); color: var(--color-text-muted); font-size: var(--type-xs); letter-spacing: var(--tracking-wide); text-transform: uppercase; }
 .exec-env__lead { margin: var(--space-1) 0 0; color: var(--color-text-muted); }

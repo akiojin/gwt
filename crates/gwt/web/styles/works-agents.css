@@ -53,7 +53,7 @@
   gap: var(--space-3);
 }
 .works-heading h2,
-.roster-heading h2 { margin: 0; font-size: var(--type-lg); font-weight: 600; }
+.roster-heading h2 { margin: 0; font: var(--font-section-heading); }
 .works-counts { display: flex; flex-wrap: wrap; gap: var(--space-3); }
 .works-counts,
 .works-today,
