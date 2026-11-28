@@ -249,22 +249,21 @@ body {
 }
 
 .arrange-button {
-  height: 38px;
-  padding: 0 12px;
-  border: 1px solid var(--color-button-border);
-  border-radius: var(--radius-md);
-  background: var(--color-button-bg);
-  color: var(--color-button-fg);
+  height: 36px;
+  padding: 0 var(--space-3);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  color: var(--color-text);
   font-family: var(--font-body);
-  font-size: var(--type-xs);
+  font-size: var(--type-caption);
   letter-spacing: var(--tracking-normal);
-  font-weight: 600;
+  font-weight: 700;
   cursor: pointer;
-  box-shadow: var(--shadow-1);
 }
 
 .arrange-button:hover {
-  background: var(--color-button-bg-hover);
+  background: var(--color-surface-elevated);
 }
 
 /* SPEC-2356 — workspace window chrome.

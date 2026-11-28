@@ -207,6 +207,13 @@ test.describe('T-036 v3 regression (isolated checkout)', () => {
       await expect(project.locator('#op-strip-issue-monitor')).toHaveAttribute('title', /PM decisions 1/, { timeout: 20_000 });
       const bodyFont = await project.locator('body').evaluate(body => getComputedStyle(body).fontFamily);
       await expect(project.locator('.op-status-strip')).toHaveCSS('font-family', bodyFont);
+      const surface = await project.locator('.app-head').evaluate(header => getComputedStyle(header).backgroundColor);
+      for (const name of ['Split view', 'Close Project']) {
+        const button = project.getByRole('button', { name, exact: true });
+        await expect(button).toHaveCSS('background-color', surface);
+        await expect(button).toHaveCSS('font-family', bodyFont);
+        await expect(button).toHaveCSS('text-transform', 'none');
+      }
 
       // Header destinations on the project page.
       const header = appNav(project);
