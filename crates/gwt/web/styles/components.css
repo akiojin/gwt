@@ -18,11 +18,11 @@ body {
   background: var(--color-canvas);
   color: var(--color-text);
   font-family: var(--font-body);
-  font-size: var(--type-base);
   line-height: var(--leading-body);
 }
 
 body {
+  font-size: var(--type-base);
   overflow: hidden;
   position: relative;
 }

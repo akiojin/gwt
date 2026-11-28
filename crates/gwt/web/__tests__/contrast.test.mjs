@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 
@@ -129,7 +129,7 @@ test("v3 chrome uses a plain canvas and the shared state palette", () => {
 });
 
 test("light v3 tokens preserve the reference palette", () => {
-  const mock = readFileSync(resolve(here, "../../../../docs/design/issue-7007/mock-full-refresh-v3.html"), "utf8");
+  const mock = readFileSync(resolve(realpathSync(here), "../../../../docs/design/issue-7007/mock-full-refresh-v3.html"), "utf8");
   const pairs = {
     bg: "canvas", panel: "surface", panel2: "surface-elevated", ink: "text",
     ink2: "text-muted", line: "border", line2: "border-strong",
