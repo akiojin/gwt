@@ -1286,7 +1286,9 @@ async fn close_pane(
             &mut socket,
             request_id,
             &resolved_id,
-            Duration::from_secs(2),
+            // Allow the host's two-second acceptance wait and terminal frame
+            // send to finish before the CLI applies its own fallback deadline.
+            Duration::from_secs(5),
         )
         .await?;
         return Ok(format!("close requested {requested_id}\n{lease_note}"));
