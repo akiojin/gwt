@@ -19,7 +19,7 @@ body {
   color: var(--color-text);
   font-family: var(--font-body);
   font-size: var(--type-base);
-  line-height: 1.5;
+  line-height: var(--leading-body);
 }
 
 body {
@@ -123,33 +123,6 @@ body {
   overflow-wrap: anywhere;
 }
 
-/* Scan-grid backdrop (subtle, behind everything else) */
-body::before {
-  content: "";
-  position: fixed;
-  inset: 0;
-  pointer-events: none;
-  z-index: 0;
-  background-image:
-    linear-gradient(to right, var(--bg-scan-grid) 1px, transparent 1px),
-    linear-gradient(to bottom, var(--bg-scan-grid) 1px, transparent 1px);
-  background-size: 32px 32px;
-  background-position: -1px -1px;
-  opacity: 0.55;
-}
-
-/* Grain overlay (pseudo-CRT texture, very subtle) */
-body::after {
-  content: "";
-  position: fixed;
-  inset: 0;
-  pointer-events: none;
-  z-index: 0;
-  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160' viewBox='0 0 160 160'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 0.91 0 0 0 0 0.92 0 0 0 0 0.93 0 0 0 0.45 0'/></filter><rect width='100%' height='100%' filter='url(%23n)' opacity='0.5'/></svg>");
-  mix-blend-mode: overlay;
-  opacity: 0.28;
-}
-
 #app {
   position: relative;
   z-index: 1;
@@ -165,7 +138,6 @@ body::after {
     "rail surface"
     "strip strip"
     "appfoot appfoot";
-  background: var(--bg-depth-glow), transparent;
 }
 
 /* ============================================================
@@ -1187,22 +1159,11 @@ body::after {
   display: flex;
   align-items: center;
   padding: 0 var(--space-4);
-  font-family: var(--font-mono);
-  font-size: var(--type-xs);
-  letter-spacing: var(--tracking-mono);
+  font-family: var(--font-body);
+  font-size: var(--type-caption);
   border-top: 1px solid var(--color-border);
   z-index: 10;
   gap: var(--space-3);
-  /* SPEC-2356 — the strip bg is dark in BOTH themes (it is a permanent dark
-     chrome band). Scope the state-color tokens locally to bright on-dark
-     variants so cell value contrast clears WCAG AA in light theme too —
-     light theme's default state colors are tuned for light bg and would
-     otherwise fail (e.g. dark red blocked on dark strip bg = 2.6:1). */
-  --color-state-active: #22d3ee;
-  --color-state-idle: #94a3b8;
-  --color-state-blocked: #f87171;
-  /* FR-039 (anshin) — WAITING cell amber, bright enough for the dark strip. */
-  --color-state-needs-input: #fbbf24;
 }
 
 .op-status-strip__cell {
@@ -2010,9 +1971,6 @@ kbd.op-kbd {
   font-size: var(--type-md);
   text-transform: uppercase;
   opacity: 0;
-  /* SPEC-2356 — soft cyan glow on the OPERATOR ONLINE marker so it reads
-     as the boot complete signal. */
-  text-shadow: 0 0 12px color-mix(in oklab, var(--color-state-active) 60%, transparent);
   animation: op-briefing-online-in var(--motion-slow) ease-out forwards;
   animation-delay: calc(var(--motion-slow) * 4);
 }

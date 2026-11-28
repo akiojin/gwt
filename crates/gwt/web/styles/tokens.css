@@ -1,9 +1,6 @@
-/* SPEC-2356 Operator Design System — Tokens.
- *
- * Two complete token sets (Dark Operator = Mission Control / carbon + neon,
- * Light Operator = Drafting Table / bone + ink). Both share semantic keys —
- * the contrast.test.mjs harness asserts WCAG 2.1 AA contrast for every pair
- * defined in REQUIRED_PAIRS and that the two sets define the same names.
+/* Operator Design System — shared palette and layout for the v3 GUI.
+ * Light palette follows mock-full-refresh-v3.html. Dark reverses the
+ * luminance hierarchy and preserves the neutral and teal hue families.
  */
 
 :root {
@@ -38,99 +35,55 @@
 }
 
 :root[data-theme="dark"] {
-  /* Surface palette */
-  --color-canvas: #0a0d12;
-  --color-surface: #11141b;
-  --color-surface-elevated: #1a1f29;
+  --color-canvas: #191b20;
+  --color-surface: #22252b;
+  --color-surface-elevated: #2b2f37;
   --color-overlay: rgba(4, 7, 12, 0.72);
   --color-scrim: rgba(0, 0, 0, 0.55);
 
-  /* Text */
-  --color-text: #e8eaed;
-  --color-text-strong: #ffffff;
-  --color-text-muted: #b8c2cc;
-  --color-text-disabled: #6b7280;
+  --color-text: #edf0f4;
+  --color-text-strong: #f5f6f8;
+  --color-text-muted: #bcc4cf;
+  --color-text-disabled: #8e98a6;
 
-  /* Display surface (Hubot Sans on canvas) */
-  --color-display-fg: #f5f5f5;
+  --color-display-fg: #edf0f4;
 
-  /* Status Strip */
-  --color-status-strip-bg: #050709;
-  --color-status-strip-fg: #d8dde2;
-  --color-status-strip-divider: rgba(216, 221, 226, 0.18);
+  --color-status-strip-bg: #22252b;
+  --color-status-strip-fg: #edf0f4;
+  --color-status-strip-divider: #515b68;
 
-  /* Buttons */
-  --color-button-bg: #2a3140;
-  --color-button-bg-hover: #353d4f;
-  --color-button-fg: #f5f5f5;
-  --color-button-border: rgba(232, 234, 237, 0.18);
+  --color-button-bg: #76cbbc;
+  --color-button-bg-hover: #97ded0;
+  --color-button-fg: #152d29;
+  --color-button-border: #515b68;
 
-  /* Borders */
-  --color-border: rgba(232, 234, 237, 0.10);
-  --color-border-strong: rgba(232, 234, 237, 0.28);
-  --color-focus-ring: #06b6d4;
+  --color-border: #424a55;
+  --color-border-strong: #515b68;
+  --color-focus-ring: #76cbbc;
 
-  /* Link */
-  --color-link: #22d3ee;
-  --color-link-hover: #67e8f9;
+  --color-link: #97ded0;
+  --color-link-hover: #b2e9de;
 
-  /* Live status semantics — dark.
-     idle was #6b7280 (slate-500) but failed WCAG AA when used as TEXT on
-     --color-surface (3.81:1) and --color-surface-elevated (3.40:1). The
-     replacement #828c9b is a slate-450 that clears 4.5:1 on all dark
-     surface variants while staying visibly subtler than --color-text-muted
-     (#b8c2cc) and clearly darker than --color-state-done (#94a3b8). */
-  --color-state-active: #22d3ee;
-  --color-state-idle: #828c9b;
+  --color-state-active: #76cbbc;
+  --color-state-idle: #929cab;
   --color-state-blocked: #f87171;
   --color-state-done: #94a3b8;
-  /* FR-039 (anshin) — "needs input" / your-turn attention state. LOUD but not
-     error-red: warm amber (amber-400) clears WCAG AA as text on every dark
-     surface (11.04 / 9.89) and stays distinct from blocked (#f87171). */
   --color-state-needs-input: #fbbf24;
-  /* SPEC-2359 US-83 (UX 2026-06-24) — "remote / elsewhere" badge accent. Violet
-     is unused by any live state (active=cyan, blocked=red, done=slate,
-     needs-input=amber, idle=gray), so a Remote tag reads as "a place, not a
-     state". violet-400 clears WCAG AA as text on dark surfaces (~7.0 / ~6.0). */
   --color-state-remote: #a78bfa;
-  /* Issue #3979 — "good / nothing to act on" severity. The notification-center
-     triage rows need a positive severity color, and it cannot be
-     --color-state-active: that token IS the accent (identical to
-     --color-focus-ring in light), so a green is the only unclaimed positive
-     signal left. green-400 shares the green family with --agent-opencode, but
-     agent brand colors live on panes and cards while severity lives inside the
-     notification drawer, so the two never co-occur. Also resolves the dangling
-     var() the wizard progress marker already referenced. AA as text on dark
-     --color-surface / --color-surface-elevated (13.3 / 9.5). */
-  --color-state-success: #4ade80;
-  /* SPEC-3431 FR-020 — the resident PM agent's role accent. The PM is the
-     user's single conversational window, so it needs an identity that is not
-     a runtime state and not one of the agent brand colors (the PM itself runs
-     Claude, so it would otherwise read as amber like any Claude pane).
-     emerald-400 is unclaimed here: active=cyan, blocked=red, done=slate,
-     needs-input=amber, remote=violet, and the agent ramp uses amber/cyan/
-     fuchsia/green-400/blue/gray — this sits clear of opencode's #4ade80 in
-     hue-lightness while clearing WCAG AA as text on dark surfaces (~8.3). */
+  --color-state-success: #76cbbc;
   --color-role-pm: #34d399;
 
-  /* Agent colors — SPEC-2133 semantic mapping, dark-tuned */
   --agent-claude: #fbbf24;
-  --agent-codex: #22d3ee;
+  --agent-codex: #76cbbc;
   --agent-hermes: #e879f9;
   --agent-opencode: #4ade80;
   --agent-copilot: #60a5fa;
   --agent-custom: #a1a8b3;
 
-  /* Backdrop (scan-grid, grain) */
-  --bg-scan-grid: rgba(232, 234, 237, 0.04);
-  --bg-grain: rgba(232, 234, 237, 0.05);
-  --bg-depth-glow: radial-gradient(ellipse at top, rgba(34, 211, 238, 0.08), transparent 60%);
-
   /* Shadow */
-  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.5);
-  --shadow-2: 0 8px 24px rgba(0, 0, 0, 0.55);
-  --shadow-glow-active: 0 0 0 1px var(--agent-color, var(--color-state-active)),
-                        0 0 16px 0 color-mix(in oklab, var(--agent-color, var(--color-state-active)) 45%, transparent);
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.22);
+  --shadow-2: 0 10px 30px rgba(0, 0, 0, 0.36), 0 2px 6px rgba(0, 0, 0, 0.22);
+  --shadow-glow-active: 0 0 0 1px var(--agent-color, var(--color-state-active));
 
   /* Layout primitives */
   --space-0-5: 2px;
@@ -144,9 +97,9 @@
   --space-10: 40px;
   --space-12: 48px;
   --space-16: 64px;
-  --radius-sm: 2px;
-  --radius-md: 4px;
-  --radius-lg: 8px;
+  --radius-sm: 8px;
+  --radius-md: 10px;
+  --radius-lg: 12px;
   --radius-pill: 999px;
 
   /* Motion */
@@ -158,86 +111,55 @@
 }
 
 :root[data-theme="light"] {
-  /* Surface palette — drafting table + ink.
-     Keep the light flagship bright, but give canvas / cards / chrome enough
-     luminance separation to remain scannable in dense work sessions. */
-  --color-canvas: #e9edf0;
+  --color-canvas: #f2f3f5;
   --color-surface: #ffffff;
-  --color-surface-elevated: #f3f6f7;
+  --color-surface-elevated: #e9ebee;
   --color-overlay: rgba(20, 22, 26, 0.62);
   --color-scrim: rgba(20, 22, 26, 0.45);
 
-  /* Text */
-  --color-text: #151922;
-  --color-text-strong: #000000;
-  --color-text-muted: #3f4752;
-  --color-text-disabled: #737d89;
+  --color-text: #1b1e24;
+  --color-text-strong: #1b1e24;
+  --color-text-muted: #4c5462;
+  --color-text-disabled: #7c8594;
 
-  /* Display */
-  --color-display-fg: #0a0d12;
+  --color-display-fg: #1b1e24;
 
-  /* Status Strip — inverted dark strip on light canvas (Mission control feel) */
-  --color-status-strip-bg: #151922;
-  --color-status-strip-fg: #f4f7f8;
-  --color-status-strip-divider: rgba(244, 247, 248, 0.22);
+  --color-status-strip-bg: #ffffff;
+  --color-status-strip-fg: #1b1e24;
+  --color-status-strip-divider: #c3c9d2;
 
-  /* Buttons */
-  --color-button-bg: #151922;
-  --color-button-bg-hover: #263141;
+  --color-button-bg: #0f766e;
+  --color-button-bg-hover: #0b5a53;
   --color-button-fg: #ffffff;
-  --color-button-border: rgba(21, 25, 34, 0.28);
+  --color-button-border: #c3c9d2;
 
-  /* Borders */
-  --color-border: rgba(21, 25, 34, 0.18);
-  --color-border-strong: rgba(21, 25, 34, 0.38);
-  --color-focus-ring: #075f73;
+  --color-border: #d8dce2;
+  --color-border-strong: #c3c9d2;
+  --color-focus-ring: #0f766e;
 
-  /* Link */
-  --color-link: #075f73;
-  --color-link-hover: #064e5d;
+  --color-link: #0b5a53;
+  --color-link-hover: #0f766e;
 
-  /* Live status semantics */
-  --color-state-active: #075f73;
+  --color-state-active: #0f766e;
   --color-state-idle: #4b5563;
-  --color-state-blocked: #991b1b;
+  --color-state-blocked: #b3261e;
   --color-state-done: #334155;
-  /* FR-039 (anshin) — "needs input" / your-turn attention state. A deep amber
-     gold (amber-700) clears WCAG AA as text on bone surfaces (5.02 / 4.62)
-     and reads as warm attention, clearly distinct from blocked red. */
-  --color-state-needs-input: #b45309;
-  /* SPEC-2359 US-83 (UX 2026-06-24) — "remote / elsewhere" badge accent.
-     violet-700 clears WCAG AA as text on bone surfaces (~7.4 / ~6.9) and is
-     distinct from active/blocked/done/needs-input. */
+  --color-state-needs-input: #a34a08;
   --color-state-remote: #6d28d9;
-  /* Issue #3979 — "good / nothing to act on" severity, light theme. green-700
-     clears WCAG AA as text on bone surfaces (5.02 / 4.62) and stays distinct
-     from --color-state-active, which in this theme is literally the accent
-     (--color-focus-ring). */
-  --color-state-success: #15803d;
-  /* SPEC-3431 FR-020 — PM role accent, light theme. emerald-700 clears WCAG
-     AA as text on bone surfaces (~4.9) and keeps the PM readable as an
-     identity rather than a surface tint, so the PM window stays legible when
-     an active state is expressed only through elevation. */
+  --color-state-success: #0f766e;
   --color-role-pm: #047857;
 
-  /* Agent colors — dark-tuned chroma for bone background */
   --agent-claude: #92400e;
-  --agent-codex: #155e75;
+  --agent-codex: #0b5a53;
   --agent-hermes: #86198f;
   --agent-opencode: #166534;
   --agent-copilot: #1e3a8a;
   --agent-custom: #4b5563;
 
-  /* Backdrop */
-  --bg-scan-grid: rgba(26, 29, 36, 0.04);
-  --bg-grain: rgba(26, 29, 36, 0.04);
-  --bg-depth-glow: radial-gradient(ellipse at top, rgba(14, 116, 144, 0.06), transparent 60%);
-
   /* Shadow */
-  --shadow-1: 0 1px 2px rgba(21, 25, 34, 0.10);
-  --shadow-2: 0 10px 28px rgba(21, 25, 34, 0.16);
-  --shadow-glow-active: 0 0 0 1px var(--agent-color, var(--color-state-active)),
-                        0 0 12px 0 color-mix(in oklab, var(--agent-color, var(--color-state-active)) 30%, transparent);
+  --shadow-1: 0 1px 2px rgba(20, 26, 38, 0.05);
+  --shadow-2: 0 10px 30px rgba(20, 26, 38, 0.10), 0 2px 6px rgba(20, 26, 38, 0.06);
+  --shadow-glow-active: 0 0 0 1px var(--agent-color, var(--color-state-active));
 
   /* Layout primitives — match dark for parity */
   --space-0-5: 2px;
@@ -251,9 +173,9 @@
   --space-10: 40px;
   --space-12: 48px;
   --space-16: 64px;
-  --radius-sm: 2px;
-  --radius-md: 4px;
-  --radius-lg: 8px;
+  --radius-sm: 8px;
+  --radius-md: 10px;
+  --radius-lg: 12px;
   --radius-pill: 999px;
 
   /* Motion */
@@ -321,9 +243,6 @@
     --agent-copilot: Highlight;
     --agent-custom: GrayText;
 
-    --bg-scan-grid: transparent;
-    --bg-grain: transparent;
-    --bg-depth-glow: none;
     --shadow-1: none;
     --shadow-2: none;
     --shadow-glow-active: 0 0 0 2px Highlight;

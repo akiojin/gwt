@@ -13,6 +13,7 @@ import { expect, test, type Page } from '@playwright/test';
 import { spawnSync } from 'node:child_process';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { startExactRelaunchFixture } from './_helpers/exact-relaunch';
 import { gotoLiveGwt } from './_helpers/live-gwt';
 
@@ -81,6 +82,46 @@ test.describe('T-036 v3 regression (isolated checkout)', () => {
     await page.context().addInitScript(value => {
       if (location.protocol.startsWith('http')) localStorage.setItem('gwt:ui:theme', value);
     }, theme);
+    const mock = await page.context().newPage();
+    const comparison = await page.context().newPage();
+    const referencePath = resolve(process.env.GWT_PLAYWRIGHT_CHECKOUT_ROOT ?? process.cwd(),
+      'docs/design/issue-7007/mock-full-refresh-v3.html');
+    const compare = async (product: Page, name: string, mockPage: string, mockScreen?: string) => {
+      await mock.goto(`${pathToFileURL(referencePath).href}?full=1`);
+      // Select the reference through its own links, including hidden menu items.
+      if (mockPage !== 'start') {
+        const links = mock.locator(`[data-openpage="${mockPage}"]`);
+        const direct = links.and(mock.locator(`[data-openscreen="${mockScreen}"]`));
+        await (await direct.count() ? direct : links).first().evaluate((entry: HTMLElement) => entry.click());
+        const navigation = mock.locator(`.pagegroup[data-page="${mockPage}"] [data-nav="${mockScreen}"]`);
+        if (!(await direct.count()) && await navigation.count()) {
+          await navigation.first().evaluate((entry: HTMLElement) => entry.click());
+        }
+      }
+      await expect(mock.locator(`.pagegroup.on[data-page="${mockPage}"]`)).toBeVisible();
+      if (mockScreen) {
+        await expect(mock.locator(`.screen-pane.on[data-screen="${mockScreen}"]`)).toBeVisible();
+      }
+      const canvas = theme === 'light' ? 'rgb(242, 243, 245)' : 'rgb(25, 27, 32)';
+      await expect(product.locator('body')).toHaveCSS('background-color', canvas);
+      const typography = (view: Page) => view.locator('body').evaluate(body => {
+        const style = getComputedStyle(body);
+        return [style.fontFamily, style.fontSize, style.lineHeight];
+      });
+      expect(await typography(product)).toEqual(await typography(mock));
+      expect(await product.locator('body').evaluate(body => [
+        getComputedStyle(body, '::before').backgroundImage,
+        getComputedStyle(body, '::after').backgroundImage,
+      ])).toEqual(['none', 'none']);
+      const [reference, actual] = await Promise.all([mock, product].map(view => view.screenshot({ animations: 'disabled' })));
+      const image = (buffer: Buffer, label: string) =>
+        `<figure style="margin:0"><figcaption>${label}</figcaption><img style="width:100%" src="data:image/png;base64,${buffer.toString('base64')}" alt=""></figure>`;
+      await comparison.setContent(`<main style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font:16px system-ui">
+        ${image(reference, 'Mock v3 · Light')}${image(actual, `Product · ${theme}`)}</main>`);
+      const path = info.outputPath(`${name}-${theme}-comparison.png`);
+      await comparison.screenshot({ path });
+      await info.attach(`${name}-${theme}-comparison`, { path, contentType: 'image/png' });
+    };
     const openProject = () => gotoLiveGwt(page, target.url, { enableTestBridge: true, projectKey });
     const expectWaiting = async (count: number, view: Page = page) => {
       await expect(pmEntry(view)).toHaveAttribute('aria-label',
@@ -105,6 +146,7 @@ test.describe('T-036 v3 regression (isolated checkout)', () => {
       await expect(page).toHaveURL(/\?view=decisions$/);
       await expect(page.getByRole('heading', { name: 'Decisions' })).toBeVisible();
       await expect(page.locator('[data-home-waitjump]')).toHaveText('3 decisions waiting');
+      await compare(page, 'decisions', 'gwt', 'g-decide');
       for (const question of QUESTIONS) {
         await expect(page.locator('[data-home-topic]').filter({ hasText: question })).toHaveCount(1);
       }
@@ -121,6 +163,8 @@ test.describe('T-036 v3 regression (isolated checkout)', () => {
       await expect(bundledTopic).toHaveCount(0);
       await expect(page.locator('[data-home-waitjump]')).toHaveText('2 decisions waiting');
       await expect(page.locator('article[data-home-topic]').filter({ hasText: QUESTIONS[2] })).toHaveCount(1);
+
+      await compare(page, 'home', 'start');
 
       // Answering one from Home resolves it everywhere.
       const answered = page.locator('[data-home-topic]').filter({ hasText: QUESTIONS[0] });
@@ -146,6 +190,8 @@ test.describe('T-036 v3 regression (isolated checkout)', () => {
       await expect(page.getByRole('heading', { name: 'Projects', level: 1 })).toBeVisible();
       await expectWaiting(1);
 
+      await compare(page, 'projects', 'projects', 'projects-main');
+
       // The project opens from the list in its own browser tab (SPEC-3287);
       // its count followed the answer.
       const opened = page.context().waitForEvent('page');
@@ -163,24 +209,31 @@ test.describe('T-036 v3 regression (isolated checkout)', () => {
       await expect(project.getByRole('heading', { name: 'Agents', exact: true })).toBeVisible();
       const registeredMembers = project.getByRole('meter', { name: 'Registered members', exact: true });
       await expect(registeredMembers).toBeVisible();
+      await compare(project, 'agent-ledger', 'agents', 'agents-ledger');
       await header.getByRole('button', { name: 'Environments', exact: true }).click();
       await expect(project.getByRole('heading', { name: 'Execution environments', exact: true })).toBeVisible();
+      await compare(project, 'environments', 'tools', 'tools-env');
       await project.getByRole('button', { name: 'Accounts', exact: true }).click();
       // Design item 234: no tool-side account rows on the accounts screen.
       const accounts = project.getByRole('region', { name: 'Execution environments' });
       await expect(accounts.getByRole('heading', { name: 'Accounts', level: 1 })).toBeVisible();
       await expect(accounts).not.toContainText(/Hermes Agent|OpenClaw|OpenCode/);
+      await compare(project, 'accounts', 'tools', 'tools-pool');
       await header.getByRole('button', { name: 'Menu ▾' }).click();
       await project.getByRole('menuitem', { name: 'Settings' }).click();
       await expect(project.locator('.surface-area')).toContainText(/Settings/i);
       await project.locator('#op-notifications-button').click();
       await expect(project.locator('#notification-center')).toBeVisible();
+      await compare(project, 'notifications', 'notifications', 'notifications-main');
       await project.keyboard.press('Escape');
 
       // Every surface of the project page, from the rail.
-      for (const [selector, content] of RAIL_SURFACES) {
+      const mockScreens = ['g-tasks', 'g-issues', 'g-agents', 'g-board', 'g-settings', 'g-logs', 'g-index', 'profile-main'];
+      for (const [index, [selector, content]] of RAIL_SURFACES.entries()) {
         await project.locator(`.op-rail ${selector}`).click();
         await expect(project.locator('.surface-area'), selector).toContainText(content);
+        const mockScreen = mockScreens[index];
+        await compare(project, mockScreen, mockScreen === 'profile-main' ? 'profile' : 'gwt', mockScreen);
       }
 
       // The Works screen (design item 137) is folded into Issues: the rail
@@ -199,6 +252,8 @@ test.describe('T-036 v3 regression (isolated checkout)', () => {
       await info.attach(`v3-regression-${theme}`, { path: screenshot, contentType: 'image/png' });
       expect(errors, 'console / page errors').toEqual([]);
     } finally {
+      await comparison.close();
+      await mock.close();
       await target.stop();
     }
   });
