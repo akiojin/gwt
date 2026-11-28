@@ -7189,7 +7189,8 @@ body.route-body--chat {
   padding: var(--space-3);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-lg);
-  background: var(--color-surface-elevated);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-1);
 }
 
 .gwt-home__msg p {
@@ -7203,7 +7204,6 @@ body.route-body--chat {
 
 .gwt-home__msg--pm {
   align-self: flex-start;
-  border-inline-start: 2px solid var(--color-role-pm);
   border-end-start-radius: var(--radius-sm);
 }
 
@@ -7281,6 +7281,9 @@ body.route-body--chat {
   max-width: 100%;
   padding: var(--space-1) var(--space-3);
   border-radius: var(--radius-pill);
+  font: 700 var(--type-caption) var(--font-body);
+  letter-spacing: var(--tracking-normal);
+  text-transform: none;
   white-space: normal;
   text-align: start;
 }
