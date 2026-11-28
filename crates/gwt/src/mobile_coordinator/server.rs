@@ -2713,8 +2713,9 @@ mod tests {
                 real_wall(),
             )
             .is_ok());
-        // A reconnected device never pairs: after its offer and the Host's
-        // answer, a pairing request closes the connection unreported.
+        // A reconnected device proves its key on the same wire: the Host's
+        // challenge reaches it and its proof reaches the Host decoded. It never
+        // pairs: a pairing request then closes the connection unreported.
         {
             use crate::mobile_host::registration_client::OutboundSignal;
             use crate::mobile_host::signal::{BrowserSignal, HostSignal};
@@ -2738,10 +2739,39 @@ mod tests {
             };
             bounded(signals.send(answer)).await.ok().unwrap();
             assert_eq!(next_json(&mut browser).await["type"], "signal");
-            let public_key = {
-                use base64::Engine as _;
-                base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([4; 65])
+            let challenge = OutboundSignal {
+                connection_id,
+                signal: HostSignal::AuthChallenge {
+                    challenge_id: "c1".to_string(),
+                    signing_payload: "[]".to_string(),
+                },
             };
+            bounded(signals.send(challenge)).await.ok().unwrap();
+            let relayed = next_json(&mut browser).await;
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(relayed["payload"].as_str().unwrap())
+                    .unwrap(),
+                json!({"type":"auth_challenge","challenge_id":"c1","signing_payload":"[]"})
+            );
+            let b64 = |bytes: &[u8]| {
+                use base64::Engine as _;
+                base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+            };
+            let proof = json!({"type":"auth_proof","challenge_id":"c1","signature":b64(&[7; 64])})
+                .to_string();
+            let proof = json!({"type":"signal","payload":proof}).to_string();
+            bounded(browser.send(Message::text(proof))).await.unwrap();
+            assert_eq!(
+                bounded(connections.recv()).await,
+                Some(ConnectionEvent::Signal {
+                    connection_id,
+                    signal: BrowserSignal::AuthProof {
+                        challenge_id: "c1".to_string(),
+                        signature: vec![7; 64],
+                    }
+                })
+            );
+            let public_key = b64(&[4; 65]);
             let request = json!({"type":"pair_request","name":"Phone",
                                  "public_key":public_key,"project":PROJECT})
             .to_string();
