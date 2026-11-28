@@ -3023,34 +3023,38 @@ mod tests {
     #[test]
     fn shared_intake_resolves_portable_containers_only_against_each_source_root() {
         let tmp = tempfile::tempdir().expect("tempdir");
+        let producer = tmp.path().join("producer-clone");
+        std::fs::create_dir(&producer).unwrap();
         let first = tmp.path().join("first-worktree");
         let second = tmp.path().join("second-worktree");
         let foreign = tmp.path().join("foreign-clone");
-        let content: Arc<str> = [Path::new("."), foreign.as_path()]
-            .into_iter()
-            .enumerate()
-            .map(|(index, path)| {
-                serde_json::json!({
-                    "id": format!("event-portable-{index}"),
-                    "work_item_id": format!("work-portable-{index}"),
-                    "kind": "start",
-                    "execution_container": {"branch": "work/target", "worktree_path": path},
-                    "updated_at": "2026-10-22T00:00:00Z"
-                })
-                .to_string()
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-            .into();
+        let mut portable = WorkEvent::new(
+            WorkEventKind::Start,
+            "work-portable",
+            "2026-10-22T00:00:00Z".parse().unwrap(),
+        );
+        let mut container = source_container("work/target");
+        container.worktree_path = Some(producer.clone());
+        portable.execution_container = Some(container);
+        let mut bytes =
+            crate::workspace_projection::canonical_workspace_work_event_bytes(&portable, &producer)
+                .expect("serialize the producer's shard");
+        let mut legacy = portable.clone();
+        legacy.id = "event-legacy".to_string();
+        legacy.execution_container.as_mut().unwrap().worktree_path = Some(foreign.clone());
+        bytes.extend(serde_json::to_vec(&legacy).unwrap());
+        let content: Arc<str> = String::from_utf8(bytes).unwrap().into();
         let copied_to_develop = tmp.path().join("develop-worktree");
         let sources = [
-            ("work/target", Some(first.clone())),
-            ("work/target", Some(second.clone())),
-            ("develop", Some(copied_to_develop)),
-            ("work/target", None),
+            (Some("work/target"), Some(first.clone())),
+            (Some("work/target"), Some(second.clone())),
+            (Some("develop"), Some(copied_to_develop)),
+            (None, Some(tmp.path().join("detached-worktree"))),
+            (Some("work/target"), None),
         ]
         .map(|(branch, root)| {
-            let mut context = source_container(branch);
+            let mut context = source_container("work/target");
+            context.branch = branch.map(str::to_owned);
             context.worktree_path = root;
             SharedWorkEventsSource::new(Arc::clone(&content), Some(context))
         });
@@ -3058,7 +3062,7 @@ mod tests {
         let events = collect_shared_work_event_sources(sources, &mut report).expect("collect");
         let portable_paths = events
             .iter()
-            .filter(|(event, _)| event.id == "event-portable-0")
+            .filter(|(event, _)| event.id == portable.id)
             .map(|(event, _)| {
                 event
                     .execution_container
@@ -3074,7 +3078,7 @@ mod tests {
         );
         assert!(events
             .iter()
-            .filter(|(event, _)| event.id == "event-portable-1")
+            .filter(|(event, _)| event.id == legacy.id)
             .all(|(event, _)| event
                 .execution_container
                 .as_ref()

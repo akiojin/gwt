@@ -1545,48 +1545,30 @@ pub fn projection_only_continue_container(
     item: &gwt_core::workspace_projection::WorkItem,
     project_root: &Path,
 ) -> Result<(PathBuf, String), ContinueWorkFailure> {
+    let unavailable = || {
+        ContinueWorkFailure::failed(
+            "worktree_unavailable",
+            "This Work cannot be continued because its worktree is unavailable.",
+            false,
+        )
+    };
     let mut selected_path: Option<PathBuf> = None;
     let mut selected_branch: Option<String> = None;
+    let mut has_unavailable_path = false;
+    let mut has_local_branch_path = false;
     for container in item
         .events
         .iter()
         .filter_map(|event| event.execution_container.as_ref())
         .chain(item.execution_containers.iter())
     {
-        if let Some(path) = container.worktree_path.as_deref() {
-            let canonical = dunce::canonicalize(path).map_err(|_| {
-                ContinueWorkFailure::failed(
-                    "worktree_unavailable",
-                    "This Work cannot be continued because its worktree is unavailable.",
-                    false,
-                )
-            })?;
-            if selected_path
-                .as_deref()
-                .is_some_and(|selected| !path_matches(selected, &canonical))
-            {
-                return Err(ContinueWorkFailure::failed(
-                    "execution_container_ambiguous",
-                    "The Work has multiple execution containers and cannot be continued safely.",
-                    false,
-                ));
-            }
-            if !worktree_matches_project_state(&canonical, project_root) {
-                return Err(ContinueWorkFailure::failed(
-                    "execution_container_foreign",
-                    "The Work execution container does not belong to the active project.",
-                    false,
-                ));
-            }
-            selected_path.get_or_insert(canonical);
-        }
-
         let branch = container
             .branch
             .as_deref()
             .map(str::trim)
             .filter(|branch| !branch.is_empty())
             .map(crate::launch_runtime::normalize_branch_name);
+        let has_branch = branch.is_some();
         if let Some(branch) = branch {
             if selected_branch
                 .as_deref()
@@ -1600,6 +1582,45 @@ pub fn projection_only_continue_container(
             }
             selected_branch.get_or_insert(branch);
         }
+
+        let Some(path) = container.worktree_path.as_deref() else {
+            continue;
+        };
+        // A relative marker or an absolute path from another host cannot
+        // supply a local path. Its branch still constrains the selection.
+        let canonical = match path.is_absolute().then(|| dunce::canonicalize(path)) {
+            Some(Ok(canonical)) => canonical,
+            Some(Err(error)) if error.kind() != std::io::ErrorKind::NotFound => {
+                return Err(unavailable());
+            }
+            _ if has_branch => {
+                has_unavailable_path = true;
+                continue;
+            }
+            _ => return Err(unavailable()),
+        };
+        if selected_path
+            .as_deref()
+            .is_some_and(|selected| !path_matches(selected, &canonical))
+        {
+            return Err(ContinueWorkFailure::failed(
+                "execution_container_ambiguous",
+                "The Work has multiple execution containers and cannot be continued safely.",
+                false,
+            ));
+        }
+        if !worktree_matches_project_state(&canonical, project_root) {
+            return Err(ContinueWorkFailure::failed(
+                "execution_container_foreign",
+                "The Work execution container does not belong to the active project.",
+                false,
+            ));
+        }
+        selected_path.get_or_insert(canonical);
+        has_local_branch_path |= has_branch;
+    }
+    if has_unavailable_path && !has_local_branch_path {
+        return Err(unavailable());
     }
     let worktree_path = selected_path.ok_or_else(|| {
         ContinueWorkFailure::failed(
@@ -5230,4 +5251,44 @@ pub fn classify_nonlocal_active_owner_liveness_at(
     classify_nonlocal_active_owner_liveness_batch_at(sessions_dir, [session_id])
         .remove(session_id)
         .unwrap_or(ActiveOwnerLiveness::Unknown)
+}
+
+#[cfg(test)]
+mod portable_container_tests {
+    use super::*;
+    use gwt_core::workspace_projection::{
+        WorkEvent, WorkEventKind, WorkItemsProjection, WorkspaceExecutionContainerRef,
+    };
+
+    #[test]
+    fn projection_only_continue_uses_local_anchor_with_legacy_host_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let local = temp.path().join("local-checkout");
+        std::fs::create_dir(&local).unwrap();
+        let now = "2026-10-22T00:00:00Z".parse().unwrap();
+        let mut works = WorkItemsProjection::empty(now);
+        let mut legacy = WorkEvent::new(WorkEventKind::Start, "work-portable", now);
+        legacy.execution_container = Some(WorkspaceExecutionContainerRef {
+            branch: Some("work/issue-3788".to_string()),
+            worktree_path: Some(temp.path().join("other-host-checkout")),
+            pr_number: None,
+            pr_url: None,
+            pr_state: None,
+        });
+        let mut resolved = WorkEvent::new(WorkEventKind::Update, "work-portable", now);
+        resolved.execution_container = legacy.execution_container.clone();
+        resolved.execution_container.as_mut().unwrap().worktree_path = Some(local.clone());
+        works.apply_event(legacy);
+        assert_eq!(
+            projection_only_continue_container(&works.work_items[0], &local)
+                .unwrap_err()
+                .code,
+            "worktree_unavailable"
+        );
+        works.apply_event(resolved);
+        let (path, branch) =
+            projection_only_continue_container(&works.work_items[0], &local).unwrap();
+        assert_eq!(path, dunce::canonicalize(local).unwrap());
+        assert_eq!(branch, "work/issue-3788");
+    }
 }
