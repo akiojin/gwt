@@ -493,6 +493,9 @@ Hard limits, no exceptions:
   operation's own rollback route and report the result; Keep needs no action.
   Routine PR delivery (`pr.auto_merge.enable`, `pr.review.submit`), message
   relay and build-artifact cleanup leave no card.
+- Feedback to `akiojin/gwt` from another project waits on its own Decide
+  card. When a Send answer reaches you, run `feedback.retry {id}` with the
+  request id named on the card; any other answer keeps the report local.
 - A recorded human instruction still narrows the run when the owner gave one:
   pass its `instruction_id` and the runtime checks the exact scope. Legacy
   `approval_id`s stay valid; inspect them with `pm.approval.status` and remove

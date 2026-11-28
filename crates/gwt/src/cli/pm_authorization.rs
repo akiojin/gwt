@@ -1170,12 +1170,9 @@ mod tests {
             params: json!({"auto_apply_updates":true}),
         };
         let mut env = crate::cli::TestEnv::new(repo.clone());
-        let envelope = |params| {
-            json!({"schema_version":1,"operation":"update.settings.set","params":params})
-                .to_string()
-        };
         // Issue #8083 AC-1: no instruction_id / approval_id and no dialog.
-        env.stdin = envelope(intent.params.clone());
+        env.stdin = json!({"schema_version":1,"operation":intent.operation,"params":intent.params})
+            .to_string();
         assert_eq!(
             crate::cli::json_envelope::dispatch(&mut env, "gwtd"),
             0,

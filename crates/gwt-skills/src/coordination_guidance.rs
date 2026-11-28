@@ -361,10 +361,11 @@ Missing/false preferences retain Manual; an I/O/decode failure is safe-only
 withheld intake with no worker or send authority. Auto uses existing GH_TOKEN/GITHUB_TOKEN
 only; a GitHub CLI login alone leaves feedback unsent.
 No extra opt-in is required; Auto capacity is unrelated. Manual mode (missing/false preferences)
-keeps native **Send feedback** consent for external projects and the actual
+waits for the user's Send answer on a Decide card for external projects (a
+withheld report also appears there) and keeps the actual
 gwt repository's synchronous exemption. Raw Manual receipts never become Auto
 reports. JSON/env/repository flags cannot grant Auto authority. Continue project
-work independently of feedback; cancellation/no desktop retains Manual reports.
+work independently of feedback; an unanswered or declined card retains Manual reports.
 Keep the request id and use `feedback.status` when needed. Retry declined/failed
 Manual receipts or failed/withheld Auto snapshots through `feedback.retry`;
 never automatically resend an
@@ -923,10 +924,10 @@ dialog/browser/console は開かず、設定失効・読取不能は safe job �
 欠落/正常 false は Manual を維持し、I/O/decode 失敗は worker/送信権限のない安全な保留だけにします。
 Auto は既存 GH_TOKEN/GITHUB_TOKEN だけを使い、GitHub CLI ログインだけでは未送信になります。
 追加 opt-in は不要で、容量 Auto とは別です。設定欠落/false の Manual では外部 project の
-native **Send feedback** 同意と実 gwt の同期送信免除を維持します。原文 receipt を
+Decide カードでの利用者の Send 回答を待ち（withheld も Decide に表示）、実 gwt の同期送信免除を維持します。原文 receipt を
 Auto へ昇格しません。JSON/env/repository flag は Auto 権限になりません。
 feedback の受付・送信とは独立して本作業を続けてください。
-取消や desktop 不在でも報告は保全されます。request id を保持し、必要時に
+未回答や送信しない回答でも報告は保全されます。request id を保持し、必要時に
 `feedback.status` で確認します。Manual の declined/failed または Auto の
 failed/withheld だけ `feedback.retry` で再試行し、uncertain は自動再送しません。
 ローカルの blocker や連携には
