@@ -32,6 +32,28 @@ use gwt::perf::{
 use gwt_config::PerfConfig;
 use gwt_core::{paths::gwt_logs_dir, test_support::ScopedGwtHome};
 
+#[test]
+fn capability_pane_send_uses_the_instrumented_owner_writer() {
+    let dispatch = include_str!("../src/project_runtime/agent_dispatch.rs");
+    let send_arm = dispatch
+        .split_once("AgentFrontendRequest::SendInput { text, request_id } => {")
+        .expect("production capability pane.send")
+        .1
+        .split_once("AgentFrontendRequest::CloseWork {")
+        .expect("end of pane.send arm")
+        .0;
+    assert!(send_arm.contains("write_current_pane_input("));
+    // The live Shell regression drives this same writer and requires its sample.
+    let writer = dispatch
+        .split_once("pub fn write_current_pane_input(")
+        .expect("owner's typed prompt writer")
+        .1
+        .split_once("\n}\n")
+        .expect("end of typed prompt writer")
+        .0;
+    assert!(writer.contains("RouteTimer::start(crate::perf::PerfRoute::PromptSend)"));
+}
+
 struct CensusCountingAllocator;
 
 #[global_allocator]

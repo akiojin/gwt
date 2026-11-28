@@ -334,6 +334,12 @@ pub fn cleanup_selected_branches_with_progress(
                 }
                 None => cleanup(),
             };
+            let rescue_note = match &cleanup_result {
+                Ok(Some(rescue_ref)) => format!(
+                    "; uncommitted changes saved to {rescue_ref} (restore: git checkout {rescue_ref} -- .)"
+                ),
+                _ => String::new(),
+            };
             let result = match cleanup_result {
                 Err(error) => {
                     let result = BranchCleanupResultEntry {
@@ -345,7 +351,7 @@ pub fn cleanup_selected_branches_with_progress(
                     emit_result_progress(&mut progress, &result, index, total);
                     return result;
                 }
-                Ok(()) => {
+                Ok(_) => {
                     // SPEC-2009 FR-071: never delete a protected base branch
                     // from the remote, regardless of the delete-remote flag.
                     if options.delete_remote
@@ -389,6 +395,10 @@ pub fn cleanup_selected_branches_with_progress(
                         }
                     }
                 }
+            };
+            let result = BranchCleanupResultEntry {
+                message: format!("{}{rescue_note}", result.message),
+                ..result
             };
             emit_result_progress(&mut progress, &result, index, total);
             result

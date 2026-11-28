@@ -1955,7 +1955,16 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
 
       }
 
-      const startupMetrics = createStartupMetrics({ send });
+      const referringPage = document.referrer ? new URL(document.referrer) : null;
+      const referringRoute = referringPage?.origin === window.location.origin
+        ? parseFrontendRoute(referringPage.pathname)
+        : null;
+      const startupMetrics = createStartupMetrics({
+        send,
+        projectSwitch: performance.getEntriesByType("navigation")[0]?.type === "navigate"
+          && referringRoute !== null && referringRoute.kind !== "not_found"
+          && referringRoute.projectKey !== routeProjectKey,
+      });
 
       function sendStartupAutoResumeReady() {
         if (startupAutoResumeReadySent) {

@@ -11996,7 +11996,7 @@ impl AppRuntime {
                 self.set_claude_account_usage_enabled_events(enabled)
             }
             FrontendEvent::RefreshUsage => self.request_usage_refresh_events(),
-            FrontendEvent::StartupFirstFrame { navigation_ms } => {
+            FrontendEvent::StartupFirstFrame { navigation_ms, .. } => {
                 gwt::perf::startup::first_frame(navigation_ms);
                 gwt::perf::startup::mark(gwt::perf::startup::StartupPhase::ShellInteractive);
                 Vec::new()
@@ -12579,7 +12579,7 @@ impl AppRuntime {
                     self.startup_auto_resume_ready_events()
                 }
             }
-            FrontendEvent::StartupFirstFrame { navigation_ms } => {
+            FrontendEvent::StartupFirstFrame { navigation_ms, .. } => {
                 gwt::perf::startup::first_frame(navigation_ms);
                 gwt::perf::startup::mark(gwt::perf::startup::StartupPhase::ShellInteractive);
                 Vec::new()
