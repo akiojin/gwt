@@ -19410,11 +19410,20 @@ impl IssueMonitorState {
 
     /// Issue #4117 AC-2: `max_active` slots in use — implementation launches
     /// plus live review windows, which run their own agent each.
+    /// SPEC #3590 AC-3: a locally observed pane that is no longer alive holds
+    /// no slot, judged by the same `idle_window_is_alive` predicate as
+    /// `active_issue_numbers`.
     fn occupied_slot_count(&self) -> usize {
+        let dead_local_panes = self
+            .monitor_canvas_windows()
+            .filter(|window| !idle_window_is_alive(window.status))
+            .map(|window| window.window_id.as_str())
+            .collect::<BTreeSet<_>>();
         let mut reviews = self
             .monitor_canvas_windows()
             .filter(|window| {
                 window.review_dispatch
+                    && idle_window_is_alive(window.status)
                     // A settled Idle reviewer releases its active slot in the
                     // same scan (#4084), but still blocks duplicate reviews.
                     && !(window.status == WindowState::Idle
@@ -19427,6 +19436,7 @@ impl IssueMonitorState {
         let mut pending_reviews = 0;
         for window in self.review_windows.values() {
             match window.window_id.as_deref() {
+                Some(window) if dead_local_panes.contains(window) => {}
                 Some(window) => {
                     reviews.insert(window);
                 }
@@ -19435,7 +19445,11 @@ impl IssueMonitorState {
         }
         let unknown_panes = self
             .monitor_canvas_windows()
-            .filter(|window| !window.review_dispatch && window.issue_number.is_none())
+            .filter(|window| {
+                !window.review_dispatch
+                    && window.issue_number.is_none()
+                    && idle_window_is_alive(window.status)
+            })
             .map(|window| window.window_id.as_str())
             .collect::<BTreeSet<_>>()
             .len();
@@ -45896,30 +45910,45 @@ mod tests {
     }
 
     #[test]
-    fn monitor_review_budget_adds_foreign_ledger_and_local_retained_pane() {
+    fn monitor_review_budget_counts_foreign_ledger_but_not_dead_local_panes() {
+        // SPEC #3590 AC-3: a pane that is no longer alive must not hold a
+        // `max_active` slot. The foreign-tab ledger review is unobserved here,
+        // so it keeps its slot; every locally observed dead pane releases one.
         let mut monitor = test_monitor(IssueMonitorConfig::default());
-        monitor.review_windows.insert(
-            41,
-            IssueMonitorReviewWindow {
-                issue_number: 41,
-                pr_number: 410,
-                dispatched_at: "2026-10-06T00:00:00Z".to_string(),
-                window_id: Some("tab-2::review".to_string()),
-                reviewed_sha: None,
-                attempt: 0,
-            },
-        );
+        for (issue_number, window_id) in [(41, "tab-2::review"), (43, "tab-1::crashed-review")] {
+            monitor.review_windows.insert(
+                issue_number,
+                IssueMonitorReviewWindow {
+                    issue_number,
+                    pr_number: issue_number * 10,
+                    dispatched_at: "2026-10-06T00:00:00Z".to_string(),
+                    window_id: Some(window_id.to_string()),
+                    reviewed_sha: None,
+                    attempt: 0,
+                },
+            );
+        }
         monitor.record_window_snapshot(pane_snapshot(
             "2026-10-06T00:00:01Z",
-            vec![IssueMonitorWindowObservation {
-                review_dispatch: true,
-                ..live_pane_observation("tab-1::retained-review", 42, WindowState::Stopped)
-            }],
+            vec![
+                IssueMonitorWindowObservation {
+                    review_dispatch: true,
+                    ..live_pane_observation("tab-1::retained-review", 42, WindowState::Stopped)
+                },
+                IssueMonitorWindowObservation {
+                    review_dispatch: true,
+                    ..live_pane_observation("tab-1::crashed-review", 43, WindowState::Error)
+                },
+                IssueMonitorWindowObservation {
+                    issue_number: None,
+                    ..live_pane_observation("tab-1::unlinked", 0, WindowState::Stopped)
+                },
+            ],
         ));
         assert_eq!(
             monitor.occupied_slot_count(),
-            2,
-            "the observations describe distinct reviews"
+            1,
+            "only the unobserved foreign ledger review still holds a slot"
         );
     }
 
