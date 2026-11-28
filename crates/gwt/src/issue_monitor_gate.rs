@@ -309,31 +309,22 @@ pub fn classify_acceptance_criteria(issue_body: &str) -> AcceptanceCriteria {
     let mut tasks_section_ac_items = false;
 
     for line in issue_body.lines() {
-        let marker = line.trim_start();
-        if marker.starts_with("<!--") && marker.contains("artifact:tasks ") {
-            in_tasks_section = marker.contains(" BEGIN");
+        let item = line.trim_start();
+        if item.starts_with("<!--") && item.contains("artifact:tasks ") {
+            in_tasks_section = item.contains(" BEGIN");
+            in_block = false;
+            continue;
         }
         if let Some((heading, written)) = heading_text(line) {
-            // Entering the block iff this heading matches; any other heading
-            // closes a previously open block.
-            in_block = ACCEPTANCE_HEADINGS.iter().any(|h| heading == *h);
+            in_block = !in_tasks_section && ACCEPTANCE_HEADINGS.iter().any(|h| heading == *h);
             if in_block && heading_found.is_none() {
                 heading_found = Some(written);
             }
             continue;
         }
-        if !in_block {
-            if in_tasks_section {
-                let checklist = marker
-                    .strip_prefix("- [ ]")
-                    .or_else(|| marker.strip_prefix("- [x]"))
-                    .or_else(|| marker.strip_prefix("- [X]"));
-                tasks_section_ac_items |=
-                    checklist.is_some_and(|rest| split_explicit_id(rest.trim_start()).0.is_some());
-            }
+        if !in_block && !in_tasks_section {
             continue;
         }
-        let item = line.trim_start();
         // A gwt-spec section boundary (`<!-- artifact:NAME BEGIN/END -->`)
         // closes the block too: a `tasks` section that follows without a
         // markdown heading must not contribute positional criteria.
@@ -356,6 +347,10 @@ pub fn classify_acceptance_criteria(issue_body: &str) -> AcceptanceCriteria {
             .or_else(|| after_bullet.strip_prefix("[X]"))
             .map(str::trim_start);
         let (explicit_id, text) = split_explicit_id(checkbox.unwrap_or(after_bullet));
+        if in_tasks_section {
+            tasks_section_ac_items |= checkbox.is_some() && explicit_id.is_some();
+            continue;
+        }
         if explicit_id.is_none() && checkbox.is_none() {
             continue;
         }

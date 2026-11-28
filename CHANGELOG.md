@@ -1,6 +1,30 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.180.1] - 2026-11-28
+
+### Bug Fixes
+
+- **issue-monitor:** Reject acceptance criteria stored in tasks
+- **pm:** PM 操作の承認ダイアログを撤去し、監査・Reports・Decide で事後確認にする
+- **feedback:** Gwt-feedback の送信可否を Decide の判断待ちで扱う
+- **pm:** 昇格スコープの PM 操作をオーナーへ回さず、feedback 送信は利用者の回答だけで決める
+- **pm:** 未マージのビルドキャッシュ掃除でオーナーへ許可を求めるガイダンスを撤去する
+- **feedback:** 長い報告の全文プレビューを示し、セッション外 CLI の回答を同意として扱わない
+
+### Miscellaneous Tasks
+
+- **work:** #8086 の配信確認と精算記録を保存する
+
+### Testing
+
+- **decision:** テスト衛生の台帳キーに合わせて既存テスト名を維持する
+
+### Ci
+
+- Feedback 同意テスト削除に合わせて Windows feedback スライスの期待件数を 40 にする
+- Feedback 回帰テスト追加に合わせて Windows feedback スライスの期待件数を 41 にする
+
 ## [9.180.0] - 2026-11-28
 
 ### Bug Fixes

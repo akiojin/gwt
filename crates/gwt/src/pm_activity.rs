@@ -34,7 +34,7 @@ impl PmActivity {
             | "pr.update_branch"
             | "pr.auto_merge.enable" => Some(Self::DrivingPr),
             "issue.create" | "issue.spec.create" => Some(Self::RegisteringIssue),
-            "board.post" | "pm.approval.request" | "pm.operation.execute" => Some(Self::Deciding),
+            "board.post" | "pm.operation.execute" => Some(Self::Deciding),
             "daemon.subscribe" | "issue.monitor.wait" => Some(Self::Waiting),
             _ => None,
         }

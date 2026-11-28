@@ -1347,7 +1347,6 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         | "pr.auto_merge.enable"
         | "update.settings.set"
         | "project.execution.choose"
-        | "pm.approval.request"
         | "pm.approval.status"
         | "pm.approval.revoke"
         | "pm.operation.execute" => {
@@ -1363,7 +1362,7 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 .transpose()?;
             if lookup(params, "auto_apply_updates").is_some() {
                 return Err(CliParseError::InvalidJson(
-                    "unknown parameter auto_apply_updates; use JSON operation update.settings.set with instruction_id or approval_id (also available in Settings > System)"
+                    "unknown parameter auto_apply_updates; use JSON operation update.settings.set (also available in Settings > System)"
                         .to_string(),
                 ));
             }
@@ -6744,10 +6743,7 @@ mod tests {
         assert_eq!(status["workflow"], "prepare-release.yml");
         assert_eq!(status["repository"], "owner/repo");
         assert_eq!(status["allowed"], false);
-        assert_eq!(
-            status["requirement"]["permission_stage"],
-            "instruction_or_approval"
-        );
+        assert_eq!(status["requirement"]["permission_stage"], "autonomous");
         assert_eq!(status["token"].as_str().unwrap().len(), 64);
         assert!(!gwt_core::paths::gwt_config_path().exists());
         assert!(

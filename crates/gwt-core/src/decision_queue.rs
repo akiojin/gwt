@@ -68,8 +68,13 @@ pub enum DecisionStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AnsweredBy {
+    /// The user, through gwt's own GUI answer path.
     User,
     Pm,
+    /// A `decision.answer` CLI call outside any agent session. Shells can drop
+    /// the session variable, so this is never taken as the user's consent
+    /// (Issue #8083); it still settles ordinary decisions.
+    Cli,
 }
 
 /// Who resumes when the decision is answered.
@@ -397,6 +402,132 @@ pub fn register(repo_path: &Path, input: &Registration) -> Result<RegisterOutcom
     })
 }
 
+/// Options of the keep-or-undo card a PM operation leaves (Issue #8083).
+pub const PM_RATIFICATION_OPTIONS: [&str; 2] = [
+    "Keep — ratify what the PM did",
+    "Undo — the PM rolls the change back",
+];
+
+/// A decision gwtd raises for the user on its own behalf (Issue #8083):
+/// something that would otherwise stop work waits here instead.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnerDecision<'a> {
+    pub target: &'a str,
+    pub question: &'a str,
+    pub materials: &'a str,
+    pub options: &'a [&'a str],
+    pub reason: &'a str,
+}
+
+/// Register an [`OwnerDecision`] answered by the user and delivered to the
+/// registered PM. An open card with the same target is reused; with
+/// `append` its materials gain the new entry (newest last, oldest dropped
+/// past 16 KiB), otherwise they are left as they are.
+pub fn register_owner_decision(
+    repo_path: &Path,
+    decision: &OwnerDecision<'_>,
+    append: bool,
+) -> Result<DecisionItem> {
+    let target = decision.target.trim();
+    let materials = decision.materials.trim();
+    if target.is_empty() || decision.question.trim().is_empty() || materials.is_empty() {
+        return invalid("an owner decision requires a target, question and materials");
+    }
+    if decision.options.len() < 2 {
+        return invalid("an owner decision requires at least two options");
+    }
+    update(repo_path, |queue| {
+        let key = target_key(target);
+        if let Some(existing) = queue.items.iter_mut().find(|item| {
+            item.status == DecisionStatus::Open
+                && item.kind == DecisionKind::PmDecision
+                && target_key(&item.target) == key
+        }) {
+            if !append {
+                return Ok((existing.clone(), false));
+            }
+            existing.materials = keep_tail(format!("{}\n{materials}", existing.materials));
+            return Ok((existing.clone(), true));
+        }
+        let mut item = new_item(
+            DecisionKind::PmDecision,
+            target.to_string(),
+            decision.question.trim().to_string(),
+            keep_tail(materials.to_string()),
+        );
+        item.options = decision
+            .options
+            .iter()
+            .map(|option| (*option).to_owned())
+            .collect();
+        item.recommendation = Some(decision.options[0].to_string());
+        item.reason = Some(decision.reason.to_string());
+        item.waiters.push(Waiter::Pm);
+        queue.items.push(item.clone());
+        Ok((item, true))
+    })
+}
+
+/// The newest decision for `target`, following bundling to its answer.
+pub fn latest_for_target(repo_path: &Path, target: &str) -> Result<Option<DecisionItem>> {
+    let queue = read_queue(&queue_path(repo_path))?;
+    let key = target_key(target);
+    let Some(item) = queue
+        .items
+        .iter()
+        .rev()
+        .find(|item| target_key(&item.target) == key)
+    else {
+        return Ok(None);
+    };
+    Ok(Some(queue.items[resolve_merged(&queue, &item.id)?].clone()))
+}
+
+/// Leave an autonomous PM operation for the user to keep or undo afterwards.
+///
+/// The PM ran the operation without stopping for permission; this card is
+/// where the user decides on it later. One open card per operation kind
+/// collects every run, and the answer reaches whichever PM is registered.
+pub fn register_pm_ratification(
+    repo_path: &Path,
+    operation: &str,
+    entry: &str,
+) -> Result<DecisionItem> {
+    let operation = operation.trim();
+    if operation.is_empty() {
+        return invalid("PM ratification requires an operation");
+    }
+    register_owner_decision(
+        repo_path,
+        &OwnerDecision {
+            target: &format!("pm-operation:{operation}"),
+            question: &format!("Keep or undo the PM's `{operation}` changes?"),
+            materials: entry,
+            options: &PM_RATIFICATION_OPTIONS,
+            reason: "The PM already ran this without waiting; CI, branch protection and ownership gates still applied.",
+        },
+        true,
+    )
+}
+
+fn keep_tail(mut text: String) -> String {
+    while text.len() > MAX_TEXT_BYTES {
+        match text.find('\n') {
+            Some(end) => {
+                text.drain(..=end);
+            }
+            None => {
+                let mut start = text.len() - MAX_TEXT_BYTES;
+                while !text.is_char_boundary(start) {
+                    start += 1;
+                }
+                text.drain(..start);
+            }
+        }
+    }
+    text
+}
+
 fn open_index(queue: &QueueFile, id: &str) -> Result<usize> {
     let Some(index) = queue.items.iter().position(|item| item.id == id) else {
         return invalid(format!("decision {id} was not found"));
@@ -525,6 +656,7 @@ pub fn delivery_message(item: &DecisionItem, waiter: &Waiter) -> String {
     }
     let by = match answer.map(|answer| answer.by) {
         Some(AnsweredBy::Pm) => "the PM",
+        Some(AnsweredBy::Cli) => "a direct CLI call",
         _ => "the user",
     };
     let issue = item

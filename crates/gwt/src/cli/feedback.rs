@@ -27,8 +27,123 @@ pub enum FeedbackCommand {
     Process { id: String },
 }
 
-#[path = "feedback_consent.rs"]
-mod consent;
+/// Options of the Decide card that holds a feedback send (Issue #8083).
+const FEEDBACK_SEND: &str = "Send — file it on akiojin/gwt";
+const FEEDBACK_KEEP_LOCAL: &str = "Keep it local — do not send";
+const WITHHELD_REFILE: &str = "Re-file it with Autonomous mode off to review the full text";
+const WITHHELD_DISCARD: &str = "Discard it";
+
+fn feedback_target(id: &str) -> String {
+    format!("feedback:{id}")
+}
+
+/// The complete masked preview — exactly what Send files — kept beside the
+/// receipt so a card whose text had to be shortened still points at all of it.
+fn preview_path(root: &Path, id: &str) -> std::path::PathBuf {
+    gwt_core::paths::gwt_project_dir_for_repo_path(root)
+        .join("feedback")
+        .join(format!("{id}.preview.txt"))
+}
+
+fn feedback_decision(root: &Path, id: &str, prompt: &str) -> gwt_core::Result<()> {
+    const LIMIT: usize = 16 * 1024;
+    let path = preview_path(root, id);
+    std::fs::create_dir_all(path.parent().expect("feedback store"))?;
+    gwt_core::atomic_file::write_atomic(&path, prompt.as_bytes())?;
+    let footer = format!(
+        "\n\nFull masked preview (exactly what Send files): {}",
+        path.display()
+    );
+    let mut materials = prompt.to_string();
+    if materials.len() + footer.len() > LIMIT {
+        let mut end = LIMIT - footer.len() - "\n… [shortened]".len();
+        while !materials.is_char_boundary(end) {
+            end -= 1;
+        }
+        materials.truncate(end);
+        materials.push_str("\n… [shortened]");
+    }
+    materials.push_str(&footer);
+    gwt_core::decision_queue::register_owner_decision(
+        root,
+        &gwt_core::decision_queue::OwnerDecision {
+            target: &feedback_target(id),
+            question: "Send this feedback report to the public GitHub repository akiojin/gwt?",
+            materials: &materials,
+            options: &[FEEDBACK_SEND, FEEDBACK_KEEP_LOCAL],
+            reason: &format!("Nothing is sent until you answer. After Send, the PM runs feedback.retry with request_id {id}."),
+        },
+        false,
+    )
+    .map(|_| ())
+}
+
+/// Nothing leaves for akiojin/gwt until the user answers the feedback's
+/// Decide card (Issue #8083). `None`: the card is waiting and the report
+/// stays local. Any answer other than Send keeps it local.
+fn decide_consent(root: &Path, id: &str, prompt: &str) -> Result<Option<bool>, String> {
+    use gwt_core::decision_queue::{AnsweredBy, DecisionStatus};
+    let latest = gwt_core::decision_queue::latest_for_target(root, &feedback_target(id))
+        .map_err(|error| error.to_string())?;
+    match latest {
+        // Only the user's own answer decides; a PM answer is not consent and
+        // the report waits on a fresh card instead.
+        Some(item)
+            if item.status == DecisionStatus::Answered
+                && item
+                    .answer
+                    .as_ref()
+                    .is_some_and(|answer| answer.by == AnsweredBy::User) =>
+        {
+            Ok(Some(item.answer.is_some_and(|answer| {
+                answer.text.trim().starts_with("Send")
+            })))
+        }
+        Some(item) if item.status == DecisionStatus::Open => Ok(None),
+        _ => {
+            feedback_decision(root, id, prompt).map_err(|error| error.to_string())?;
+            Ok(None)
+        }
+    }
+}
+
+/// A withheld automatic report waits visibly in Decide instead of
+/// disappearing (Issue #8083). Only closed-vocabulary fields are shown.
+fn surface_withheld(root: &Path, record: &AutoFeedbackRecord) {
+    if record.state != FeedbackState::Withheld {
+        return;
+    }
+    let id = record.snapshot.id();
+    let target = feedback_target(&id);
+    if !matches!(
+        gwt_core::decision_queue::latest_for_target(root, &target),
+        Ok(None)
+    ) {
+        return;
+    }
+    let reason = record
+        .error
+        .and_then(|reason| serde_json::to_value(reason).ok())
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .unwrap_or_else(|| "unknown".into());
+    let materials = format!(
+        "Request: {id}\nSummary: {}\nWithheld because: {reason}\nNothing was sent to akiojin/gwt.",
+        record.snapshot.report().title()
+    );
+    if let Err(error) = gwt_core::decision_queue::register_owner_decision(
+        root,
+        &gwt_core::decision_queue::OwnerDecision {
+            target: &target,
+            question: "A gwt feedback report was withheld instead of sent. What should happen to it?",
+            materials: &materials,
+            options: &[WITHHELD_REFILE, WITHHELD_DISCARD],
+            reason: "Autonomous mode sends only a closed-vocabulary summary and drops free text; this report could not be sent.",
+        },
+        false,
+    ) {
+        tracing::warn!(request = %id, %error, "withheld feedback Decide card was not registered");
+    }
+}
 
 pub fn run<E: super::CliEnv>(
     env: &mut E,
@@ -60,11 +175,13 @@ pub fn run<E: super::CliEnv>(
     let result = (|| -> io::Result<FeedbackRecord> {
         match command {
             FeedbackCommand::Status { id } => store.read(&id),
-            FeedbackCommand::Process { id } => {
-                process_with(&store, &id, &root, consent::confirm, |record| {
-                    env.deliver_feedback(record)
-                })
-            }
+            FeedbackCommand::Process { id } => process_with(
+                &store,
+                &id,
+                &root,
+                |prompt| decide_consent(&root, &id, prompt),
+                |record| env.deliver_feedback(record),
+            ),
             FeedbackCommand::Create(mut input) => {
                 attach_error_record(&mut input, &root);
                 let context = context(&root);
@@ -86,9 +203,19 @@ pub fn run<E: super::CliEnv>(
                     }
                     if !matches!(
                         record.state,
-                        FeedbackState::Failed | FeedbackState::Declined
+                        FeedbackState::Failed
+                            | FeedbackState::Declined
+                            | FeedbackState::PendingApproval
                     ) {
-                        return Err(io::Error::other("feedback.retry only accepts failed or declined reports; an uncertain send must be reconciled with akiojin/gwt before another submission"));
+                        return Err(io::Error::other("feedback.retry only accepts failed, declined or decision-pending reports; an uncertain send must be reconciled with akiojin/gwt before another submission"));
+                    }
+                    // A declined report asks again with a fresh Decide card.
+                    if record.state == FeedbackState::Declined
+                        && gwt_core::feedback::requires_approval(&root)
+                    {
+                        let public = record.public_snapshot();
+                        feedback_decision(&root, &id, &consent_prompt(&public))
+                            .map_err(io::Error::other)?;
                     }
                     record.state = if gwt_core::feedback::requires_approval(&root) {
                         FeedbackState::PendingApproval
@@ -196,6 +323,7 @@ fn run_auto_create<E: super::CliEnv>(
     } else {
         record
     };
+    surface_withheld(env.repo_path(), &record);
     render_auto_result(store, &record, out)
 }
 
@@ -265,6 +393,7 @@ fn run_auto_existing<E: super::CliEnv>(
         }
         FeedbackCommand::Create(_) => unreachable!(),
     };
+    surface_withheld(&root, &record);
     render_auto_result(store, &record, out)
 }
 
@@ -578,7 +707,7 @@ fn process_with(
     store: &FeedbackStore,
     id: &str,
     root: &Path,
-    consent: impl FnOnce(&str) -> Result<bool, String>,
+    consent: impl FnOnce(&str) -> Result<Option<bool>, String>,
     mut send: impl FnMut(&PublicFeedback) -> Result<u64, OwnerMutationError>,
 ) -> io::Result<FeedbackRecord> {
     let _lock = match store.try_sender_lock(id) {
@@ -613,18 +742,23 @@ fn process_with(
     }
     let public = record.public_snapshot();
     if gwt_core::feedback::requires_approval(root) {
-        let prompt = format!("Send this report to the public GitHub repository akiojin/gwt?\nPrivacy masks are applied below; the complete original stays local.\nDeclining leaves it saved locally and your project work can continue.\n\n{}\n\nTitle: {}\n\n{}", public.privacy_summary(), public.input.title, public.render_issue());
-        match consent(&prompt) {
-            Ok(true) => {}
-            Ok(false) => {
+        match consent(&consent_prompt(&public)) {
+            Ok(Some(true)) => {}
+            Ok(Some(false)) => {
                 record.state = FeedbackState::Declined;
+                store.save(&record)?;
+                return Ok(record);
+            }
+            Ok(None) => {
+                record.state = FeedbackState::PendingApproval;
+                record.error = None;
                 store.save(&record)?;
                 return Ok(record);
             }
             Err(error) => {
                 record.state = FeedbackState::Failed;
                 record.error = Some(format!(
-                    "feedback to akiojin/gwt: approval unavailable: {error}. The complete report remains saved locally; run feedback.retry with this request_id from a desktop session where the consent window can open."
+                    "feedback to akiojin/gwt: the send decision could not be recorded: {error}. The complete report remains saved locally; run feedback.retry with this request_id."
                 ));
                 store.save(&record)?;
                 return Ok(record);
@@ -652,6 +786,10 @@ fn process_with(
     }
     store.save(&record)?;
     Ok(record)
+}
+
+fn consent_prompt(public: &PublicFeedback) -> String {
+    format!("Send this report to the public GitHub repository akiojin/gwt?\nPrivacy masks are applied below; the complete original stays local.\nKeeping it local leaves it saved and your project work continues.\n\n{}\n\nTitle: {}\n\n{}", public.privacy_summary(), public.input.title, public.render_issue())
 }
 
 pub(super) fn send_to_upstream(
@@ -1816,6 +1954,36 @@ mod tests {
         }
     }
 
+    /// Issue #8083 AC-7: a withheld automatic report waits visibly in Decide.
+    #[test]
+    fn withheld_auto_feedback_is_visible_as_a_waiting_decision() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let dir = tempfile::tempdir().unwrap();
+        let store = FeedbackStore::new(dir.path().join("feedback"));
+        let (record, _) = store
+            .submit_auto(
+                SafeAutoReport::current(KnownOperation::VerifyRun),
+                UtcTimestamp::now(),
+            )
+            .unwrap();
+        let result = process_auto_with(
+            &store,
+            &record.snapshot.id(),
+            || Ok(false),
+            |_| panic!("withheld report cannot send"),
+        )
+        .unwrap();
+        surface_withheld(dir.path(), &result);
+        surface_withheld(dir.path(), &result);
+        let snapshot = gwt_core::decision_queue::snapshot(dir.path()).unwrap();
+        assert_eq!(snapshot.waiting_count, 1);
+        let card = &snapshot.items[0];
+        assert_eq!(card.target, feedback_target(&record.snapshot.id()));
+        assert!(card.materials.contains("Withheld because: policy_revoked"));
+        assert!(card.materials.contains("Nothing was sent"));
+    }
+
     #[test]
     fn auto_feedback_free_text_does_not_change_wire_storage_or_diagnostics() {
         use gwt_github::client::http::{FakeTransport, HttpIssueClient, HttpResponse};
@@ -2276,7 +2444,7 @@ mod tests {
             &store,
             receipt["request_id"].as_str().unwrap(),
             dir.path(),
-            |_| Ok(false),
+            |_| Ok(Some(false)),
             |_| panic!("legacy raw report requires consent"),
         )
         .unwrap();
@@ -2614,7 +2782,7 @@ mod tests {
                 assert!(prompt.contains("  before\r\n"));
                 assert!(prompt.contains("  after  "));
                 *preview.borrow_mut() = prompt.to_owned();
-                Ok(true)
+                Ok(Some(true))
             },
             |published| send_to_upstream(&client, published),
         )
@@ -2764,7 +2932,12 @@ mod tests {
 
     #[test]
     fn foreign_feedback_requires_real_consent_and_preserves_declined_or_failed_reports() {
-        for consent in [Ok(false), Err("No desktop display".into()), Ok(true)] {
+        for consent in [
+            Ok(Some(false)),
+            Err("queue unavailable".into()),
+            Ok(None),
+            Ok(Some(true)),
+        ] {
             let (dir, store, record) = report("https://github.com/acme/app.git");
             let client = FakeIssueClient::new();
             let result = process_with(
@@ -2781,21 +2954,97 @@ mod tests {
             .unwrap();
             assert_eq!(
                 client.owner_mutation_count(),
-                usize::from(consent == Ok(true))
+                usize::from(consent == Ok(Some(true)))
             );
             assert_eq!(store.read(&record.id).unwrap().input, record.input);
             if consent.is_err() {
                 let error = result.error.as_deref().unwrap();
-                assert!(error.contains("approval unavailable: No desktop display"));
+                assert!(error.contains("could not be recorded: queue unavailable"));
                 assert!(error.contains("feedback.retry"), "{error}");
                 assert!(error.contains("remains saved locally"), "{error}");
             }
             assert_eq!(
                 result.state,
                 match consent {
-                    Ok(true) => FeedbackState::Sent,
-                    Ok(false) => FeedbackState::Declined,
+                    Ok(Some(true)) => FeedbackState::Sent,
+                    Ok(Some(false)) => FeedbackState::Declined,
+                    Ok(None) => FeedbackState::PendingApproval,
                     Err(_) => FeedbackState::Failed,
+                }
+            );
+        }
+    }
+
+    /// Issue #8083 AC-7: a report too long for the card still shows where its
+    /// complete masked preview is, and that file holds every byte Send files.
+    #[test]
+    fn oversized_feedback_card_points_at_the_complete_preview() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let (dir, store, mut record) = report("https://github.com/acme/app.git");
+        record.input.refusal = format!("{}TAIL-REFUSAL-END", "x".repeat(20 * 1024));
+        store.save(&record).unwrap();
+        let prompt = consent_prompt(&store.read(&record.id).unwrap().public_snapshot());
+        assert!(prompt.len() > 16 * 1024 && prompt.contains("TAIL-REFUSAL-END"));
+        assert_eq!(decide_consent(dir.path(), &record.id, &prompt), Ok(None));
+        let card = &gwt_core::decision_queue::list(dir.path(), None, false).unwrap()[0];
+        assert!(card.materials.len() <= 16 * 1024);
+        assert!(card.materials.contains("[shortened]"));
+        let path = preview_path(dir.path(), &record.id);
+        assert!(card.materials.contains(&path.display().to_string()));
+        assert_eq!(std::fs::read_to_string(path).unwrap(), prompt);
+    }
+
+    /// Issue #8083 AC-7: a foreign report waits in Decide and is sent only
+    /// after the user answers Send; Keep local never sends.
+    #[test]
+    fn foreign_feedback_waits_in_decide_until_the_user_answers() {
+        use gwt_core::decision_queue::{self, AnsweredBy, DecisionKind, Waiter};
+        for (answer, sends) in [(FEEDBACK_SEND, true), (FEEDBACK_KEEP_LOCAL, false)] {
+            let home = tempfile::tempdir().unwrap();
+            let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+            let (dir, store, record) = report("https://github.com/acme/app.git");
+            let client = FakeIssueClient::new();
+            let process = || {
+                process_with(
+                    &store,
+                    &record.id,
+                    dir.path(),
+                    |prompt| decide_consent(dir.path(), &record.id, prompt),
+                    |r| send_to_upstream(&client, r),
+                )
+                .unwrap()
+            };
+            assert_eq!(process().state, FeedbackState::PendingApproval);
+            assert_eq!(process().state, FeedbackState::PendingApproval);
+            assert_eq!(client.owner_mutation_count(), 0);
+            let open = decision_queue::list(dir.path(), None, false).unwrap();
+            assert_eq!(open.len(), 1, "one card per report");
+            assert_eq!(open[0].kind, DecisionKind::PmDecision);
+            assert_eq!(open[0].waiters, vec![Waiter::Pm]);
+            assert!(open[0].materials.contains(&record.input.title));
+            // A PM answering its own card is not consent: nothing is sent and
+            // a fresh card waits for the user.
+            // Neither a PM answer nor an unattributed CLI answer is consent.
+            decision_queue::answer(dir.path(), &open[0].id, FEEDBACK_SEND, AnsweredBy::Cli)
+                .unwrap();
+            assert_eq!(process().state, FeedbackState::PendingApproval);
+            assert_eq!(client.owner_mutation_count(), 0);
+            let open = decision_queue::list(dir.path(), None, false).unwrap();
+            decision_queue::answer(dir.path(), &open[0].id, FEEDBACK_SEND, AnsweredBy::Pm).unwrap();
+            assert_eq!(process().state, FeedbackState::PendingApproval);
+            assert_eq!(client.owner_mutation_count(), 0);
+            let open = decision_queue::list(dir.path(), None, false).unwrap();
+            assert_eq!(open.len(), 1, "a fresh card waits for the user");
+            decision_queue::answer(dir.path(), &open[0].id, answer, AnsweredBy::User).unwrap();
+            let result = process();
+            assert_eq!(client.owner_mutation_count(), usize::from(sends));
+            assert_eq!(
+                result.state,
+                if sends {
+                    FeedbackState::Sent
+                } else {
+                    FeedbackState::Declined
                 }
             );
         }

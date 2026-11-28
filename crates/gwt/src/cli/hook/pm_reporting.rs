@@ -431,7 +431,7 @@ pub(crate) fn instruction_prompt_identity(
         .filter(|receipt| receipt.identity == *turn && receipt.requires_qa
             && receipt.prompt_sha256.as_deref() == Some(gwt_core::pm_authorization::digest(original.as_bytes()).as_str()))
         .ok_or_else(|| io::Error::new(io::ErrorKind::PermissionDenied,
-            "permission_stage=instruction: instruction.original must exactly match the current recorded human prompt; use pm.approval.request when no applicable instruction exists"))?;
+            "permission_stage=instruction: instruction.original must exactly match the current recorded human prompt; omit instruction_id to run the operation under audited autonomous PM authority"))?;
     native_prompt_identity(&receipt)
 }
 
@@ -451,7 +451,7 @@ fn native_prompt_identity(receipt: &TurnReceipt) -> io::Result<(String, String)>
         .filter(|message| !crate::pm_conversation::internal_prompt(&message.text)
             && receipt.prompt_sha256.as_deref() == Some(gwt_core::pm_authorization::digest(message.text.as_bytes()).as_str()))
         .ok_or_else(|| io::Error::new(io::ErrorKind::PermissionDenied,
-            "permission_stage=instruction: the latest native human message must match instruction.original; use pm.approval.request otherwise"))?;
+            "permission_stage=instruction: the latest native human message must match instruction.original; omit instruction_id to run the operation under audited autonomous PM authority"))?;
     // Native message identity stays stable even if a hook is replayed.
     Ok((receipt.identity.session_id.clone(), message.id.clone()))
 }

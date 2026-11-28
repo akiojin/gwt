@@ -1,4 +1,6 @@
-//! Bounded PM settings operations; caller-supplied approval booleans never authorize.
+//! Bounded PM settings operations. They run without stopping for permission
+//! (Issue #8083); every run is audited, reported and, when lasting, left as a
+//! keep-or-undo Decide card. Caller-supplied approval booleans never authorize.
 use super::{CliEnv, CliParseError};
 use gwt_core::pm_authorization::{self as authority, Authorization, OperationIntent};
 use gwt_github::SpecOpsError;
@@ -13,11 +15,6 @@ pub enum PmAuthorizationCommand {
     Execute {
         intent: OperationIntent,
         authorization: Authorization,
-    },
-    Request {
-        intent: OperationIntent,
-        reason: String,
-        rollback: String,
     },
     Status,
     Revoke {
@@ -163,32 +160,6 @@ pub(super) fn parse(
         return delegated::parse(params);
     }
     let parse_error = |error: io::Error| CliParseError::InvalidJson(error.to_string());
-    if operation == "pm.approval.request" {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Request {
-            operation: String,
-            params: Value,
-            reason: String,
-            rollback: String,
-        }
-        let p: Request = decode(params).map_err(parse_error)?;
-        let intent = OperationIntent {
-            operation: p.operation,
-            params: p.params,
-        };
-        validate(&intent).map_err(parse_error)?;
-        if p.reason.trim().is_empty() || p.rollback.trim().is_empty() {
-            return Err(CliParseError::InvalidJson(
-                "reason and rollback must be nonempty".into(),
-            ));
-        }
-        return Ok(PmAuthorizationCommand::Request {
-            intent,
-            reason: p.reason,
-            rollback: p.rollback,
-        });
-    }
     if operation == "pm.approval.status" {
         if !params.as_object().is_some_and(|params| params.is_empty()) {
             return Err(CliParseError::InvalidJson(
@@ -250,13 +221,6 @@ pub(super) fn run<E: CliEnv>(
             "permission_stage=instruction_or_approval: this operation requires the registered repository PM; implementation agents cannot exercise PM authority")));
     }
     let result = match command {
-        PmAuthorizationCommand::Request {
-            intent,
-            reason,
-            rollback,
-        } => {
-            json!({"approval":request_with(&repo,&intent,&reason,&rollback,native_confirm).map_err(super::io_as_api_error)?})
-        }
         PmAuthorizationCommand::Status => {
             json!({"permission_stage":"instruction_or_approval","approvals":authority::approvals(&repo).map_err(super::io_as_api_error)?,"audit_path":authority::audit_path(&repo)})
         }
@@ -277,128 +241,6 @@ pub(super) fn run<E: CliEnv>(
     out.push_str(&serde_json::to_string(&result).map_err(super::serde_as_api_error)?);
     out.push('\n');
     Ok(0)
-}
-
-fn request_with(
-    repo: &Path,
-    intent: &OperationIntent,
-    reason: &str,
-    rollback: &str,
-    confirm: impl FnOnce(&str) -> Result<Option<bool>, String>,
-) -> io::Result<authority::Approval> {
-    validate(intent)?;
-    if reason.trim().is_empty() || rollback.trim().is_empty() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "reason and rollback are required",
-        ));
-    }
-    let effect = match intent.operation.as_str() {
-        "update.settings.set" => "This preference affects automatic updates for the entire app.",
-        "project.execution.choose" => "Continue preserves this project's admitted work. Stop blocks new admission and gracefully drains this project while preserving its work and history.",
-        "board.config.set" | "discussion.create" => "Board synchronization can publish this project's Board entries to its repository Discussion.",
-        "repository.required_checks.update" => "This changes required check contexts on the selected develop/main branch.",
-        "repository.branch_protection.update" => "This rewrites only the named protection fields on the selected develop/main branch; every other protection field is carried through unchanged.",
-        "actions.release_policy.add" | "actions.release_policy.rollback" => "This changes only prepare-release.yml permission for the current repository. It does not dispatch a workflow. Rollback requires the original successful add receipt and unchanged post-state.",
-        "actions.diagnostic.policy.add" | "actions.diagnostic.policy.rollback" => "This changes only windows-diagnostic.yml permission for akiojin/gwt. It does not submit or rerun a diagnostic. Rollback requires this target's successful add receipt and unchanged post-state.",
-        "pr.auto_merge.enable" => "Enables GitHub auto-merge for this reviewed PR head, including recovery when merge automation cannot start. It can merge immediately when GitHub's gates pass. Remembered approval remains fixed to this PR and reviewed SHA.",
-        _ => "The existing operation's ownership and safety checks still apply.",
-    };
-    let approval_scope = if intent.operation == "project.execution.choose" {
-        "Permission is fixed to this exact operation_id, revision, generation and choice. Remembered approval never authorizes another choice."
-    } else if intent.operation == "pr.auto_merge.enable" {
-        "Permission applies only to this PR number and reviewed head SHA, including remembered approval. A changed head requires another review and authorization."
-    } else if matches!(
-        intent.operation.as_str(),
-        "actions.release_policy.add"
-            | "actions.release_policy.rollback"
-            | "actions.diagnostic.policy.add"
-            | "actions.diagnostic.policy.rollback"
-    ) {
-        "Permission remains bound to these exact request, token and reason parameters, including remembered approval. A changed request requires fresh authorization."
-    } else {
-        "After approval, you can optionally allow future parameters for this same operation in this repository."
-    };
-    let prompt=format!("Repository: {}\nOperation: {}\nParameters: {}\nWhy: {reason}\nUndo: {rollback}\n\n{effect}\n\n{approval_scope} Revoke with pm.approval.revoke.",repo.display(),intent.operation,intent.params);
-    let standing = confirm(&prompt).map_err(io::Error::other)?.ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "permission_stage=approval: native approval declined; no permission recorded",
-        )
-    })?;
-    authority::record_approval(repo, intent, reason, rollback, standing)
-}
-
-#[cfg(not(test))]
-fn native_confirm(prompt: &str) -> Result<Option<bool>, String> {
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
-    {
-        let show = |first: &str, second: &str, third: &str, description: &str| {
-            rfd::MessageDialog::new()
-                .set_title("GWT — PM operation approval")
-                .set_description(description)
-                .set_level(rfd::MessageLevel::Warning)
-                .set_buttons(rfd::MessageButtons::YesNoCancelCustom(
-                    first.into(),
-                    second.into(),
-                    third.into(),
-                ))
-                .show()
-        };
-        if !matches!(show("Cancel", "Approve once", "Close", prompt),rfd::MessageDialogResult::Custom(label)if label=="Approve once")
-        {
-            return Ok(None);
-        }
-        // The first dialog defaults to decline. After explicit consent, the
-        // final default keeps it one-time; Escape still withdraws consent.
-        let remember=format!("{prompt}\n\nChoose one-time approval, remember permission for this operation kind in this repository, or cancel without recording permission.");
-        Ok(final_native_decision(show(
-            "Approve once only",
-            "Remember permission",
-            "Cancel",
-            &remember,
-        )))
-    }
-    #[cfg(target_os = "linux")]
-    {
-        use gtk::prelude::*;
-        gtk::init().map_err(|_| "Native approval requires an available desktop display")?;
-        let dialog = gtk::MessageDialog::builder()
-            .title("GWT — PM operation approval")
-            .text("Approve this PM operation?")
-            .secondary_text(prompt)
-            .message_type(gtk::MessageType::Warning)
-            .modal(true)
-            .build();
-        dialog.add_button("Cancel", gtk::ResponseType::Cancel);
-        dialog.add_button("Approve once", gtk::ResponseType::Accept);
-        dialog.add_button("Remember permission", gtk::ResponseType::Other(1));
-        dialog.set_default_response(gtk::ResponseType::Cancel);
-        let response = dialog.run();
-        dialog.close();
-        Ok(match response {
-            gtk::ResponseType::Accept => Some(false),
-            gtk::ResponseType::Other(1) => Some(true),
-            _ => None,
-        })
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
-    {
-        let _ = prompt;
-        Err("Native PM approval is unavailable on this platform".into())
-    }
-}
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-fn final_native_decision(result: rfd::MessageDialogResult) -> Option<bool> {
-    match result {
-        rfd::MessageDialogResult::Custom(label) if label == "Approve once only" => Some(false),
-        rfd::MessageDialogResult::Custom(label) if label == "Remember permission" => Some(true),
-        _ => None,
-    }
-}
-#[cfg(test)]
-fn native_confirm(_prompt: &str) -> Result<Option<bool>, String> {
-    panic!("tests must inject a native decision")
 }
 
 fn read_board(repo: &Path) -> io::Result<gwt_config::ProjectBoardConfig> {
@@ -852,7 +694,7 @@ mod tests {
     }
 
     #[test]
-    fn external_auto_merge_requires_fresh_gates_and_audits_exact_permission() {
+    fn external_auto_merge_runs_without_approval_but_keeps_fresh_gates_and_audit() {
         let home = tempfile::tempdir().unwrap();
         let _home = ScopedGwtHome::set(home.path());
         let _env_lock = crate::env_test_lock()
@@ -889,23 +731,8 @@ mod tests {
         let envelope = |params| {
             json!({"schema_version":1,"operation":intent.operation,"params":params}).to_string()
         };
-        env.stdin = envelope(intent.params.clone());
-        assert_ne!(
-            crate::cli::json_envelope::dispatch(&mut env, "gwtd"),
-            0,
-            "no authority"
-        );
-        assert!(env.pr_auto_merge_call_log.is_empty());
-        let approval = pm_authorization::record_approval(
-            &repo,
-            &intent,
-            "Reviewed external PR",
-            "Disable auto-merge before merge",
-            false,
-        )
-        .unwrap();
-        let mut params = intent.params.clone();
-        params["approval_id"] = approval.id.clone().into();
+        // Issue #8083 AC-1: no approval id; the PR gates still refuse.
+        let params = intent.params.clone();
         for blocker in [
             "head_changed",
             "draft",
@@ -935,7 +762,6 @@ mod tests {
             );
             assert!(env.pr_auto_merge_call_log.is_empty(), "{blocker}");
         }
-        assert!(!pm_authorization::approvals(&repo).unwrap()[0].consumed);
         env.completion_prs.insert(17, snapshot);
         env.stdin = envelope(params);
         env.stdout.clear();
@@ -949,8 +775,16 @@ mod tests {
         assert_eq!(env.pr_auto_merge_call_log, vec![(17, sha.clone())]);
         let audit = std::fs::read_to_string(pm_authorization::audit_path(&repo)).unwrap();
         assert!(
-            audit.contains(&sha) && audit.contains(&approval.id) && audit.contains("succeeded")
+            audit.contains(&sha) && audit.contains("autonomous") && audit.contains("succeeded")
         );
+        let reports = gwt_core::pm_report::load_reports(&repo).unwrap();
+        assert!(reports
+            .iter()
+            .any(|report| report.body.contains("`pr.auto_merge.enable`")
+                && report.body.contains(&sha)));
+        assert!(gwt_core::decision_queue::list(&repo, None, false)
+            .unwrap()
+            .is_empty());
         let reply: Value = serde_json::from_slice(&env.stdout).unwrap();
         let output: Value = serde_json::from_str(reply["output"].as_str().unwrap()).unwrap();
         assert_eq!(output["before"]["number"], 17);
@@ -1304,85 +1138,25 @@ mod tests {
         assert_eq!(env.required_checks_updates.len(), 1);
     }
 
+    /// Issue #8083 AC-2: no operation opens the native approval dialog.
     #[test]
-    fn approval_request_records_only_an_explicit_native_decision() {
+    fn approval_request_operation_is_removed() {
         let home = tempfile::tempdir().unwrap();
         let _home = ScopedGwtHome::set(home.path());
+        let params = json!({"operation":"update.settings.set","params":{"auto_apply_updates":false},"reason":"r","rollback":"u"});
+        assert!(super::parse("pm.approval.request", &params).is_err());
+        assert!(!crate::cli::operation_catalog::names().any(|name| name == "pm.approval.request"));
         let repo = home.path().join("repo");
-        let intent = OperationIntent {
-            operation: "update.settings.set".into(),
-            params: json!({"auto_apply_updates":false}),
-        };
-        assert!(super::request_with(
-            &repo,
-            &intent,
-            "Disable updates",
-            "Enable updates",
-            |prompt| {
-                assert!(prompt.contains("Disable updates") && prompt.contains("Enable updates"));
-                Ok(None)
-            }
-        )
-        .is_err());
+        std::fs::create_dir_all(&repo).unwrap();
+        let mut env = crate::cli::TestEnv::new(repo.clone());
+        env.stdin = json!({"schema_version":1,"operation":"pm.approval.request","params":params})
+            .to_string();
+        assert_ne!(crate::cli::json_envelope::dispatch(&mut env, "gwtd"), 0);
         assert!(pm_authorization::approvals(&repo).unwrap().is_empty());
-        let approval =
-            super::request_with(&repo, &intent, "Disable updates", "Enable updates", |_| {
-                Ok(Some(true))
-            })
-            .unwrap();
-        assert!(approval.standing);
-        assert_eq!(
-            pm_authorization::approvals(&repo).unwrap()[0].id,
-            approval.id
-        );
-    }
-
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
-    #[test]
-    fn final_native_cancellation_records_no_authority() {
-        let home = tempfile::tempdir().unwrap();
-        let _home = ScopedGwtHome::set(home.path());
-        let repo = home.path().join("repo");
-        let intent = OperationIntent {
-            operation: "update.settings.set".into(),
-            params: json!({"auto_apply_updates":false}),
-        };
-        for result in [
-            rfd::MessageDialogResult::Custom("Cancel".into()),
-            rfd::MessageDialogResult::Cancel,
-        ] {
-            assert!(super::request_with(
-                &repo,
-                &intent,
-                "Disable updates",
-                "Enable updates",
-                |_| Ok(super::final_native_decision(result)),
-            )
-            .is_err());
-            assert!(pm_authorization::approvals(&repo).unwrap().is_empty());
-        }
-        for (label, standing) in [("Approve once only", false), ("Remember permission", true)] {
-            let approval =
-                super::request_with(&repo, &intent, "Disable updates", "Enable updates", |_| {
-                    Ok(super::final_native_decision(
-                        rfd::MessageDialogResult::Custom(label.into()),
-                    ))
-                })
-                .unwrap();
-            assert_eq!(approval.standing, standing);
-            assert_eq!(
-                pm_authorization::approvals(&repo)
-                    .unwrap()
-                    .last()
-                    .unwrap()
-                    .id,
-                approval.id
-            );
-        }
     }
 
     #[test]
-    fn update_setting_operation_requires_authority_and_writes_the_system_preference() {
+    fn update_setting_operation_runs_without_approval_and_leaves_a_decide_card() {
         let home = tempfile::tempdir().unwrap();
         let _home = ScopedGwtHome::set(home.path());
         let _env_lock = crate::env_test_lock()
@@ -1396,24 +1170,9 @@ mod tests {
             params: json!({"auto_apply_updates":true}),
         };
         let mut env = crate::cli::TestEnv::new(repo.clone());
-        let envelope = |params| {
-            json!({"schema_version":1,"operation":"update.settings.set","params":params})
-                .to_string()
-        };
-        env.stdin = envelope(intent.params.clone());
-        assert_eq!(crate::cli::json_envelope::dispatch(&mut env, "gwtd"), 1);
-        assert!(!gwt_core::paths::gwt_config_path().exists());
-        let approval = pm_authorization::record_approval(
-            &repo,
-            &intent,
-            "Enable updates",
-            "Disable updates",
-            false,
-        )
-        .unwrap();
-        env.stdin = envelope(json!({"auto_apply_updates":true,"approval_id":approval.id}));
-        env.stdout.clear();
-        env.stderr.clear();
+        // Issue #8083 AC-1: no instruction_id / approval_id and no dialog.
+        env.stdin = json!({"schema_version":1,"operation":intent.operation,"params":intent.params})
+            .to_string();
         assert_eq!(
             crate::cli::json_envelope::dispatch(&mut env, "gwtd"),
             0,
@@ -1425,6 +1184,11 @@ mod tests {
         let output: Value = serde_json::from_str(reply["output"].as_str().unwrap()).unwrap();
         assert_eq!(output["after"]["auto_apply_updates_effective"], true);
         let audit = std::fs::read_to_string(pm_authorization::audit_path(&repo)).unwrap();
-        assert!(audit.contains("succeeded") && audit.contains(&approval.id));
+        assert!(
+            audit.contains("succeeded") && audit.contains("\"permission_stage\":\"autonomous\"")
+        );
+        let decisions = gwt_core::decision_queue::list(&repo, None, false).unwrap();
+        assert_eq!(decisions.len(), 1);
+        assert_eq!(decisions[0].target, "pm-operation:update.settings.set");
     }
 }
