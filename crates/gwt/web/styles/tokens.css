@@ -6,6 +6,10 @@
 :root {
   color-scheme: light dark;
 
+  /* The mock's terminal body stays dark with both application themes. */
+  --color-canvas-dark: #14181f;
+  --color-terminal-text: #b9c4cf;
+
   /* SPEC #3206 FR-015 — persistent canvas chrome (lower = further back).
      The rail and the drawers that dock to it stay below every shared
      interaction layer, and below the transient notice stack, so a toast is
@@ -55,6 +59,8 @@
   --color-button-bg: #76cbbc;
   --color-button-bg-hover: #97ded0;
   --color-button-fg: #152d29;
+  --color-danger-button-fg: #331b1c;
+  --color-danger-button-bg-hover: #ffa2a0;
   --color-button-border: #515b68;
 
   --color-border: #424a55;
@@ -131,6 +137,8 @@
   --color-button-bg: #0f766e;
   --color-button-bg-hover: #0b5a53;
   --color-button-fg: #ffffff;
+  --color-danger-button-fg: #ffffff;
+  --color-danger-button-bg-hover: #921d17;
   --color-button-border: #c3c9d2;
 
   --color-border: #d8dce2;
@@ -219,6 +227,8 @@
     --color-button-bg: ButtonFace;
     --color-button-bg-hover: ButtonFace;
     --color-button-fg: ButtonText;
+    --color-danger-button-fg: ButtonText;
+    --color-danger-button-bg-hover: ButtonFace;
     --color-button-border: ButtonText;
 
     --color-border: GrayText;

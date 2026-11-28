@@ -1640,11 +1640,11 @@ test("theme-toggle wires aria-label updates on every render", () => {
   );
 });
 
-test("xterm content stays on the dark Operator palette across app theme changes", () => {
+test("xterm content uses the shared dark terminal palette across app theme changes", () => {
   assert.match(
     appSource,
-    /theme:\s*XTERM_THEME_DARK/,
-    "expected Terminal initialization to use the dark xterm palette directly",
+    /theme:\s*resolveTerminalTheme\(\)/,
+    "expected Terminal initialization to resolve the shared dark terminal palette",
   );
   assert.doesNotMatch(
     appSource,

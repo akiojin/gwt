@@ -205,6 +205,8 @@ test.describe('T-036 v3 regression (isolated checkout)', () => {
       await expect(project.locator('html')).toHaveAttribute('data-theme', theme);
       await expectWaiting(1, project);
       await expect(project.locator('#op-strip-issue-monitor')).toHaveAttribute('title', /PM decisions 1/, { timeout: 20_000 });
+      const bodyFont = await project.locator('body').evaluate(body => getComputedStyle(body).fontFamily);
+      await expect(project.locator('.op-status-strip')).toHaveCSS('font-family', bodyFont);
 
       // Header destinations on the project page.
       const header = appNav(project);
@@ -252,6 +254,13 @@ test.describe('T-036 v3 regression (isolated checkout)', () => {
         await project.locator(`.op-rail ${selector}`).click();
         await expect(project.locator('.surface-area'), selector).toContainText(content);
         const mockScreen = mockScreens[index];
+        if (mockScreen === 'g-board') {
+          await expect(project.locator('.board-root .knowledge-heading')).toHaveCSS('font-size', '20px');
+        }
+        if (mockScreen === 'g-settings') {
+          await project.getByRole('tab', { name: 'Issues execution settings' }).click();
+          await expect(project.locator('.settings-heading')).toHaveCSS('font-size', '20px');
+        }
         await compare(project, mockScreen, mockScreen === 'profile-main' ? 'profile' : 'gwt', mockScreen);
       }
 

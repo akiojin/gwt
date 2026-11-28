@@ -80,13 +80,11 @@
   --tracking-mono: 0.005em;
 }
 
-/* Display utility — Hubot Sans, condensed for mission-control headlines */
+/* Display utility */
 .t-display {
   font-family: var(--font-display);
   font-weight: 700;
-  font-stretch: 75%;
-  letter-spacing: var(--tracking-display);
-  text-transform: uppercase;
+  letter-spacing: var(--tracking-normal);
   color: var(--color-display-fg);
 }
 
@@ -105,7 +103,7 @@
   line-height: 1.1;
 }
 
-/* Body utility — Mona Sans Variable */
+/* Body utility */
 .t-body {
   font-family: var(--font-body);
   font-weight: 400;

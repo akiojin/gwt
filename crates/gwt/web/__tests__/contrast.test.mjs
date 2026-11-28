@@ -128,6 +128,15 @@ test("v3 chrome uses a plain canvas and the shared state palette", () => {
   assert.doesNotMatch(stripBlock[1], /--color-state-[\w-]+:/);
 });
 
+test("v3 surface styles resolve colors through tokens", () => {
+  for (const sheet of ["app.css", "components.css", "works-agents.css", "typography.css"]) {
+    const css = readFileSync(resolve(here, "../styles", sheet), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+    const literalColors = css.match(/(?<=[\s:(,])#[0-9a-f]{3,8}(?=[\s,;)]|$)|\brgba?\(/gi) ?? [];
+    assert.deepEqual(literalColors, [], sheet);
+    assert.doesNotMatch(css, /text-transform:\s*uppercase/, sheet);
+  }
+});
+
 test("light v3 tokens preserve the reference palette", () => {
   const mock = readFileSync(resolve(realpathSync(here), "../../../../docs/design/issue-7007/mock-full-refresh-v3.html"), "utf8");
   const pairs = {
