@@ -37,16 +37,33 @@ fn feedback_target(id: &str) -> String {
     format!("feedback:{id}")
 }
 
-fn feedback_decision(root: &Path, id: &str, materials: &str) -> gwt_core::Result<()> {
-    let mut materials = materials.to_string();
-    if materials.len() > 16 * 1024 {
-        let mut end = 16 * 1024 - 3;
+/// The complete masked preview — exactly what Send files — kept beside the
+/// receipt so a card whose text had to be shortened still points at all of it.
+fn preview_path(root: &Path, id: &str) -> std::path::PathBuf {
+    gwt_core::paths::gwt_project_dir_for_repo_path(root)
+        .join("feedback")
+        .join(format!("{id}.preview.txt"))
+}
+
+fn feedback_decision(root: &Path, id: &str, prompt: &str) -> gwt_core::Result<()> {
+    const LIMIT: usize = 16 * 1024;
+    let path = preview_path(root, id);
+    std::fs::create_dir_all(path.parent().expect("feedback store"))?;
+    gwt_core::atomic_file::write_atomic(&path, prompt.as_bytes())?;
+    let footer = format!(
+        "\n\nFull masked preview (exactly what Send files): {}",
+        path.display()
+    );
+    let mut materials = prompt.to_string();
+    if materials.len() + footer.len() > LIMIT {
+        let mut end = LIMIT - footer.len() - "\n… [shortened]".len();
         while !materials.is_char_boundary(end) {
             end -= 1;
         }
         materials.truncate(end);
-        materials.push('…');
+        materials.push_str("\n… [shortened]");
     }
+    materials.push_str(&footer);
     gwt_core::decision_queue::register_owner_decision(
         root,
         &gwt_core::decision_queue::OwnerDecision {
@@ -2958,6 +2975,26 @@ mod tests {
         }
     }
 
+    /// Issue #8083 AC-7: a report too long for the card still shows where its
+    /// complete masked preview is, and that file holds every byte Send files.
+    #[test]
+    fn oversized_feedback_card_points_at_the_complete_preview() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let (dir, store, mut record) = report("https://github.com/acme/app.git");
+        record.input.refusal = format!("{}TAIL-REFUSAL-END", "x".repeat(20 * 1024));
+        store.save(&record).unwrap();
+        let prompt = consent_prompt(&store.read(&record.id).unwrap().public_snapshot());
+        assert!(prompt.len() > 16 * 1024 && prompt.contains("TAIL-REFUSAL-END"));
+        assert_eq!(decide_consent(dir.path(), &record.id, &prompt), Ok(None));
+        let card = &gwt_core::decision_queue::list(dir.path(), None, false).unwrap()[0];
+        assert!(card.materials.len() <= 16 * 1024);
+        assert!(card.materials.contains("[shortened]"));
+        let path = preview_path(dir.path(), &record.id);
+        assert!(card.materials.contains(&path.display().to_string()));
+        assert_eq!(std::fs::read_to_string(path).unwrap(), prompt);
+    }
+
     /// Issue #8083 AC-7: a foreign report waits in Decide and is sent only
     /// after the user answers Send; Keep local never sends.
     #[test]
@@ -2988,6 +3025,12 @@ mod tests {
             assert!(open[0].materials.contains(&record.input.title));
             // A PM answering its own card is not consent: nothing is sent and
             // a fresh card waits for the user.
+            // Neither a PM answer nor an unattributed CLI answer is consent.
+            decision_queue::answer(dir.path(), &open[0].id, FEEDBACK_SEND, AnsweredBy::Cli)
+                .unwrap();
+            assert_eq!(process().state, FeedbackState::PendingApproval);
+            assert_eq!(client.owner_mutation_count(), 0);
+            let open = decision_queue::list(dir.path(), None, false).unwrap();
             decision_queue::answer(dir.path(), &open[0].id, FEEDBACK_SEND, AnsweredBy::Pm).unwrap();
             assert_eq!(process().state, FeedbackState::PendingApproval);
             assert_eq!(client.owner_mutation_count(), 0);

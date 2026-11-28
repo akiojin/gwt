@@ -68,8 +68,13 @@ pub enum DecisionStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AnsweredBy {
+    /// The user, through gwt's own GUI answer path.
     User,
     Pm,
+    /// A `decision.answer` CLI call outside any agent session. Shells can drop
+    /// the session variable, so this is never taken as the user's consent
+    /// (Issue #8083); it still settles ordinary decisions.
+    Cli,
 }
 
 /// Who resumes when the decision is answered.
@@ -651,6 +656,7 @@ pub fn delivery_message(item: &DecisionItem, waiter: &Waiter) -> String {
     }
     let by = match answer.map(|answer| answer.by) {
         Some(AnsweredBy::Pm) => "the PM",
+        Some(AnsweredBy::Cli) => "a direct CLI call",
         _ => "the user",
     };
     let issue = item

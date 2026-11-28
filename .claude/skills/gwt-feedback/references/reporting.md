@@ -90,8 +90,10 @@ number and URL.
 In the Manual path, only the actual gwt repository is exempt from consent. Other and unknown
 repositories wait as `pending_approval` on a Decide card until the user answers
 **Send**; nothing is sent before that. Any other answer preserves the local
-report as `declined`. The answer reaches the PM, which runs `feedback.retry`
-with the request id to send it. JSON approval flags, saved
+report as `declined`. Only the user's answer in gwt counts: a PM answer or a
+`decision.answer` CLI call without a session never sends. A card too long to
+show in full names the local file holding the complete masked preview. The
+answer reaches the PM, which runs `feedback.retry` with the request id to send it. JSON approval flags, saved
 approvals and repo/environment overrides cannot grant consent or Auto authority.
 Only the existing canonical Autonomous preference selects the safe Auto path;
 do not answer a feedback Decide card on the user's behalf.
