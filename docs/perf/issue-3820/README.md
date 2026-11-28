@@ -115,12 +115,63 @@ p50 / p95 は nearest-rank。
 - `terminal-environment.txt`: checkout SHA、version、OS、CPU、採取時刻。
 - `check-terminal-evidence.mjs`: 生サンプルから分位を再計算し、上の 2 つの表と一致することを確かめる（`node docs/perf/issue-3820/check-terminal-evidence.mjs`）。
 
+## P20 workspace merge 状態の反映
+
+### 結論
+
+PM の指示（2026-11-28）で計装を追加した。merge 状態の scan は Work events ingest の event-loop continuation
+（`handle_work_events_ingested`）からだけ起動されるため、既存 route `work_events.ingest` の phase
+`phase:work_events.ingest.merge_status` として記録する。#3700 にこの経路のバジェットが無いため、
+route にせず予算なしの phase とした（バジェット値を独自に決めない、[`../README.md`](../README.md) §1）。
+
+| n | p50 ms | p95 ms | 最悪 ms | バジェット | 判定（暫定） |
+|---:|---:|---:|---:|---|---|
+| 10 | 49.116 | 75.932 | 75.932 | 未定義（#3700 へ要求） | 判定不能 |
+
+p50 / p95 は nearest-rank。n=10 のため p95 は最悪値と同じ。同じ 10 回の `route:work_events.ingest` は
+p50 9.013 / p95 14.798 ms。
+
+### 計測の起点と終点
+
+- 起点: merge worker の 1 pass の開始（scan cache の lock 取得前）。合流した要求は次の pass で処理されるため、
+  pass が要求の単位になる。
+- 終点: `WorkMergeStatus` を GUI の event loop へ送出した直後。
+- 含まないもの: 送出から GUI が `apply_work_merge_status` を実行するまでの待ちと、その handler 自身。
+  handler は既存の GUI dispatch 計測（50 ms 超の handler だけ記録）が扱う。projection の再配信と画面の描画も含まない。
+- 同じ pass の後続処理（tip subject、PR title の取得）は含まない。
+
+### 条件
+
+- 対象: checkout `f9012ab5fd` に本 PR の計装を加えた `target/debug/gwt`（debug build、gwtd 9.179.0）。
+- host: macOS 27.2.1、Apple M5 Max。2026-11-28T01:57Z〜01:58Z（`p20-environment.txt`）。
+- 起動: `--no-tray --no-open`、fresh HOME。`~/.gwt/runtime`、`.gitconfig`、`.config` だけを symlink した。
+- fixture: 1 commit の repo を 10 個、各 repo に linked worktree を 3 個。GitHub remote は無い。
+- 操作: Hub WebSocket から production の frontend event `reopen_recent_project` を 5 秒間隔で 10 件送った
+  （`p20-drive.mjs`）。project open が ingest を起動し、その continuation で merge scan が 1 回ずつ走る。
+
+### 計測の自己劣化検証（`../README.md` §2）
+
+- 手順 1・2: 記録は merge worker の thread 上で 1 pass に 1 回。GUI thread には何も足していない。
+- 手順 3: 1 repo を開いてから 6 分間操作せずに保持し、`route:work_events.ingest` と
+  `phase:work_events.ingest.merge_status` がともに open 時の 1 件だけで、待機中に増えないことを確かめた（`p20-idle-samples.jsonl`）。
+- 手順 4・5: 省略した。既存 route に phase を 1 つ加え、既存の記録関数を ingest 1 回につき 1 回呼ぶだけで、
+  記録は worker 上で行われ、GUI の経路に入らないため。
+
+### 限界
+
+- fixture は最小であり、Work 行・branch・worktree が多い repo の値ではない。下限側に偏る。
+- browser-check の hook repair / audit は P02 と同じ理由で実行していない。計測は agent を起動しない。
+- 起動ログの error 行は 1 件で、installed gwt が OAuth callback port 8765 を使用中という通知だった。
+
+### ファイル
+
+- `p20-run.sh` / `p20-drive.mjs`: 隔離インスタンスの起動・fixture 作成と、open を送って保持する driver。
+- `p20-merge-status-samples.jsonl`: 10 回分の `route:work_events.ingest` と `phase:work_events.ingest.merge_status` の生サンプル。
+- `p20-idle-samples.jsonl`: 6 分間の待機観測の生サンプル。
+- `p20-environment.txt`: checkout SHA、version、OS、CPU、採取時刻。
+
 ## 計測できなかった行
 
 ### P19（worktree picker 列挙）
 
 経路が存在しない。File Tree surface は 2026-10-16 の `d2f04c7518`（廃止サーフェスの Rust 表示経路を削除）で取り除かれ、`WindowPreset::FileTree` は `is_removed_legacy` になっている。PM の承認（2026-11-28）により inventory の主表から除外した。
-
-### P20（workspace merge 状態の反映）
-
-外から起動する操作が無い。merge 状態の scan は Work events ingest と tick の continuation として内部で始まり、要求を区切る event も route 計装も無い。値を得るには #3700 の route 計装（scan 要求から反映まで）の追加が必要。PM の裁定（2026-11-28）で今回は計装を追加せず、「未計装・外部起動操作なし」として残し、Phase 2 後半で再評価する。
