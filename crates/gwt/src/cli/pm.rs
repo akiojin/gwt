@@ -322,86 +322,9 @@ pub struct CapabilitiesReport {
 /// The things the PM cannot do. Only these are declared by hand; every
 /// executable row comes from the dispatch catalog, and the test fails when a
 /// missing operation lands or a permission row names an unknown operation.
-const CAPABILITY_GAPS: &[(&str, &str, CapabilityGapReason, &str)] = &[
-    (
-        "actions.diagnostic.policy.add", r#"{}"#, CapabilityGapReason::Permission,
-        "Read actions.diagnostic.policy.status and use the current registered PM Host context plus fresh exact scoped instruction_id or pm.approval.request; only akiojin/gwt/windows-diagnostic.yml permission changes, and release authority is not reusable",
-    ),
-    (
-        "actions.diagnostic.policy.rollback", r#"{}"#, CapabilityGapReason::Permission,
-        "Read actions.diagnostic.policy.status and use fresh exact scoped authority plus added_by naming this target's successful add and unchanged post-state",
-    ),
-    (
-        "actions.release_policy.add", r#"{}"#, CapabilityGapReason::Permission,
-        "Read actions.release_policy.status, then use the current registered PM Host context and an exact scoped instruction_id or pm.approval.request; only this repository's prepare-release.yml permission is added",
-    ),
-    (
-        "actions.release_policy.rollback", r#"{}"#, CapabilityGapReason::Permission,
-        "Read actions.release_policy.status and use fresh exact scoped authority plus added_by naming the successful add; its post-state must be unchanged and preexisting permission cannot be removed",
-    ),
-    (
-        "project.execution.choose", r#"{}"#, CapabilityGapReason::Permission,
-        "Use project.execution.status, then a scoped instruction_id or pm.approval.request bound to this operation_id, revision, generation and choice",
-    ),
-    (
-        "discussion.create",
-        r#"{}"#,
-        CapabilityGapReason::Permission,
-        "Use a recorded scoped instruction_id or pm.approval.request; no manual GitHub click is required",
-    ),
-    (
-        "repository.required_checks.update",
-        r#"{}"#,
-        CapabilityGapReason::Permission,
-        "Use a recorded scoped instruction_id or pm.approval.request; only develop/main required check contexts change",
-    ),
-    (
-        "repository.branch_protection.update",
-        r#"{}"#,
-        CapabilityGapReason::Permission,
-        "Use a recorded scoped instruction_id or pm.approval.request; only typed develop/main protection toggles change (allow_force_pushes, required_conversation_resolution, enforce_admins, strict)",
-    ),
-    (
-        "update.settings.set", r#"{}"#, CapabilityGapReason::Permission,
-        "Use a recorded scoped instruction_id or pm.approval.request; changes the app-wide Settings preference",
-    ),
-    (
-        "board.config.set", r#"{}"#, CapabilityGapReason::Permission,
-        "Use a recorded scoped instruction_id or pm.approval.request to bind the project's Discussion",
-    ),
-    (
-        "pr.reopen", r#"{}"#, CapabilityGapReason::Permission,
-        "Use a recorded scoped instruction_id or pm.approval.request for this PR number",
-    ),
-    (
-        "pr.review.submit", r#"{}"#, CapabilityGapReason::Permission,
-        "Use a recorded scoped instruction_id or pm.approval.request for this PR and review event; GitHub reviewer and CI gates remain enforced",
-    ),
-    (
-        "pr.auto_merge.enable", r#"{}"#, CapabilityGapReason::Permission,
-        "Review the PR and use a scoped instruction_id or pm.approval.request bound to its exact number and reviewed_head_sha; supports same-repository recovery when merge automation cannot start, with current CI and Ready gates intact",
-    ),
-    (
-        "release.metadata.set", r#"{}"#, CapabilityGapReason::Permission,
-        "Use a recorded scoped instruction_id or pm.approval.request to edit release metadata; publishing stays with the release workflow",
-    ),
-    (
-        "repository.settings.set", r#"{}"#, CapabilityGapReason::Permission,
-        "Use a recorded scoped instruction_id or pm.approval.request for typed reversible repository settings; identity and protection settings are not accepted",
-    ),
-    (
-        "pr.close", r#"{}"#, CapabilityGapReason::Permission,
-        "For PM inventory-triage closure, use pm.operation.execute for the exact PR with scoped instruction or native approval; existing ordinary PR authority remains in force",
-    ),
-    (
-        "worktree.gc_build_artifacts", r#"{}"#, CapabilityGapReason::Permission,
-        "For unmerged or protected-workspace cleanup, use pm.operation.execute with scoped parameters; ordinary dry-run and merged-idle cleanup remain available, with live-worktree exclusions",
-    ),
-    (
-        "pm.message.send", r#"{}"#, CapabilityGapReason::Permission,
-        "For provider approval-prompt choices, use pm.operation.execute for the exact pane id and text; ordinary PM coordination remains available, with project and live-target authority enforced",
-    ),
-];
+/// Issue #8083: no PM operation waits for an owner permission, so no
+/// permission gap is declared by hand. A missing operation lands here.
+const CAPABILITY_GAPS: &[(&str, &str, CapabilityGapReason, &str)] = &[];
 
 pub(crate) fn capabilities_report() -> CapabilitiesReport {
     let executable = crate::cli::operation_catalog::canonical_names().map(|name| Capability {
@@ -422,18 +345,8 @@ pub(crate) fn capabilities_report() -> CapabilitiesReport {
             executable: false,
             reason: Some(*reason),
             owner_action: Some((*owner_action).to_string()),
-            permission_stage: Some("instruction_or_approval".into()),
-            alternative_operation: Some(
-                if matches!(
-                    *operation,
-                    "pr.close" | "worktree.gc_build_artifacts" | "pm.message.send"
-                ) {
-                    "pm.operation.execute"
-                } else {
-                    "pm.approval.request"
-                }
-                .into(),
-            ),
+            permission_stage: Some(gwt_core::pm_authorization::AUTONOMOUS.into()),
+            alternative_operation: Some("pm.operation.execute".into()),
         });
     CapabilitiesReport {
         schema_version: 1,
@@ -752,7 +665,7 @@ pub(super) fn run<E: CliEnv>(
                 input.answer = body;
                 let saved = if ambient_session_id().is_some() || !input.authorizations.is_empty() {
                     let turn = qa_turn.as_ref().ok_or_else(|| refusal(
-                        "permission_stage=instruction: PM instruction capture requires the current human PM turn; automatic prompts use structured submissions, and scoped authorization without a human turn uses pm.approval.request".into()))?;
+                        "permission_stage=instruction: PM instruction capture requires the current human PM turn; automatic prompts use structured submissions, and an operation without a human turn runs directly under audited autonomous PM authority".into()))?;
                     let (session, turn_id) = super::hook::pm_reporting::instruction_prompt_identity(
                         &repo_path, turn, &input.original).map_err(super::io_as_api_error)?;
                     gwt_core::user_instruction::record_from_prompt(&repo_path, *input, &session, &turn_id)
@@ -2910,26 +2823,20 @@ mod tests {
                 "{operation} uses PM authority without a scoped approval route"
             );
         }
+        // Issue #8083: no bounded operation, including the elevated scopes
+        // run through pm.operation.execute, is handed to the owner.
         for operation in gwt_core::pm_authorization::OPERATIONS {
-            let row = report
-                .capabilities
-                .iter()
-                .find(|entry| entry.operation == *operation && !entry.executable)
-                .expect("bounded operation describes its permission path");
-            let row = serde_json::to_value(row).unwrap();
-            assert_eq!(row["permission_stage"], "instruction_or_approval");
-            assert_eq!(
-                row["alternative_operation"],
-                if matches!(
-                    *operation,
-                    "pr.close" | "worktree.gc_build_artifacts" | "pm.message.send"
-                ) {
-                    "pm.operation.execute"
-                } else {
-                    "pm.approval.request"
-                }
+            assert!(
+                !report
+                    .capabilities
+                    .iter()
+                    .any(|entry| entry.operation == *operation && !entry.executable),
+                "{operation} must not be handed to the owner"
             );
         }
+        assert!(!serde_json::to_string(&report)
+            .unwrap()
+            .contains("pm.approval.request"));
         for operation in ["actions.diagnostic.request", "actions.diagnostic.cancel"] {
             let row = report
                 .capabilities

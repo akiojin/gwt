@@ -671,10 +671,6 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &[],
     },
     Operation {
-        name: "pm.approval.request",
-        aliases: &[],
-    },
-    Operation {
         name: "pm.approval.revoke",
         aliases: &[],
     },
