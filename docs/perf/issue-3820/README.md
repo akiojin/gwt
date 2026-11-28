@@ -216,7 +216,10 @@ p50 / p95 は nearest-rank。n=3 のため p95 は最悪値と同じ。
 - P12 の外部 API 消費量は未測定。同期は `gh` を起動しないため、`gh` 起動数（各 sample 0）は消費量の代わりにならない。
 - 1 project・dark テーマだけで測った。経路は画面描画を含まないため、テーマの差は扱わない。
 
-### P10 Issues scan を測らなかった理由
+### P10 Issues scan を実 GitHub で測らなかった理由
+
+この節は実 GitHub を対象にした 2026-11-28 03:34Z の計測時点の判断である。
+読み取り専用のローカル再生で計測した値は下の「P10 Issues scan（ローカル再生）」節にある。
 
 - 外から scan を要求する経路は `issue.monitor.reconcile` と agent listener の `agent_issue_monitor_scan_now` だけで、
   どちらも agent Session の資格（`GWT_PANE_WS_URL`）を必要とする。
@@ -258,6 +261,62 @@ checkout root を作業ディレクトリに設定した。Playwright 子プロ�
 
 この値はウォームキャッシュ・小規模 fixture の暫定値。実 GitHub のネットワーク時間、API 消費量、
 初回同期との競合がある場合の成功時所要時間は未測定。上記の実 GitHub での失敗 3 件は維持する。
+
+## P10 Issues scan（ローカル再生）
+
+### 結論
+
+| テーマ | n | p50 ms | p95 ms | 最悪 ms |
+|---|---:|---:|---:|---:|
+| Dark | 10 | 32.0 | 32.6 | 32.6 |
+| Light | 10 | 22.4 | 31.1 | 31.1 |
+| 合算 | 20 | 28.2 | 32.5 | 32.6 |
+
+集計は nearest-rank。#3700 に P10 の経路予算は無いため、判定はできない。
+scan 後の durable commit は 24 回で 21.5〜28.4 ms だった。launch 選定（`launch-decision`）は 0 回で、
+agent は起動していない。実 Chromium の両テーマで console / page error は 0 件。
+
+### 計測の起点と終点
+
+- 標本は当該 project の daemon scan 1 回。起点は最初の stage（`prefs-load`）の開始、
+  終点は scan 自身の `total`。どちらも `gwt.issue_monitor.scan` の既存ログで、production の計装は変更していない。
+  `total` は外側の timer の Drop で最後に出るため、入れ子の `execution-observation` の `total` とは区別できる。
+- inventory の終点「scan 結果の適用 / launch 選定の完了」との差: 結果の durable commit と launch 選定は
+  scan の後に別 timer で走る。これらのログは project root を持たないため、instance 単位で別に記録した。
+  scan 要求から worker 起動までの待ちと GUI への反映は含まない。
+- 計測開始後に最初に終わった scan はウォームアップとして除外した。
+
+### 前回見送った 2 つの理由の解消
+
+- 起動口: 有効にした Monitor の poll timer（30 秒）が scan を起動する。agent Session の資格は要らない。
+- GitHub への副作用: GitHub は読み取り専用の loopback-v1 と `gh` shim の再生で、`git` の network transport も
+  `protocol.allow never` で拒否した。launch profile が無いため agent も起動しない。
+
+### 条件
+
+- 対象: checkout `fdeda6b06e`（develop `887cdc1600` を取り込んだ HEAD）の debug build、gwtd 9.180.0。
+  macOS 27.2.1、Apple M5 Max。2026-11-28 12:39–12:51 UTC（`scan-environment.txt`）。
+- 起動と再生は `crates/gwt/playwright/verify-issue-5321.mjs` の live fixture（fresh HOME、PM auto start 無効、
+  バックグラウンド index 無効）。open Issue は 3 件（うち queue 対象 1 件）。
+- driver: `sync-index-inventory-live.spec.ts` の P10 モード（`GWT_PERF_INVENTORY_P10_ONLY=1`）。project の
+  Issues 設定を `enabled: true`、`autonomous_mode: false` で書いてから開き、isolated HOME の `gwt.log` から
+  scan を 11 回読む。P12 と同じく、launcher の一時コピーに `p10` suite と `GWT_PERF_INVENTORY_*` の受け渡しを足し、
+  `--skip-build --live --suites p10` で `--project=chromium-dark` と `--project=chromium-light` を別々に実行した。
+
+### 限界
+
+- 候補 3 件の小さな fixture で、ウォームキャッシュの値である。実 GitHub のネットワーク時間、candidate 数の多い
+  repo、index refresh との並行時は含まない。参考の `docs/perf/issue-6979/`（Windows、候補 81 件、
+  p50 6098 / p95 8102 ms）とは 2 桁異なる。
+- scan の内訳は remote 解決（約 12〜18 ms）が最大で、candidate 読込は数 ms だった（生サンプルの `stages`）。
+- テーマは scan に影響しない。両テーマでの実行は console / page error の確認のため。
+
+### ファイル
+
+- `scan-chromium-dark.json` / `scan-chromium-light.json`: scan ごとの所要時間と stage 内訳、ウォームアップ、
+  durable commit と launch 選定の所要時間（instance 単位）。
+- `scan-environment.txt`: checkout SHA、version、OS、CPU、採取時刻、GitHub 再生の条件。
+- `check-scan-evidence.mjs`: 生サンプルから nearest-rank を再計算し、上の表と一致することを確かめる。
 
 ## P03 / P04 / P06 production route（#8040 の計装修復後）
 

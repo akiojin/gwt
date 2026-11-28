@@ -1,0 +1,8 @@
+gwt_sha=fdeda6b06e986b65f2602b2c8dd3417c1b8605e4 (production source; the driver spec P10 mode was uncommitted)
+gwtd 9.180.0
+ProductName:		macOS
+ProductVersion:		27.2.1
+BuildVersion:		26B8132
+Apple M5 Max
+recorded_at dark=2026-11-28T12:45:12Z light=2026-11-28T12:50:58Z
+github=loopback-v1 replay + gh shim (crates/gwt/playwright/verify-issue-5321.mjs live fixture), remote https://github.com/fixture/perf-3820.git

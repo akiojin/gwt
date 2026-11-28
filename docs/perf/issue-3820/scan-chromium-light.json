@@ -1,0 +1,273 @@
+{
+  "samples_per_path": 10,
+  "remote": "https://github.com/fixture/perf-3820.git",
+  "checkout": "/Users/akio-jinsenji/Repos/gwt/work/issue-3820",
+  "recorded_at": "2026-11-28T12:50:58.186Z",
+  "P10": {
+    "n": 10,
+    "p50_ms": 22.417167000000003,
+    "p95_ms": 31.131249999999998,
+    "max_ms": 31.131249999999998,
+    "samples_ms": [
+      30.169,
+      31.131249999999998,
+      18.874209,
+      28.179875,
+      19.830916000000002,
+      19.059375,
+      22.417167000000003,
+      23.645625,
+      18.240166,
+      28.172209
+    ],
+    "warmup": {
+      "ms": 17.508375,
+      "started_at": "2026-11-28T21:45:57.919628+09:00",
+      "stages": {
+        "prefs-load": 0.815125,
+        "capacity-refresh": 0.235459,
+        "remote-resolution": 8.761584,
+        "candidate-load": 2.8815,
+        "execution-observation": 0.5175829999999999,
+        "candidate-reconciliation": 3.113667,
+        "merge-reconciliation": 0.653667,
+        "autonomous-eligibility": 0.014708,
+        "handoff-reconciliation": 0.013167,
+        "window-reconciliation": 0.1415,
+        "autonomous-progress": 0.014041,
+        "branch-prune": 0.013040999999999999,
+        "issue-settlement": 0.013584,
+        "claim-preparation": 0.020417,
+        "proposal-return": 0.014667
+      }
+    },
+    "samples": [
+      {
+        "ms": 30.169,
+        "started_at": "2026-11-28T21:46:27.924470+09:00",
+        "stages": {
+          "prefs-load": 1.627333,
+          "capacity-refresh": 0.582542,
+          "remote-resolution": 17.180332999999997,
+          "candidate-load": 4.460625,
+          "execution-observation": 0.693625,
+          "candidate-reconciliation": 4.090375,
+          "merge-reconciliation": 0.783458,
+          "autonomous-eligibility": 0.019083,
+          "handoff-reconciliation": 0.017167,
+          "window-reconciliation": 0.19354100000000002,
+          "autonomous-progress": 0.018375,
+          "branch-prune": 0.017291,
+          "issue-settlement": 0.017416,
+          "claim-preparation": 0.024125,
+          "proposal-return": 0.0195
+        }
+      },
+      {
+        "ms": 31.131249999999998,
+        "started_at": "2026-11-28T21:46:57.927275+09:00",
+        "stages": {
+          "prefs-load": 2.00475,
+          "capacity-refresh": 0.547416,
+          "remote-resolution": 17.756417,
+          "candidate-load": 4.403207999999999,
+          "execution-observation": 0.746958,
+          "candidate-reconciliation": 4.060583,
+          "merge-reconciliation": 0.837375,
+          "autonomous-eligibility": 0.019208999999999997,
+          "handoff-reconciliation": 0.017209000000000002,
+          "window-reconciliation": 0.18395799999999998,
+          "autonomous-progress": 0.018416000000000002,
+          "branch-prune": 0.017791,
+          "issue-settlement": 0.017542,
+          "claim-preparation": 0.025209,
+          "proposal-return": 0.019625
+        }
+      },
+      {
+        "ms": 18.874209,
+        "started_at": "2026-11-28T21:47:27.918591+09:00",
+        "stages": {
+          "prefs-load": 0.9125840000000001,
+          "capacity-refresh": 0.24933399999999997,
+          "remote-resolution": 9.715667000000002,
+          "candidate-load": 3.0184159999999998,
+          "execution-observation": 0.5600419999999999,
+          "candidate-reconciliation": 3.24975,
+          "merge-reconciliation": 0.6164999999999999,
+          "autonomous-eligibility": 0.015333000000000001,
+          "handoff-reconciliation": 0.012958,
+          "window-reconciliation": 0.153875,
+          "autonomous-progress": 0.014083,
+          "branch-prune": 0.013125000000000001,
+          "issue-settlement": 0.013458999999999999,
+          "claim-preparation": 0.022,
+          "proposal-return": 0.015375000000000002
+        }
+      },
+      {
+        "ms": 28.179875,
+        "started_at": "2026-11-28T21:47:57.919800+09:00",
+        "stages": {
+          "prefs-load": 0.8085,
+          "capacity-refresh": 0.251542,
+          "remote-resolution": 8.176875,
+          "candidate-load": 2.878291,
+          "execution-observation": 0.501583,
+          "candidate-reconciliation": 10.685917,
+          "merge-reconciliation": 4.149208,
+          "autonomous-eligibility": 0.015333999999999999,
+          "handoff-reconciliation": 0.013292,
+          "window-reconciliation": 0.262,
+          "autonomous-progress": 0.036708000000000005,
+          "branch-prune": 0.021416,
+          "issue-settlement": 0.015458999999999999,
+          "claim-preparation": 0.035958,
+          "proposal-return": 0.018542
+        }
+      },
+      {
+        "ms": 19.830916000000002,
+        "started_at": "2026-11-28T21:48:27.920168+09:00",
+        "stages": {
+          "prefs-load": 1.028416,
+          "capacity-refresh": 0.263416,
+          "remote-resolution": 9.072500000000002,
+          "candidate-load": 3.848166,
+          "execution-observation": 0.598542,
+          "candidate-reconciliation": 3.498125,
+          "merge-reconciliation": 0.9403750000000001,
+          "autonomous-eligibility": 0.014792,
+          "handoff-reconciliation": 0.012875,
+          "window-reconciliation": 0.158667,
+          "autonomous-progress": 0.016583,
+          "branch-prune": 0.013333,
+          "issue-settlement": 0.0135,
+          "claim-preparation": 0.023708,
+          "proposal-return": 0.018292
+        }
+      },
+      {
+        "ms": 19.059375,
+        "started_at": "2026-11-28T21:48:57.921486+09:00",
+        "stages": {
+          "prefs-load": 1.2267910000000002,
+          "capacity-refresh": 0.345041,
+          "remote-resolution": 8.94825,
+          "candidate-load": 3.002083,
+          "execution-observation": 0.748292,
+          "candidate-reconciliation": 3.468,
+          "merge-reconciliation": 0.684875,
+          "autonomous-eligibility": 0.020375,
+          "handoff-reconciliation": 0.018334,
+          "window-reconciliation": 0.193041,
+          "autonomous-progress": 0.014166,
+          "branch-prune": 0.013458999999999999,
+          "issue-settlement": 0.013625000000000002,
+          "claim-preparation": 0.021458,
+          "proposal-return": 0.015166
+        }
+      },
+      {
+        "ms": 22.417167000000003,
+        "started_at": "2026-11-28T21:49:27.921809+09:00",
+        "stages": {
+          "prefs-load": 1.1605420000000002,
+          "capacity-refresh": 0.339375,
+          "remote-resolution": 11.019667,
+          "candidate-load": 3.5290410000000003,
+          "execution-observation": 0.826375,
+          "candidate-reconciliation": 4.0392079999999995,
+          "merge-reconciliation": 0.804833,
+          "autonomous-eligibility": 0.017374999999999998,
+          "handoff-reconciliation": 0.015208000000000001,
+          "window-reconciliation": 0.186417,
+          "autonomous-progress": 0.015834,
+          "branch-prune": 0.014875000000000001,
+          "issue-settlement": 0.017833,
+          "claim-preparation": 0.025167000000000002,
+          "proposal-return": 0.018291
+        }
+      },
+      {
+        "ms": 23.645625,
+        "started_at": "2026-11-28T21:49:57.921758+09:00",
+        "stages": {
+          "prefs-load": 1.591542,
+          "capacity-refresh": 0.396916,
+          "remote-resolution": 10.727958,
+          "candidate-load": 3.408334,
+          "execution-observation": 0.91325,
+          "candidate-reconciliation": 4.803375,
+          "merge-reconciliation": 0.785875,
+          "autonomous-eligibility": 0.017708,
+          "handoff-reconciliation": 0.054833,
+          "window-reconciliation": 0.357334,
+          "autonomous-progress": 0.022208000000000002,
+          "branch-prune": 0.016125,
+          "issue-settlement": 0.016249999999999997,
+          "claim-preparation": 0.026875,
+          "proposal-return": 0.01925
+        }
+      },
+      {
+        "ms": 18.240166,
+        "started_at": "2026-11-28T21:50:27.921163+09:00",
+        "stages": {
+          "prefs-load": 0.958125,
+          "capacity-refresh": 0.260167,
+          "remote-resolution": 9.008624999999999,
+          "candidate-load": 2.91175,
+          "execution-observation": 0.645917,
+          "candidate-reconciliation": 3.186667,
+          "merge-reconciliation": 0.702333,
+          "autonomous-eligibility": 0.015000000000000001,
+          "handoff-reconciliation": 0.013167,
+          "window-reconciliation": 0.15479099999999998,
+          "autonomous-progress": 0.014167,
+          "branch-prune": 0.013375,
+          "issue-settlement": 0.014041,
+          "claim-preparation": 0.022292,
+          "proposal-return": 0.015792
+        }
+      },
+      {
+        "ms": 28.172209,
+        "started_at": "2026-11-28T21:50:57.927703+09:00",
+        "stages": {
+          "prefs-load": 1.659667,
+          "capacity-refresh": 0.39795899999999995,
+          "remote-resolution": 12.474333000000001,
+          "candidate-load": 4.411792,
+          "execution-observation": 0.912875,
+          "candidate-reconciliation": 6.1216669999999995,
+          "merge-reconciliation": 1.061958,
+          "autonomous-eligibility": 0.02225,
+          "handoff-reconciliation": 0.018000000000000002,
+          "window-reconciliation": 0.352166,
+          "autonomous-progress": 0.033917,
+          "branch-prune": 0.019458,
+          "issue-settlement": 0.018125,
+          "claim-preparation": 0.078125,
+          "proposal-return": 0.0255
+        }
+      }
+    ],
+    "durable_commit_ms": [
+      25.477916999999998,
+      22.071084000000003,
+      28.424625,
+      22.260792000000002,
+      21.546666,
+      22.319459,
+      22.26225,
+      22.684917,
+      23.378,
+      25.015666999999997,
+      23.701333,
+      22.583167
+    ],
+    "launch_decision_ms": []
+  },
+  "console_errors": []
+}

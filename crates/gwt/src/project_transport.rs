@@ -2980,6 +2980,7 @@ async fn client_session_with_scope(
                         "pane sync timed out waiting for Owner completion"
                     );
                 }
+                state.clients.unregister(&client_id);
                 send_agent_close_frame(&mut sender, AGENT_PANE_SYNC_TIMEOUT_CLOSE).await;
                 break;
             }
@@ -3892,13 +3893,15 @@ mod tests {
         let read_event = tokio::time::timeout(fixture_deadline, received.recv())
             .await
             .expect("stalled pane sync dispatch deadline");
-        assert!(matches!(
-            read_event,
-            Some(TransportEvent::AgentFrontend {
-                request: crate::agent_capability::AgentFrontendRequest::Ready,
-                ..
-            })
-        ));
+        let Some(TransportEvent::AgentFrontend {
+            client_id: reader_id,
+            request: crate::agent_capability::AgentFrontendRequest::Ready,
+            ..
+        }) = read_event
+        else {
+            panic!("expected pane sync dispatch");
+        };
+        assert!(clients.scope(&reader_id).is_some());
         tokio::time::pause();
         tokio::time::advance(Duration::from_secs(11)).await;
         tokio::time::resume();
@@ -3913,6 +3916,7 @@ mod tests {
         };
         assert_eq!(u16::from(frame.code), 1013);
         assert_eq!(frame.reason, "pane_sync_timeout");
+        assert!(clients.scope(&reader_id).is_none());
         server.abort();
     }
     #[test]
