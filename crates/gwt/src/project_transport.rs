@@ -3781,16 +3781,15 @@ mod tests {
             .send(WireMessage::Text(r#"{"kind":"frontend_ready"}"#.into()))
             .await
             .unwrap();
-        let Some(TransportEvent::AgentFrontend {
-            client_id,
-            request: crate::agent_capability::AgentFrontendRequest::Ready,
-            ..
-        }) = tokio::time::timeout(Duration::from_secs(5), received.recv())
-            .await
-            .unwrap()
-        else {
-            panic!("pane sync must reach the Owner queue");
-        };
+        assert!(matches!(
+            tokio::time::timeout(std::time::Duration::from_secs(5), received.recv())
+                .await
+                .unwrap(),
+            Some(TransportEvent::AgentFrontend {
+                request: crate::agent_capability::AgentFrontendRequest::Ready,
+                ..
+            })
+        ));
         let fixture_deadline = std::time::Duration::from_secs(5);
         let pane_id = "test-tab::own";
         let workspace = serde_json::json!({
@@ -3819,15 +3818,15 @@ mod tests {
         let workspace_reply: serde_json::Value =
             serde_json::from_str(workspace_reply.to_text().unwrap()).unwrap();
         assert_eq!(workspace_reply["kind"], "workspace_state");
-        clients.dispatch(vec![OutboundEvent::reply(
-            client_id,
-            BackendEvent::PaneSyncComplete {
+        assert!(!clients
+            .first_agent_queue_for_test()
+            .unwrap()
+            .enqueue(&prepare_outbound(&BackendEvent::PaneSyncComplete {
                 empty_window_ids: vec![pane_id.into()],
                 busy_window_ids: vec![],
                 unavailable_window_ids: vec![],
                 failed_window_ids: vec![],
-            },
-        )]);
+            })));
         // test-hygiene: allow-wall-clock-deadline Bound fixture I/O while waiting for the completion frame.
         let completion = tokio::time::timeout(fixture_deadline, socket.next())
             .await
@@ -3890,10 +3889,11 @@ mod tests {
             .await
             .unwrap();
         // test-hygiene: allow-wall-clock-deadline Bound fixture I/O while dispatch establishes the timer start.
+        let read_event = tokio::time::timeout(fixture_deadline, received.recv())
+            .await
+            .expect("stalled pane sync dispatch deadline");
         assert!(matches!(
-            tokio::time::timeout(fixture_deadline, received.recv())
-                .await
-                .unwrap(),
+            read_event,
             Some(TransportEvent::AgentFrontend {
                 request: crate::agent_capability::AgentFrontendRequest::Ready,
                 ..
