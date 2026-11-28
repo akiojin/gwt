@@ -2528,8 +2528,8 @@ mod tests {
     }
 
     #[cfg(windows)]
-    #[tokio::test]
-    async fn successful_deadline_spawn_releases_job_without_killing_detached_descendant() {
+    #[test]
+    fn successful_deadline_spawn_releases_job_without_killing_detached_descendant() {
         let directory = tempfile::tempdir().expect("tempdir");
         let descendant_file = directory.path().join("detached.pid");
         let stdout_file = directory.path().join("detached.stdout");
@@ -2545,19 +2545,31 @@ mod tests {
         );
         let args = vec!["-NoProfile".to_string(), "-Command".to_string(), script];
 
-        let output = spawn_logged_with_deadline(
-            &ProcessConsoleHub::new(),
-            ProcessKind::IndexRunner,
-            "powershell",
-            &args,
-            SpawnOptions::new("windows detached success")
-                .capture(false, false)
-                .forward_output(false)
-                .current_dir(directory.path()),
-            // This tests Job release, not PowerShell cold-start speed.
-            Instant::now() + crate::deadline_budget::HANG_GUARD,
+        // This tests Job release, not PowerShell cold-start speed. A
+        // current-thread runtime polls on this thread, so the readiness hook
+        // starts the hang guard after the root spawns; the passed instant is
+        // never consulted.
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let output = with_spawn_ready_for_tests(
+            crate::deadline_budget::HANG_GUARD,
+            || {},
+            || {
+                runtime.block_on(spawn_logged_with_deadline(
+                    &ProcessConsoleHub::new(),
+                    ProcessKind::IndexRunner,
+                    "powershell",
+                    &args,
+                    SpawnOptions::new("windows detached success")
+                        .capture(false, false)
+                        .forward_output(false)
+                        .current_dir(directory.path()),
+                    Instant::now(),
+                ))
+            },
         )
-        .await
         .expect("root process succeeds before deadline");
         assert!(output.success());
 
