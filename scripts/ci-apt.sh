@@ -62,7 +62,7 @@
 #
 # AC-5 (a path that runs the tests anyway when the fetch fails) is deliberately
 # not taken: `Test (Rust)` runs `cargo test --workspace --all-features`, and
-# the workspace links wry/tao against GTK and WebKitGTK, so without these
+# the workspace links tao against GTK and D-Bus, so without these
 # packages the job cannot compile `gwt` at all. A gtk-free subset would be a
 # second job with its own compile and its own cargo cache, paying a permanent
 # cost to soften a failure whose cause is now bounded and legible.
@@ -111,15 +111,14 @@ APT_GET="${GWT_APT_GET:-apt-get}"
 DPKG="${GWT_APT_DPKG:-dpkg}"
 DPKG_QUERY="${GWT_APT_DPKG_QUERY:-dpkg-query}"
 
-# The tray + WebView build dependencies every Linux job installs. This is the
+# The tray and native GTK build dependencies every Linux job installs. This is the
 # one home for the set: the workflows key their actions/cache entry on a hash
 # of this file, so changing the list here invalidates the cached archives
 # instead of serving the previous ones.
 GTK_PACKAGES=(
   libgtk-3-dev
-  libwebkit2gtk-4.1-dev
   libayatana-appindicator3-dev
-  libxdo-dev
+  libdbus-1-dev
 )
 
 # Sentinels above the range apt-get and GNU timeout use, so "we ran out of
