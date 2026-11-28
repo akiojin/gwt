@@ -13,6 +13,7 @@ import { expect, test, type Page } from '@playwright/test';
 import { spawnSync } from 'node:child_process';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { startExactRelaunchFixture } from './_helpers/exact-relaunch';
 import { gotoLiveGwt } from './_helpers/live-gwt';
 
@@ -81,6 +82,49 @@ test.describe('T-036 v3 regression (isolated checkout)', () => {
     await page.context().addInitScript(value => {
       if (location.protocol.startsWith('http')) localStorage.setItem('gwt:ui:theme', value);
     }, theme);
+    const mock = await page.context().newPage();
+    const comparison = await page.context().newPage();
+    const referencePath = resolve(process.env.GWT_PLAYWRIGHT_CHECKOUT_ROOT ?? process.cwd(),
+      'docs/design/issue-7007/mock-full-refresh-v3.html');
+    const compare = async (product: Page, name: string, mockPage: string, mockScreen?: string) => {
+      await mock.goto(`${pathToFileURL(referencePath).href}?full=1`);
+      // Pin the mock's active pane without invoking menu or dialog actions.
+      await mock.evaluate(({ mockPage, mockScreen }) => {
+        for (const group of document.querySelectorAll<HTMLElement>('.pagegroup')) {
+          const active = group.dataset.page === mockPage;
+          group.classList.toggle('on', active);
+          if (!active || !mockScreen) continue;
+          for (const pane of group.querySelectorAll<HTMLElement>('.screen-pane')) {
+            pane.classList.toggle('on', pane.dataset.screen === mockScreen);
+          }
+          const title = group.querySelector(`.screen-pane.on :is(.h-big, h1, h2)`);
+          if (title) document.getElementById('appTitle')!.textContent = title.textContent;
+        }
+      }, { mockPage, mockScreen });
+      await expect(mock.locator(`.pagegroup.on[data-page="${mockPage}"]`)).toBeVisible();
+      if (mockScreen) {
+        await expect(mock.locator(`.screen-pane.on[data-screen="${mockScreen}"]`)).toBeVisible();
+      }
+      const canvas = theme === 'light' ? 'rgb(242, 243, 245)' : 'rgb(25, 27, 32)';
+      await expect(product.locator('body')).toHaveCSS('background-color', canvas);
+      const typography = (view: Page) => view.locator('body').evaluate(body => {
+        const style = getComputedStyle(body);
+        return [style.fontFamily, style.fontSize, style.lineHeight];
+      });
+      expect(await typography(product)).toEqual(await typography(mock));
+      expect(await product.locator('body').evaluate(body => [
+        getComputedStyle(body, '::before').backgroundImage,
+        getComputedStyle(body, '::after').backgroundImage,
+      ])).toEqual(['none', 'none']);
+      const [reference, actual] = await Promise.all([mock, product].map(view => view.screenshot({ animations: 'disabled' })));
+      const image = (buffer: Buffer, label: string) =>
+        `<figure style="margin:0"><figcaption>${label}</figcaption><img style="display:block;width:100%" src="data:image/png;base64,${buffer.toString('base64')}" alt=""></figure>`;
+      await comparison.setContent(`<main style="display:grid;grid-template-columns:1fr 1fr;gap:8px;padding:8px;background:white;color:black;font:16px system-ui">
+        ${image(reference, 'Mock v3 · Light')}${image(actual, `Product · ${theme}`)}</main>`);
+      const path = info.outputPath(`${name}-${theme}-comparison.png`);
+      await comparison.locator('main').screenshot({ path });
+      await info.attach(`${name}-${theme}-comparison`, { path, contentType: 'image/png' });
+    };
     const openProject = () => gotoLiveGwt(page, target.url, { enableTestBridge: true, projectKey });
     const expectWaiting = async (count: number, view: Page = page) => {
       await expect(pmEntry(view)).toHaveAttribute('aria-label',
@@ -105,6 +149,7 @@ test.describe('T-036 v3 regression (isolated checkout)', () => {
       await expect(page).toHaveURL(/\?view=decisions$/);
       await expect(page.getByRole('heading', { name: 'Decisions' })).toBeVisible();
       await expect(page.locator('[data-home-waitjump]')).toHaveText('3 decisions waiting');
+      await compare(page, 'decisions', 'gwt', 'g-decide');
       for (const question of QUESTIONS) {
         await expect(page.locator('[data-home-topic]').filter({ hasText: question })).toHaveCount(1);
       }
@@ -121,6 +166,11 @@ test.describe('T-036 v3 regression (isolated checkout)', () => {
       await expect(bundledTopic).toHaveCount(0);
       await expect(page.locator('[data-home-waitjump]')).toHaveText('2 decisions waiting');
       await expect(page.locator('article[data-home-topic]').filter({ hasText: QUESTIONS[2] })).toHaveCount(1);
+
+      const waitingBadge = page.locator('.gwt-home__chip--waiting').first();
+      const waitingFill = theme === 'light' ? 'rgb(251, 240, 221)' : 'rgb(71, 56, 32)';
+      await expect(waitingBadge).toHaveCSS('background-color', waitingFill);
+      await compare(page, 'home', 'start');
 
       // Answering one from Home resolves it everywhere.
       const answered = page.locator('[data-home-topic]').filter({ hasText: QUESTIONS[0] });
@@ -146,6 +196,8 @@ test.describe('T-036 v3 regression (isolated checkout)', () => {
       await expect(page.getByRole('heading', { name: 'Projects', level: 1 })).toBeVisible();
       await expectWaiting(1);
 
+      await compare(page, 'projects', 'projects', 'projects-main');
+
       // The project opens from the list in its own browser tab (SPEC-3287);
       // its count followed the answer.
       const opened = page.context().waitForEvent('page');
@@ -156,6 +208,15 @@ test.describe('T-036 v3 regression (isolated checkout)', () => {
       await expect(project.locator('html')).toHaveAttribute('data-theme', theme);
       await expectWaiting(1, project);
       await expect(project.locator('#op-strip-issue-monitor')).toHaveAttribute('title', /PM decisions 1/, { timeout: 20_000 });
+      const bodyFont = await project.locator('body').evaluate(body => getComputedStyle(body).fontFamily);
+      await expect(project.locator('.op-status-strip')).toHaveCSS('font-family', bodyFont);
+      const surface = await project.locator('.app-head').evaluate(header => getComputedStyle(header).backgroundColor);
+      for (const name of ['Split view', 'Close Project']) {
+        const button = project.getByRole('button', { name, exact: true });
+        await expect(button).toHaveCSS('background-color', surface);
+        await expect(button).toHaveCSS('font-family', bodyFont);
+        await expect(button).toHaveCSS('text-transform', 'none');
+      }
 
       // Header destinations on the project page.
       const header = appNav(project);
@@ -163,24 +224,56 @@ test.describe('T-036 v3 regression (isolated checkout)', () => {
       await expect(project.getByRole('heading', { name: 'Agents', exact: true })).toBeVisible();
       const registeredMembers = project.getByRole('meter', { name: 'Registered members', exact: true });
       await expect(registeredMembers).toBeVisible();
+      await compare(project, 'agent-ledger', 'agents', 'agents-ledger');
       await header.getByRole('button', { name: 'Environments', exact: true }).click();
       await expect(project.getByRole('heading', { name: 'Execution environments', exact: true })).toBeVisible();
+      await compare(project, 'environments', 'tools', 'tools-env');
+      await project.emulateMedia({ forcedColors: 'active' });
+      const environmentAction = project.getByRole('button', { name: 'Add an execution environment' });
+      try {
+        await environmentAction.hover();
+        const { backgroundColor, borderTopColor } = await environmentAction.evaluate(button => {
+          const style = getComputedStyle(button);
+          return { backgroundColor: style.backgroundColor, borderTopColor: style.borderTopColor };
+        });
+        expect(borderTopColor).not.toBe(backgroundColor);
+      } finally {
+        await project.emulateMedia({ forcedColors: null });
+      }
       await project.getByRole('button', { name: 'Accounts', exact: true }).click();
-      // Design item 234: no tool-side account rows on the accounts screen.
+      // Tool-side providers may appear in the usage summary, but cannot have account pools.
       const accounts = project.getByRole('region', { name: 'Execution environments' });
       await expect(accounts.getByRole('heading', { name: 'Accounts', level: 1 })).toBeVisible();
-      await expect(accounts).not.toContainText(/Hermes Agent|OpenClaw|OpenCode/);
+      await expect(accounts.getByRole('heading', { name: 'Usage by provider' })).toBeVisible();
+      await expect(accounts.getByRole('region', { name: /^(Hermes Agent|OpenClaw|OpenCode) accounts$/ })).toHaveCount(0);
+      await compare(project, 'accounts', 'tools', 'tools-pool');
+      await accounts.getByRole('button', { name: 'Tool management' }).click();
+      await expect(project.locator('.surface-area')).toContainText(/Tools/i);
+      await compare(project, 'tool-management', 'tools', 'tools-supported');
       await header.getByRole('button', { name: 'Menu ▾' }).click();
       await project.getByRole('menuitem', { name: 'Settings' }).click();
       await expect(project.locator('.surface-area')).toContainText(/Settings/i);
       await project.locator('#op-notifications-button').click();
       await expect(project.locator('#notification-center')).toBeVisible();
+      await compare(project, 'notifications', 'notifications', 'notifications-main');
       await project.keyboard.press('Escape');
 
       // Every surface of the project page, from the rail.
-      for (const [selector, content] of RAIL_SURFACES) {
+      const mockScreens = ['g-tasks', 'g-issues', 'g-agents', 'g-board', 'g-settings', 'g-logs', 'g-index', 'profile-main'];
+      for (const [index, [selector, content]] of RAIL_SURFACES.entries()) {
         await project.locator(`.op-rail ${selector}`).click();
         await expect(project.locator('.surface-area'), selector).toContainText(content);
+        const mockScreen = mockScreens[index];
+        if (mockScreen === 'g-board') {
+          await expect(project.locator('.board-root .knowledge-heading')).toHaveCSS('font-size', '20px');
+        }
+        if (mockScreen === 'g-settings') {
+          await project.getByRole('tab', { name: 'Issues execution settings' }).click();
+          await expect(project.locator('.settings-heading')).toHaveCSS('font-size', '20px');
+          await expect(project.locator('[data-settings-issues-controls] .settings-section').first())
+            .toHaveCSS('background-color', surface);
+        }
+        await compare(project, mockScreen, mockScreen === 'profile-main' ? 'profile' : 'gwt', mockScreen);
       }
 
       // The Works screen (design item 137) is folded into Issues: the rail
@@ -199,6 +292,8 @@ test.describe('T-036 v3 regression (isolated checkout)', () => {
       await info.attach(`v3-regression-${theme}`, { path: screenshot, contentType: 'image/png' });
       expect(errors, 'console / page errors').toEqual([]);
     } finally {
+      await comparison.close();
+      await mock.close();
       await target.stop();
     }
   });

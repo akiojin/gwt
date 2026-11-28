@@ -1252,12 +1252,10 @@ test("head loads tokens, typography, components, and Operator modules", () => {
   );
 });
 
-test("body markup wires Mission Briefing reveal lines (US-1 AS-1)", () => {
-  const lines = document.querySelectorAll(".op-briefing__line");
-  assert.ok(lines.length >= 4, `expected >=4 briefing lines, got ${lines.length}`);
-  const online = document.querySelector(".op-briefing__online");
-  assert.ok(online, "expected OPERATOR ONLINE marker");
-  assert.match(online.textContent, /OPERATOR ONLINE/);
+test("startup uses a single plain status message", () => {
+  const briefing = document.getElementById("op-briefing");
+  assert.equal(briefing.textContent.trim(), "Starting gwt…");
+  assert.doesNotMatch(briefing.innerHTML, /animation-delay|op-briefing__progress/);
 });
 
 test("head suppresses the browser's implicit favicon request", () => {
@@ -1640,16 +1638,16 @@ test("theme-toggle wires aria-label updates on every render", () => {
   );
 });
 
-test("xterm content stays on the dark Operator palette across app theme changes", () => {
+test("xterm content uses the shared dark terminal palette across app theme changes", () => {
   assert.match(
     appSource,
-    /theme:\s*XTERM_THEME_DARK/,
-    "expected Terminal initialization to use the dark xterm palette directly",
+    /theme:\s*resolveTerminalTheme\(\)/,
+    "expected Terminal initialization to resolve the shared dark terminal palette",
   );
   assert.doesNotMatch(
     appSource,
     /XTERM_THEME_LIGHT/,
-    "xterm content must not define a light palette; only the terminal chrome follows app theme",
+    "xterm content uses the shared dark terminal palette in both themes",
   );
   assert.doesNotMatch(
     appSource,
@@ -2031,7 +2029,6 @@ test("Every keyframes-driven animation has a prefers-reduced-motion override", (
   // matching it) appears in any prefers-reduced-motion block.
   const css = readFileSync(resolve(here, "../styles/components.css"), "utf8");
   const keyframes = [...new Set([...css.matchAll(/@keyframes\s+([\w-]+)\s*\{/g)].map((m) => m[1]))];
-  assert.ok(keyframes.length >= 6, `expected >= 6 keyframes, got ${keyframes.length}`);
 
   // CSS @media blocks have nested rules with their own closing braces, so
   // a naive regex with `[^}]*` or `[\s\S]*?\n\}` undercaptures. Walk the
