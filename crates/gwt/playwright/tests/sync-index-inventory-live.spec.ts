@@ -1,9 +1,10 @@
 // SPEC #3820 T-006e: provisional latency samples for inventory paths
 // P12 (GitHub sync: refresh request -> refreshed Issue list delivered) and
 // P11 (index build: rebuild request -> requested cell reported healthy).
-// P10 (Issues scan) is not driven here: its only external trigger needs
-// an agent Session, and a scan against a real repository can propose GitHub
-// mutations (merged-Issue settlement). See the README for the boundary.
+// P10 (Issues scan) runs only with GWT_PERF_INVENTORY_P10_ONLY=1 against the
+// read-only GitHub loopback replay: the enabled Monitor's own poll timer is the
+// trigger (no agent Session), and no launch profile exists, so nothing launches.
+// Never run P10 against a real repository: settlement can propose GitHub writes.
 // This is a measurement driver, not a regression gate. It runs only against an
 // isolated browser-check instance with live or replayed GitHub reads and writes raw
 // samples to GWT_PERF_INVENTORY_OUT. See docs/perf/issue-3820/README.md.
@@ -16,6 +17,7 @@ import { gotoLiveGwt, readLiveHubCatalog, sendLiveGwtEvent, withLiveGwtBackendLo
 const SAMPLES = Number(process.env.GWT_PERF_INVENTORY_SAMPLES ?? "5");
 const REMOTE = process.env.GWT_PERF_INVENTORY_REMOTE ?? "https://github.com/akiojin/gwt.git";
 const P12_ONLY = process.env.GWT_PERF_INVENTORY_P12_ONLY === "1";
+const P10_ONLY = process.env.GWT_PERF_INVENTORY_P10_ONLY === "1";
 test.use({ launchOptions: { args: ["--window-position=-32000,-32000", "--disable-backgrounding-occluded-windows",
   "--disable-renderer-backgrounding", "--disable-background-timer-throttling"] } });
 
@@ -47,8 +49,10 @@ test.describe("SPEC #3820 sync / index inventory", () => {
       const projectState = join(home!, ".gwt", "projects", key, "project-state");
       await mkdir(projectState, { recursive: true });
       await writeFile(join(projectState, "pm.json"), '{"settings":{"auto_start":false}}');
-      // Disabled Monitor: no periodic scan, no claim, no agent launch.
-      await writeFile(join(projectState, "issue-monitor.json"), '{"enabled":false,"max_active_agents":1,"priority_order":[]}');
+      // Disabled Monitor: no periodic scan, no claim, no agent launch. P10 enables
+      // it without a launch profile so the poll timer scans but cannot launch.
+      await writeFile(join(projectState, "issue-monitor.json"), JSON.stringify({ enabled: P10_ONLY,
+        autonomous_mode: false, max_active_agents: 1, priority_order: [] }));
 
       const errors: string[] = [];
       page.on("pageerror", error => errors.push(error.message));
@@ -68,6 +72,15 @@ test.describe("SPEC #3820 sync / index inventory", () => {
         expect(readiness, "GUI presence (Healthy project owner)").toBe("project_owner_health");
         await installRecorder(page);
 
+        if (P10_ONLY) {
+          const p10 = await measureP10(home!, [root, source], SAMPLES);
+          expect(errors, "console and page errors").toEqual([]);
+          const record = { samples_per_path: SAMPLES, remote: REMOTE, checkout: process.env.GWT_PLAYWRIGHT_CHECKOUT_ROOT,
+            recorded_at: new Date().toISOString(), P10: p10, console_errors: errors };
+          await mkdir(out!, { recursive: true });
+          await writeFile(join(out!, `scan-${info.project.name}.json`), JSON.stringify(record, null, 2) + "\n");
+          return;
+        }
         issueWindow = await createIssueWindow(page);
         if (P12_ONLY) {
           const warmup = await measureP12(page, issueWindow, home!, 1);
@@ -197,6 +210,61 @@ async function measureP11(page: Page, root: string) {
     await page.waitForTimeout(2_000);
   }
   return { ...summarize(samples.map(sample => sample.ms)), samples };
+}
+
+// P10: one sample is one daemon scan pass of this project (span root: worktree or repository), from its first stage
+// (prefs-load started) to the scan's own `total` (the outer timer drops last, after
+// nested timers). The durable commit and launch decision run after the pass and are
+// listed per instance, not per project, because they log no project root.
+async function measureP10(home: string, roots: string[], count: number) {
+  const from = Date.now();
+  let parsed = parseScanLog([], roots, from);
+  await expect.poll(async () => {
+    parsed = parseScanLog(await readGwtLog(home), roots, from);
+    return parsed.scans.length;
+  }, { timeout: 3_600_000, intervals: [5_000] }).toBeGreaterThanOrEqual(count + 1);
+  // The first pass after project open also loads the cold candidate cache.
+  const [warmup, ...scans] = parsed.scans;
+  const measured = scans.slice(0, count);
+  return { ...summarize(measured.map(scan => scan.ms)), warmup, samples: measured,
+    durable_commit_ms: parsed.commits, launch_decision_ms: parsed.decisions };
+}
+
+async function readGwtLog(home: string): Promise<string[]> {
+  const dir = join(home, ".gwt", "logs");
+  const lines: string[] = [];
+  for (const name of (await readdir(dir).catch(() => [] as string[])).filter(name => name.startsWith("gwt.log")).sort()) {
+    lines.push(...(await readFile(join(dir, name), "utf8")).split("\n"));
+  }
+  return lines;
+}
+
+function parseScanLog(lines: string[], roots: string[], from: number) {
+  const scans: Array<{ ms: number; started_at: string; stages: Record<string, number> }> = [];
+  const commits: number[] = [];
+  const decisions: number[] = [];
+  let current: { started_at: string; stages: Record<string, number>; total?: number } | null = null;
+  const close = () => { if (current?.total !== undefined) scans.push({ ms: current.total, started_at: current.started_at, stages: current.stages }); };
+  for (const line of lines) {
+    if (!line.includes("gwt.issue_monitor.scan")) continue;
+    let entry: any;
+    try { entry = JSON.parse(line); } catch { continue; }
+    if (entry.target !== "gwt.issue_monitor.scan" || Date.parse(entry.timestamp ?? "") < from) continue;
+    const { stage, state, duration_ms: ms } = entry.fields ?? {};
+    const inScan = entry.span?.name === "issue_monitor_scan" && roots.includes(entry.span?.project_root);
+    if (inScan && stage === "prefs-load" && state === "started") {
+      close();
+      current = { started_at: entry.timestamp, stages: {} };
+    } else if (inScan && current && state === "finished" && typeof ms === "number") {
+      if (stage === "total") current.total = ms; else current.stages[stage] = ms;
+    } else if (!inScan && state === "finished" && typeof ms === "number") {
+      // Both follow-up timers have a single stage, so its finished line is the whole timer.
+      if (stage === "durable-commit") commits.push(ms);
+      else if (stage === "launch-decision") decisions.push(ms);
+    }
+  }
+  close();
+  return { scans, commits, decisions };
 }
 
 // `gh` starts the isolated instance logged inside the sample window.
