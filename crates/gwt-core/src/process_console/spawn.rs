@@ -1749,6 +1749,7 @@ mod tests {
         let mut tree =
             ChildProcessTree::prepare(&mut command, false, false).expect("empty process tree");
         let mut child = command.spawn().expect("spawn cleanup fixture");
+        // test-hygiene: allow-wall-clock-deadline HANG_GUARD only diagnoses a wedged echo fixture before virtual time starts; it never decides the verdict.
         tokio::time::timeout(crate::deadline_budget::HANG_GUARD, child.wait())
             .await
             .expect("cleanup fixture hung")
@@ -1770,6 +1771,7 @@ mod tests {
             "actual reap differs from cleanup completion"
         );
         assert!(
+            // test-hygiene: allow-wall-clock-deadline Paused Tokio virtual clock: elapsed advances only by explicit advance/auto-advance, so host load cannot change this verdict.
             started.elapsed() < Duration::from_millis(900),
             "cleanup restarted its budget instead of using the remaining virtual time"
         );
