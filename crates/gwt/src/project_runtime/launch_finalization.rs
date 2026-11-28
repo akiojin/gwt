@@ -924,14 +924,20 @@ impl FinalizedAgentCapabilityLaunch<'_> {
                 else {
                     continue;
                 };
-                if matches!(
+                // SPEC #3590 AC-1: every holder that may still be producing
+                // (Live / Unknown) is left to the Active owner gate below.
+                // Any other runtime evidence — exited, stopped, absent,
+                // dead-Host or defunct — goes to the reaper, which is the
+                // single judge of whether it releases the generation and
+                // revalidates it under leases.
+                if !matches!(
                     crate::cli::execution_state::classify_exact_session_runtime(
                         sessions_dir,
                         &holder
                     )
                     .map_err(|error| error.to_string())?,
-                    crate::cli::execution_state::ExactSessionRuntimeDisposition::ChildExited
-                        | crate::cli::execution_state::ExactSessionRuntimeDisposition::Terminal(_)
+                    crate::cli::execution_state::ExactSessionRuntimeDisposition::Live
+                        | crate::cli::execution_state::ExactSessionRuntimeDisposition::Unknown
                 ) {
                     crate::cli::execution_state::reap_startup_defunct_active_generation(
                         &candidate,
