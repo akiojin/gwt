@@ -803,6 +803,15 @@ mod store_consolidation {
                 temp.path(),
                 &["init", "--bare", bare.to_str().expect("bare")],
             );
+            // Issue #8042: the push below makes the bare repo's receive-pack
+            // start `git maintenance run --auto --detach`. Its worktree-prune
+            // task deletes `worktrees/<id>` entries without a `gitdir` file,
+            // which is the state `git worktree add` leaves before writing
+            // `locked`, so the background prune raced the add below. The
+            // setting lives in the bare repo's config because local transport
+            // drops `-c` overrides before spawning receive-pack.
+            run_git(&bare, &["config", "maintenance.auto", "false"]);
+            run_git(&bare, &["config", "gc.auto", "0"]);
             run_git(&bare, &["remote", "add", "origin", origin]);
             run_git(
                 &layout_root,
