@@ -3498,9 +3498,7 @@ pub(crate) fn prepare_owner_agent_admission(
                     snapshot_tabs: input.snapshot_tabs,
                 };
                 if !claim.claim_or_reuse().map_err(|error| error.to_string())? {
-                    return Err(
-                        "Issues launch delivery claim changed before owner materialization".into(),
-                    );
+                    return Err(crate::issue_monitor::MONITOR_DELIVERY_CLAIM_REFUSAL.into());
                 }
             }
         }

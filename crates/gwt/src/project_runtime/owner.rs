@@ -13872,6 +13872,7 @@ mod worker_tests {
     #[test]
     fn capacity_refusal_requeues_only_the_unclaimed_delivery() {
         for message in [
+            crate::issue_monitor::MONITOR_DELIVERY_CLAIM_REFUSAL,
             "Issues max_active reached (8/8) before launching Issue #42",
             "Machine Agent capacity is occupied; wait for an exact slot to be released",
             "Machine Agent capacity observation is unavailable; wait for the next fresh measurement",
