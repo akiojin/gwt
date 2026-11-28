@@ -2257,19 +2257,30 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn spawn_logged_deadline_succeeds_before_expiry() {
+    #[test]
+    fn spawn_logged_deadline_succeeds_before_expiry() {
         let hub = ProcessConsoleHub::new();
         let (cmd, args) = echo_command();
-        let out = spawn_logged_with_deadline(
-            &hub,
-            ProcessKind::Git,
-            cmd,
-            &args,
-            SpawnOptions::new("test deadline echo"),
-            std::time::Instant::now() + QUICK_PROCESS_FIXTURE_BUDGET,
+        // A current-thread runtime polls on this thread, so the readiness hook
+        // starts the budget after the child spawns instead of at test start.
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let out = with_spawn_ready_for_tests(
+            QUICK_PROCESS_FIXTURE_BUDGET,
+            || {},
+            || {
+                runtime.block_on(spawn_logged_with_deadline(
+                    &hub,
+                    ProcessKind::Git,
+                    cmd,
+                    &args,
+                    SpawnOptions::new("test deadline echo"),
+                    Instant::now(),
+                ))
+            },
         )
-        .await
         .expect("command before deadline");
         assert!(out.success());
         assert!(out.stdout.contains("hello world"));
