@@ -267,6 +267,8 @@ test.describe('T-036 v3 regression (isolated checkout)', () => {
         if (mockScreen === 'g-settings') {
           await project.getByRole('tab', { name: 'Issues execution settings' }).click();
           await expect(project.locator('.settings-heading')).toHaveCSS('font-size', '20px');
+          await expect(project.locator('[data-settings-issues-controls] .settings-section').first())
+            .toHaveCSS('background-color', surface);
         }
         await compare(project, mockScreen, mockScreen === 'profile-main' ? 'profile' : 'gwt', mockScreen);
       }

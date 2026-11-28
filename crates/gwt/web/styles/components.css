@@ -4594,7 +4594,7 @@ button.workspace-board-ref:focus-visible {
   padding: var(--space-3) var(--space-4);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
-  background: var(--color-surface-elevated);
+  background: var(--color-surface);
   max-width: 520px;
 }
 
@@ -5903,7 +5903,7 @@ button.workspace-board-ref:focus-visible {
 .exec-env__empty h2 { margin: 0; font-size: var(--type-lg); }
 .exec-env__empty p { margin: var(--space-1) 0 0; color: var(--color-text-muted); }
 .exec-env__list { display: flex; flex-direction: column; gap: var(--space-2); margin: 0; padding: 0; list-style: none; }
-.exec-env__card { padding: var(--space-3); border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-surface-elevated); }
+.exec-env__card { padding: var(--space-3); border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-surface); }
 .exec-env__card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-2); }
 .exec-env__card-head h2 { margin: 0; font-size: var(--type-md); }
 .exec-env__card-head h3 { margin: 0; font-size: var(--type-md); }
