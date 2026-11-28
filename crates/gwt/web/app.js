@@ -2990,12 +2990,9 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
       agentActivityModel.subscribe(state => state, reconcileAttachmentProgress);
       windowCatalogModel.subscribe(state => state.catalog, reconcileAttachmentProgress);
 
-      // SPEC-2356 — xterm content stays on the Dark Operator palette even when
-      // surrounding window chrome follows the app's light theme. High-contrast
-      // forced-colors mode is still delegated to system colors by CSS.
-      const XTERM_THEME_DARK = {
-        background: "#0a0d12",
-        foreground: "#e8eaed",
+      // ANSI colors represent terminal output. Use the shared terminal surface
+      // tokens for the surrounding chrome and xterm's default colors.
+      const XTERM_ANSI_PALETTE = {
         cursor: "#f8fafc",
         selectionBackground: "#1e293b",
         black: "#0f172a",
@@ -3015,6 +3012,15 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         brightCyan: "#22d3ee",
         brightWhite: "#f8fafc",
       };
+
+      function resolveTerminalTheme() {
+        const tokens = getComputedStyle(document.documentElement);
+        return {
+          ...XTERM_ANSI_PALETTE,
+          background: tokens.getPropertyValue("--color-canvas-dark").trim(),
+          foreground: tokens.getPropertyValue("--color-terminal-text").trim(),
+        };
+      }
 
       // xterm 6.0.0 measures the character cell via an OffscreenCanvas strategy
       // (`ctx.font = `${fontSize}px ${fontFamily}``). Canvas 2D `ctx.font` does
@@ -3277,7 +3283,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         const terminal = new Terminal({
           cursorBlink: true,
           convertEol: true,
-          theme: XTERM_THEME_DARK,
+          theme: resolveTerminalTheme(),
           fontFamily: resolveTerminalFontFamily(),
           fontSize: 14,
           lineHeight: isBlinkBrowser() ? 1.35 : 1.3,
@@ -5988,7 +5994,7 @@ import { createAgentActivityModel, createAgentRosterModel, createMemberTuningMod
         loginEventModel: poolLoginEventModel,
         openLoginTerminal: (element, onData) => {
           const terminal = new Terminal({
-            cols: 80, rows: 24, theme: XTERM_THEME_DARK,
+            cols: 80, rows: 24, theme: resolveTerminalTheme(),
             fontFamily: resolveTerminalFontFamily(), fontSize: 13, scrollback: 0,
           });
           terminal.open(element);

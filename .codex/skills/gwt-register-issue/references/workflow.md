@@ -91,7 +91,10 @@ plus the `auto-merge` label):
     sub-tasks outside the acceptance block.
   - Design-required (`gwt-spec`) Issues keep the block in the `spec`
     section; the classifier reads it wherever the storage layer placed that
-    section (body or comment), so no body rewrite is needed.
+    section (body or comment), so no body rewrite is needed. Never put the
+    block in the `tasks` section: it is not read as criteria, and readiness
+    rejects `AC-N:` items found only there with a reason naming the
+    misplacement.
   - When readiness fails, the `needs_human` reason names the missing
     element (no recognized heading, or a heading with no checklist items).
     Fix it with `issue.edit` / `issue.spec.edit`, then run

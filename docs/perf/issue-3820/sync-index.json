@@ -1,0 +1,66 @@
+{
+  "samples_per_path": 3,
+  "remote": "https://github.com/akiojin/gwt.git",
+  "checkout": "<checkout>",
+  "recorded_at": "2026-11-28T03:53:55.058Z",
+  "P12": {
+    "n": 3,
+    "p50_ms": 5515.70000000298,
+    "p95_ms": 59827.09999999404,
+    "max_ms": 59827.09999999404,
+    "samples_ms": [
+      59827.09999999404,
+      2881.300000011921,
+      5515.70000000298
+    ],
+    "samples": [
+      {
+        "ms": 59827.09999999404,
+        "outcome": "error",
+        "error": "cached Issue #4072 changed during refresh",
+        "entries": null,
+        "gh_starts": 0
+      },
+      {
+        "ms": 2881.300000011921,
+        "outcome": "error",
+        "error": "cached Issue #4249 changed during refresh",
+        "entries": null,
+        "gh_starts": 0
+      },
+      {
+        "ms": 5515.70000000298,
+        "outcome": "error",
+        "error": "cached Issue #4735 changed during refresh",
+        "entries": null,
+        "gh_starts": 0
+      }
+    ]
+  },
+  "P11": {
+    "n": 3,
+    "p50_ms": 1640.9000000059605,
+    "p95_ms": 1071055.900000006,
+    "max_ms": 1071055.900000006,
+    "samples_ms": [
+      1071055.900000006,
+      1640.9000000059605,
+      1494.0999999940395
+    ],
+    "samples": [
+      {
+        "ms": 1071055.900000006,
+        "accepted_ms": 1.5999999940395355
+      },
+      {
+        "ms": 1640.9000000059605,
+        "accepted_ms": 1.800000011920929
+      },
+      {
+        "ms": 1494.0999999940395,
+        "accepted_ms": 1.399999976158142
+      }
+    ]
+  },
+  "console_errors": []
+}

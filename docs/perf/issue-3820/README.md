@@ -170,6 +170,148 @@ p50 9.013 / p95 14.798 ms。
 - `p20-idle-samples.jsonl`: 6 分間の待機観測の生サンプル。
 - `p20-environment.txt`: checkout SHA、version、OS、CPU、採取時刻。
 
+## P11 index 構築 / P12 GitHub 同期
+
+### 結論
+
+PM の指示（2026-11-28）で、inventory の定義どおりの起点・終点で再計測した。P11 は暫定値が得られた。
+P12 は強制 refresh が 3 回とも失敗で返り、成功した同期の所要時間は得られなかった。
+
+| 行 | 経路 | n | p50 ms | p95 ms | 最悪 ms | 判定（暫定） |
+|---|---|---:|---:|---:|---:|---|
+| P11 | index 構築（Issues cell） | 3 | 1640.9 | 1071055.9 | 1071055.9 | 判定不能（バジェット未定義） |
+| P12 | GitHub 同期（強制 refresh） | 3 | — | — | — | 未測定（成功 0 / 失敗 3） |
+
+p50 / p95 は nearest-rank。n=3 のため p95 は最悪値と同じ。
+
+- P11 の 1 回目（1071 秒）は、fresh HOME の初回 Issue 同期と index coordinator の待ちを含む。
+  2・3 回目は 1494〜1641 ms。要求の受付（楽観的な `repair_started_at` の到着）は 3 回とも 2 ms 未満。
+- P12 の 3 回はすべて `knowledge_error` で返った。内容は `cached Issue #<n> changed during refresh` で、
+  所要時間は 59827 / 2881 / 5516 ms。初回同期（約 15 分、Issue 約 8000 件）と並行して index 側の Issue cache refresh も
+  走っており、`crates/gwt/src/issue_cache.rs` は entry を楽観的に書き込み、競合した 1 件で同期全体を失敗にする。
+  ユーザーの Refresh が初回同期の間に失敗し続けうる不具合の候補として PM に報告した。
+
+### 計測の起点と終点
+
+- P12 起点: Issue window の `load_knowledge_bridge`（`refresh:true`）が socket に出た時点。app が request id を振り直すため、
+  送信側で実際の id を読む。終点: 同じ id への `knowledge_entries`（成功）または `knowledge_error`（失敗）の到着。
+- P11 起点: `rebuild_index_cell`（scope `issues`）の送信。終点: その後の `project_index_status` のうち、
+  `repair_started_at` が無く `scopes.issues.healthy` が true になった最初のもの。
+- どちらも browser の受信時刻であり、画面の描画は含まない。
+
+### 条件
+
+- 対象: checkout `019f8d4594`（P20 計装を含む）の `target/debug/gwt`（debug build、gwtd 9.179.0）。
+- host: macOS 27.2.1、Apple M5 Max。2026-11-28T03:34Z〜03:54Z（`sync-index-environment.txt`）。
+- 起動: `--no-tray --no-open`、fresh HOME。`~/.gwt/runtime`、`.gitconfig`、`.config`、`.cache`（embedding model）を symlink した。
+  GitHub token は環境変数で渡した。PM auto start と Issues の自動実行は無効にした。
+- fixture: 空 commit の repo に `origin` として `https://github.com/akiojin/gwt.git` を設定し（fetch / push はしない）、
+  その linked worktree を project として開いた。Issue は実 repo の約 8000 件。
+- driver: `crates/gwt/playwright/tests/sync-index-inventory-live.spec.ts`（headed Chromium、dark の 1 project）。
+  P12 → P11 の順に各 3 回。console / page error は 0 件。
+
+### 限界
+
+- `~/.gwt/runtime` は実ホストと共有しており、index coordinator の待ちは稼働中の fleet と競合する。P11 の値はその条件を含む。
+- P12 の外部 API 消費量は未測定。同期は `gh` を起動しないため、`gh` 起動数（各 sample 0）は消費量の代わりにならない。
+- 1 project・dark テーマだけで測った。経路は画面描画を含まないため、テーマの差は扱わない。
+
+### P10 Issues scan を測らなかった理由
+
+- 外から scan を要求する経路は `issue.monitor.reconcile` と agent listener の `agent_issue_monitor_scan_now` だけで、
+  どちらも agent Session の資格（`GWT_PANE_WS_URL`）を必要とする。
+- 実 repo に対する scan は Monitor が無効でも `issue-settlement` 段で merge 済み Issue の close などを提案し、
+  executor が GitHub を変更しうる。隔離 HOME からでもリポジトリ外への副作用になるため実行しなかった。
+- inventory の暫定値（`docs/perf/issue-6979/`、終点が durable state commit）は境界差ありのまま残す。
+
+### ファイル
+
+- `sync-index.json`: P12 / P11 の生サンプル（outcome、error、受付時間を含む）。
+- `sync-index-environment.txt`: checkout SHA、version、OS、CPU、採取時刻。
+
+### P12 強制 refresh の成功経路（ローカル再生）
+
+| テーマ | 成功 / 要求 | p50 ms | p95 ms | 最悪 ms |
+|---|---:|---:|---:|---:|
+| Dark | 10 / 10 | 371.1 | 417.9 | 417.9 |
+| Light | 10 / 10 | 348.7 | 417.4 | 417.4 |
+| 合算 | 20 / 20 | 368.0 | 417.4 | 417.9 |
+
+各テーマで fresh HOME を用意し、初回の強制 refresh をウォームアップとして除外した。
+起点は `load_knowledge_bridge`（`refresh:true`）の WebSocket 送信時刻、終点は同一 request ID の
+`knowledge_entries` の受信時刻。20 回すべてがキャッシュから組み立てた Issue 3 件を返した。
+集計は nearest-rank。実 Chromium の両テーマで console/page error は 0 件、隔離プロセスは終了済み。
+
+対象は `303b1398f238cea58354ad773a6dc76f66fb5e54` の debug build。2026-11-28 06:26–06:28 UTC、
+macOS 27.2.1、Apple M5 Max。GitHub は読み取り専用の loopback-v1 と `gh` shim で再生した。
+fixture は open Issue 3 件（うち queue 対象 1 件）、PM・Issues 自動実行・バックグラウンド index は無効。
+shim はテーマごとにウォームアップ込みで全体一覧 11 回、queue 一覧 11 回を記録した。
+生サンプルの `gh_starts` は gwt ログからの集計で、この shim の呼び出し数は含まない。
+
+再現には `crates/gwt/playwright/verify-issue-5321.mjs` の live fixture と隔離起動を使用する。
+計測時は一時コピーに `p12: "sync-index-inventory-live.spec.ts"` を suite として追加し、
+checkout root を作業ディレクトリに設定した。Playwright 子プロセスに
+`GWT_PERF_INVENTORY_OUT`（証跡先）、`GWT_PERF_INVENTORY_REMOTE=https://github.com/fixture/perf-3820.git`、
+`GWT_PERF_INVENTORY_P12_ONLY=1`、`GWT_PERF_INVENTORY_SAMPLES=10` を渡した。
+`--skip-build --live --suites p12 --project=chromium-dark` と `--project=chromium-light` を別々に実行した。
+生サンプルは `sync-chromium-dark.json` と `sync-chromium-light.json` に保存した。
+
+この値はウォームキャッシュ・小規模 fixture の暫定値。実 GitHub のネットワーク時間、API 消費量、
+初回同期との競合がある場合の成功時所要時間は未測定。上記の実 GitHub での失敗 3 件は維持する。
+
+## P03 / P04 / P06 production route（#8040 の計装修復後）
+
+### 結論
+
+Issue #8040（PR #8060）で production の計装が戻ったため、隔離インスタンスで操作を駆動し、
+production が perf log に書いた `route:*` のサンプルをそのまま値として採った。headed Chromium の dark / light で各 20 操作。
+
+| 行 | 経路 | 記録数 / 操作数 | p50 ms | p95 ms | 最悪 ms | バジェット ms | 判定（暫定） |
+|---|---|---:|---:|---:|---:|---:|---|
+| P03 | project switch | 40 / 40 | 95.0 | 111.2 | 121.3 | 100（ui_response） | p95 超過 |
+| P04 | pane 生成（Shell） | 38 / 40 | 38.803 | 50.971 | 56.452 | 5000（pane.create） | 予算内 |
+| P06 | prompt 送信 | 40 / 40 | 0.036 | 0.062 | 0.127 | 100（ui_response） | 予算内（handler 区間のみ） |
+
+テーマ別（p50 / p95 / 最悪 ms）:
+
+| 行 | dark | light |
+|---|---|---|
+| P03 | 95.8 / 111.2 / 121.3 | 91.8 / 110.7 / 118.9 |
+| P04 | 43.969 / 56.452 / 56.452（19 / 20） | 31.563 / 47.136 / 47.136（19 / 20） |
+| P06 | 0.035 / 0.053 / 0.062 | 0.037 / 0.062 / 0.127 |
+
+p50 / p95 は nearest-rank。
+
+- P03 は `/p/<A>` から `/p/<B>` へのページ遷移で、フロントエンドが遷移開始から最初の workspace frame までを
+  `startup_first_frame`（`project_switch:true`）として送り、backend が `route:project.switch` に記録した値。
+  #3700 の ui_response 100 ms に対し、p50 は予算内、p95 は超過。
+- P04 は Shell window の作成（定義のうち「同期 process 生成」側、`launch_configured_shell`）。agent の起動は
+  隔離 HOME に agent の資格情報が無いため測っていない。
+- P04 は各テーマの実行でちょうど 1 回分の `route:pane.create` が記録されなかった（smoke でも 3 回中 2 件）。
+  Shell の作成経路の一部に計装が無い可能性があり、#8040 の観点で PM に報告した。値は記録された 38 件から計算した。
+- P06 は Shell への Enter を含む入力の handler 区間（PTY への書き込み完了まで）。GUI の回復は P07 が扱う。
+
+### 条件
+
+- 対象: checkout `a319539f1a`（`origin/develop` の #8060 を含む）の `target/debug/gwt`（debug build、gwtd 9.179.0）。
+- host: macOS 27.2.1、Apple M5 Max。2026-11-28T04:07Z〜04:10Z（`routes-environment.txt`）。
+- 起動: `--no-tray --no-open`、fresh HOME。`~/.gwt/runtime`、`.gitconfig`、`.config`、`.cache` を symlink した。
+  PM auto start と Issues の自動実行は無効にした。
+- fixture: 空 commit の repo の linked worktree を 2 つ開いた。GitHub remote は無い。
+- driver: `crates/gwt/playwright/tests/route-inventory-live.spec.ts`。P04 → P06 → P03 の順に各 20 操作。
+  P06 は Shell 作成後に owner の attach grace（15 秒）を待ってから送った。console / page error は 0 件。
+
+### 限界
+
+- fixture は最小の repo であり、下限側に偏る。
+- P03 の起点はブラウザの遷移開始であり、ユーザーのクリックから遷移開始までは含まない。
+- browser-check の hook repair / audit は P02 と同じ理由で実行していない。計測は agent を起動しない。
+
+### ファイル
+
+- `routes-dark.json` / `routes-light.json`: テーマごとの生サンプル、操作数、記録数。
+- `routes-environment.txt`: checkout SHA、version、OS、CPU、採取時刻。
+
 ## 計測できなかった行
 
 ### P19（worktree picker 列挙）

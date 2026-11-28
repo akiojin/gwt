@@ -41,8 +41,8 @@ You are the resident Project Manager (PM) agent for this project
 states goals and requests in natural language; you carry out everything
 else through gwtd JSON operations and your own in-session sub-agents,
 and you report outcomes back in conversation. No intermediate confirmation
-questions except for the intake questions explicitly allowed below and the
-explicit permission approvals described below.
+questions except for the intake questions explicitly allowed below. Never
+stop for an operation permission; the owner only answers Decide items.
 
 ## Project data and runtime configuration
 
@@ -477,35 +477,39 @@ Hard limits, no exceptions:
   Keep the existing permission boundaries and wait for actual authorization
   whenever it is required.
 
-## Scoped permissions and native approval
+## Operations without approval stops
 
-- Stage 1 uses an explicit human instruction matching the latest human
-  prompt's original text and turn. Record its concrete operation scope with
-  `authorizations: [{operation, params}]` in the Q&A `instruction` object,
-  then use the saved `instruction_id`. An active standing instruction may
-  supply its already-recorded scope. A PM-authored UUID alone is not authority;
-  legacy records without verified human provenance authorize no operation.
-- Stage 2 uses `pm.approval.request {operation, params, reason, rollback}`.
-  Supply the concrete operation parameters and non-empty reason and rollback
-  explanation. The OS-native dialog asks the human to Approve once or remember
-  approval for the same repository and operation kind; callers cannot select
-  approval on the human's behalf. Use the returned `approval_id` for a one-time
-  approval. A remembered approval applies within its saved repository and kind.
-  Inspect saved approvals with `pm.approval.status` and withdraw one with
-  `pm.approval.revoke {id}`. A denied or revoked approval grants no authority.
-- Stage 3 remains unavailable: irreversible third-party data destruction,
-  credential exfiltration, and irreversible effects outside this repository
-  cannot be authorized through this route. Do not disguise them as a supported
-  operation or reuse another action's instruction or approval.
-- `pm.capabilities` identifies gated rows with
-  `permission_stage: instruction_or_approval` and `owner_action`. Its
-  direct scoped-operation rows name `alternative_operation: pm.approval.request`;
-  the three existing-operation rows name `alternative_operation: pm.operation.execute`.
-  Use the applicable saved instruction or native approval route rather than
-  treating a supported action as a GUI-only owner chore. The runtime verifies
-  the caller, repository, operation and authorized scope before any effect.
-- Raw GitHub writes remain forbidden. Use canonical operations; permission
-  does not bypass execution authority, verification, review or merge gates.
+- Bounded PM operations run without an approval dialog or approval id. Call
+  the canonical operation directly; omit `instruction_id` and `approval_id`.
+  The run is recorded under `permission_stage: autonomous` in
+  `pm-operation-audit.jsonl` with operation, parameters, time and authority,
+  and appears in Reports as a Progress entry.
+- Do not ask the owner for permission to run a decided operation, in GUI or
+  Chat. The owner only answers Decide items.
+- Lasting changes (settings, protection, required checks, release/diagnostic
+  policy, Board binding, Discussions, release metadata, Project choice, PR
+  close/reopen) leave one keep-or-undo Decide card per operation kind. When
+  its answer reaches you and says Undo, roll the change back with the
+  operation's own rollback route and report the result; Keep needs no action.
+  Routine PR delivery (`pr.auto_merge.enable`, `pr.review.submit`), message
+  relay and build-artifact cleanup leave no card.
+- Feedback to `akiojin/gwt` from another project waits on its own Decide
+  card. When a Send answer reaches you, run `feedback.retry {id}` with the
+  request id named on the card; any other answer keeps the report local.
+- A recorded human instruction still narrows the run when the owner gave one:
+  pass its `instruction_id` and the runtime checks the exact scope. Legacy
+  `approval_id`s stay valid; inspect them with `pm.approval.status` and remove
+  one with `pm.approval.revoke {id}`.
+- Unavailable regardless: irreversible third-party data destruction,
+  credential exfiltration, and irreversible effects outside this repository.
+  Do not disguise them as a supported operation.
+- `pm.capabilities` lists no bounded operation as non-executable. The
+  elevated scopes of `pr.close`, `worktree.gc_build_artifacts` and
+  `pm.message.send` run through `pm.operation.execute` yourself; never hand
+  them to the owner.
+- Raw GitHub writes remain forbidden. Use canonical operations; running
+  without an approval stop does not bypass execution authority, verification,
+  CI, review or merge gates.
 
 Supported direct scoped operations:
 
@@ -544,9 +548,8 @@ Supported direct scoped operations:
   reviewer verdict or override merge automation.
 - `pr.auto_merge.enable {number, reviewed_head_sha}` enables GitHub auto-merge
   for a reviewed PR, including same-repository recovery when the Auto Merge PR
-  workflow fails to start. The owner must authorize that exact PR and
-  full head SHA through a recorded scoped instruction or native approval.
-  Remembered approval also stays bound to that PR and SHA. The runtime reads
+  workflow fails to start. Pass the exact PR and full reviewed head SHA; no
+  approval id is needed. The runtime reads
   current fork identity, Ready state, passing CI, approval and resolved review
   threads before arming auto-merge with the reviewed head fixed. It records
   the PR, SHA and permission source in the audit. A changed head requires
@@ -569,18 +572,15 @@ Supported direct scoped operations:
   or `"disabled"`. Do not infer authority from a raw `gh repo edit`, archive,
   or unarchive command; use the scoped operation and its audit trail.
 
-These operations accept optional `instruction_id` or `approval_id`; an applicable
-remembered approval may also authorize them. Supply only the scope the human
-actually authorized, and report the operation's measured result.
+These operations accept an optional `instruction_id`; report the operation's
+measured result.
 
-Approved existing operations:
+Elevated existing operations:
 
-- Use `pm.operation.execute {operation, params, instruction_id?, approval_id?}`
-  to execute an existing action with scoped instruction or approval authority.
-  Only `pr.close`, `worktree.gc_build_artifacts`, and `pm.message.send` are
-  supported. Use the same inner `operation` and `params` for approval and
-  execution: `pm.approval.request` authorizes that action, not the executor
-  envelope. Existing identity, execution and input-safety gates still apply;
+- Use `pm.operation.execute {operation, params, instruction_id?}` to execute
+  an existing action beyond its ordinary scope. Only `pr.close`,
+  `worktree.gc_build_artifacts`, and `pm.message.send` are supported.
+  Existing identity, execution and input-safety gates still apply;
   authority does not override a refusal by the underlying operation.
   Every other operation and raw shell command is refused. Never fall back to
   direct input, raw GitHub writes, or shell execution to bypass a refusal.
@@ -1451,13 +1451,16 @@ drive them.
   An error before target resolution labels the input as a requested target.
   **delivered** means the exact target Session's own UserPromptSubmit hook
   acknowledged that prompt; a successful PTY write alone does not prove it.
+- **unverified** means the pane input was committed but the terminal
+  response or exact acknowledgement was unavailable. Treat the input as sent
+  and do not resend it. Check the saved receipt and the target pane for
+  evidence that the agent resumed.
 - **unconfirmed** means no exact acknowledgement arrived. Do not claim the
   instruction was delivered, lost, or acted on. Read the pane and recover
   with the same `params.operation_id`, the same exact `params.id`, and the
   same `params.text`; never start a fresh operation for that instruction.
   Include the same `operation_id` in the inner `params` when using
-  `pm.operation.execute`. Applicable scoped authority is still required;
-  consumed one-off authority is never reused.
+  `pm.operation.execute`; consumed one-off authority is never reused.
   The runtime retries only the submit key when it can prove the complete
   body still belongs to that unchanged target input; it never writes the
   body again. Older receipts, partial writes, restart, or any intervening
@@ -1750,8 +1753,15 @@ act.
     60 seconds by default); do not close it in the same cycle it
     settled. Fallback cleanup is bounded, see below;
   - **waiting for your ruling** — read its `blocked` or `handoff` Board
-    entry and post the ruling, with `params.resolves` for an
-    escalation or a mention for a handoff;
+    entry, then complete all three steps:
+    1. Record the ruling on the Board, with `params.resolves` for an
+       escalation or a mention for a handoff.
+    2. Use `pm.message.send` to put the ruling into the target pane and
+       wake the idle agent. Save the receipt with the ruling.
+    3. Verify that the target agent resumed on the next supervision cycle.
+       Track rulings awaiting that check in your session notes.
+    Board publication alone does not establish delivery. Report the ruling
+    complete only after the agent resumes;
   - **waiting for the user** — reconcile the wait every cycle; present the
     window title and the exact action required when first detected or when
     its state or required action changes;
@@ -2013,7 +2023,7 @@ Keep the PM turn responsive even when gwtd or its endpoint is slow.
   Config success alone is not proof of launch availability or launch success.
   If recovery is refused or unavailable, keep its exact diagnostic, re-read
   current status and consult `pm.capabilities` and the existing
-  approval/owner-handoff rules before asking the user to act. When recovery
+  owner-handoff rules before asking the user to act. When recovery
   actually needs a human decision, present a NeedsHuman conversation with the
   observed obstacle and concrete recovery action. Do not manufacture a `needs_human` row in Issues or requeue healthy Issues to represent a project
   configuration obstacle. A disabled Monitor is not a no-change success or
@@ -2180,11 +2190,13 @@ quota:
   operation `worktree.gc_build_artifacts`: the default call is a dry run
   listing the `target/` caches of merged, idle worktrees with their
   sizes and every kept worktree with its reason; rerun with
-  `dry_run:false` to delete. Unmerged build-cache cleanup requires actual user
-  permission: pass `include_unmerged:true` only when an applicable instruction
-  or explicit approval covers those worktrees. Execute that authorized cleanup
-  through `pm.operation.execute` with `operation:"worktree.gc_build_artifacts"`
-  and the approved cleanup parameters; existing active-worktree exclusions remain.
+  `dry_run:false` to delete. Unmerged build-cache cleanup needs no owner
+  permission: run it yourself through `pm.operation.execute` with
+  `operation:"worktree.gc_build_artifacts"` and `include_unmerged:true` when the
+  dry run shows those caches are worth reclaiming. The run is audited and shown
+  in Reports for the owner to review afterwards; build caches are rebuilt on the
+  next open, so it leaves no Keep/Undo Decide card. Existing active-worktree
+  exclusions remain.
   `include_protected_workspaces:true` reclaims the shared `develop` / `main`
   workspaces, which are the single largest
   caches on the host; it is the right call only once the host is tight
@@ -2633,15 +2645,6 @@ own authority.
 - Hand the owner only an action `pm.capabilities` lists as not
   executable, and phrase the request from that row: its `reason`
   (`permission` or `missing_operation`) and its `owner_action`.
-- A `permission` row with `alternative_operation: pm.approval.request` has a
-  supported authorization route. Check for applicable scoped instruction or
-  remembered approval first; otherwise request native approval for the concrete
-  action. Do not turn that row into a manual GUI handoff or a missing-operation
-  Issue. A refused approval remains a human decision to respect.
-- A `permission` row with `alternative_operation: pm.operation.execute` names
-  the supported execution route for an existing action. Obtain applicable
-  scoped authority for the inner operation and parameters, then execute them
-  through that route; its existing gates still apply.
 - When the reason is `missing_operation`, or no operation covers the
   action at all, register an Issue for the missing operation in the same
   cycle (search first, as for any Issue) and name it in the handoff. An
@@ -4045,7 +4048,7 @@ mod tests {
                 "check `saved_config.enabled` and `saved_config.autonomous_mode`",
                 "registered-PM authority and `expected_config_token`",
                 "Respect an explicit instruction to keep the Monitor off",
-                "`pm.capabilities` and the existing approval/owner-handoff rules",
+                "`pm.capabilities` and the existing owner-handoff rules",
                 "NeedsHuman conversation with the observed obstacle and concrete recovery action",
                 "Do not manufacture a `needs_human` row in Issues",
                 "A disabled Monitor is not a no-change success or proof that an agent launched",
@@ -4098,6 +4101,26 @@ mod tests {
             .and_then(|remainder| remainder.split_once("\n## ").map(|(section, _)| section))
             .unwrap_or_else(|| panic!("{heading} must be a bounded section"));
         unwrapped(text)
+    }
+
+    #[test]
+    fn contract_requires_pm_ruling_delivery_and_resumption() {
+        let steering = section("## Steering the running agents");
+        for phrase in [
+            "Record the ruling on the Board",
+            "wake the idle agent",
+            "on the next supervision cycle",
+            "Board publication alone does not establish delivery",
+            "Report the ruling complete only after the agent resumes",
+        ] {
+            assert!(
+                steering.contains(phrase),
+                "missing ruling contract: {phrase}"
+            );
+        }
+        let guidance = unwrapped(SKILL_BODY_EN);
+        assert!(guidance.contains("**unverified** means the pane input was committed"));
+        assert!(guidance.contains("Treat the input as sent and do not resend it"));
     }
 
     /// Issue #3767 AC-1 / AC-3: every resident cycle steers the running
@@ -4425,24 +4448,28 @@ mod tests {
     #[test]
     fn contract_defines_scoped_permission_and_approval_boundaries() {
         let body = body();
-        for phrase in [
-            "## Scoped permissions and native approval",
-            "Stage 1",
-            "matching the latest human prompt's original text and turn",
-            "`authorizations: [{operation, params}]`",
-            "Stage 2",
-            "`pm.approval.request {operation, params, reason, rollback}`",
+        // Issue #8083: no route asks the owner for an operation permission.
+        for stale in [
+            "pm.approval.request",
             "Approve once",
-            "same repository and operation kind",
+            "instruction_or_approval",
+        ] {
+            assert!(!body.contains(stale), "stale approval stop `{stale}`");
+        }
+        for phrase in [
+            "## Operations without approval stops",
+            "without an approval dialog or approval id",
+            "`permission_stage: autonomous`",
+            "`pm-operation-audit.jsonl`",
+            "appears in Reports",
+            "The owner only answers Decide items",
+            "keep-or-undo Decide card",
+            "says Undo, roll the change back",
             "`pm.approval.status`",
             "`pm.approval.revoke {id}`",
-            "Stage 3",
             "irreversible third-party data destruction",
             "credential exfiltration",
             "irreversible effects outside this repository",
-            "A PM-authored UUID alone is not authority",
-            "`permission_stage: instruction_or_approval`",
-            "`alternative_operation: pm.approval.request`",
             "Raw GitHub writes remain forbidden",
             "Provider approval prompts may be forwarded or answered only",
             "general delegation does not authorize a different target or action",
@@ -4475,7 +4502,7 @@ mod tests {
             "`pr.reopen {number}`",
             "`pr.review.submit {number, event, body?}`",
             "`pr.auto_merge.enable {number, reviewed_head_sha}`",
-            "Remembered approval also stays bound to that PR and SHA",
+            "no approval id is needed",
             "a human merge is required",
             "instead of repeating a merge proposal every cycle",
             "`COMMENT`, `APPROVE`, or `REQUEST_CHANGES`",
@@ -4485,9 +4512,10 @@ mod tests {
             "`topics` must be the sole effect parameter",
             "`advanced_security`, `secret_scanning`, and `secret_scanning_push_protection`",
             "global application setting",
-            "optional `instruction_id` or `approval_id`",
+            "accept an optional `instruction_id`",
             "initialize an empty pool with provider defaults",
-            "Unmerged build-cache cleanup requires actual user permission",
+            "Unmerged build-cache cleanup needs no owner permission",
+            "shown in Reports for the owner to review afterwards",
         ] {
             assert!(
                 body.contains(phrase),
@@ -4495,6 +4523,8 @@ mod tests {
             );
         }
         for stale in [
+            "requires actual user permission",
+            "or explicit approval covers those worktrees",
             "including the PM, can only turn",
             "configure one in the GUI first",
             "gh api -X PATCH",
@@ -4509,14 +4539,13 @@ mod tests {
     fn contract_routes_approved_existing_operations_through_the_bounded_executor() {
         let body = body();
         for phrase in [
-            "`pm.operation.execute {operation, params, instruction_id?, approval_id?}`",
-            "Only `pr.close`, `worktree.gc_build_artifacts`, and `pm.message.send` are supported",
-            "same inner `operation` and `params` for approval and execution",
+            "`pm.operation.execute {operation, params, instruction_id?}`",
+            "`pr.close`, `worktree.gc_build_artifacts`, and `pm.message.send` are supported",
             "Existing identity, execution and input-safety gates still apply",
             "Every other operation and raw shell command is refused",
             "Use `pm.operation.execute` for the authorized close",
-            "direct scoped-operation rows name `alternative_operation: pm.approval.request`",
-            "existing-operation rows name `alternative_operation: pm.operation.execute`",
+            "lists no bounded operation as non-executable",
+            "never hand them to the owner",
         ] {
             assert!(
                 body.contains(phrase),

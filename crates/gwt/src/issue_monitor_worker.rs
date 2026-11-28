@@ -1731,24 +1731,30 @@ fn issue_monitor_candidate(
     }
 }
 
-/// Issue #3930 AC-4: the text the acceptance-criteria classifier reads for a
-/// gwt-spec Issue. The storage layer may route the `spec` section to a
-/// comment (#3864's shape), in which case the Issue body no longer carries the
-/// `## 受け入れ基準` block; the assembled section is appended so the Monitor
-/// sees the same block regardless of where it is stored. A body-resident
-/// section is already inside `body`, so nothing is duplicated.
+/// The acceptance classifier reads comment-resident artifacts in addition
+/// to the Issue body. Preserve the tasks boundary so misplaced criteria
+/// can be diagnosed without counting them as acceptance criteria.
 pub(crate) fn acceptance_source_text(body: &str, spec_body: &gwt_github::SpecBody) -> String {
-    let spec = SectionName("spec".to_string());
-    let comment_resident = matches!(
-        spec_body.sections_index.0.get(&spec),
-        Some(gwt_github::SectionLocation::Comments(_))
-    );
-    match spec_body.sections.get(&spec) {
-        Some(content) if comment_resident && !content.trim().is_empty() => {
-            format!("{body}\n\n{content}")
+    let comment_section = |name: &str| {
+        let section = SectionName(name.to_string());
+        match spec_body.sections_index.0.get(&section) {
+            Some(gwt_github::SectionLocation::Comments(_)) => spec_body
+                .sections
+                .get(&section)
+                .filter(|content| !content.trim().is_empty()),
+            _ => None,
         }
-        _ => body.to_string(),
+    };
+    let mut source = body.to_string();
+    if let Some(spec) = comment_section("spec") {
+        source.push_str(&format!("\n\n{spec}"));
     }
+    if let Some(tasks) = comment_section("tasks") {
+        source.push_str(&format!(
+            "\n\n<!-- artifact:tasks BEGIN -->\n{tasks}\n<!-- artifact:tasks END -->"
+        ));
+    }
+    source
 }
 
 fn spec_cache_entry_readiness(entry: &CacheEntry) -> IssueMonitorReadiness {
@@ -8929,6 +8935,28 @@ pub(crate) mod tests {
                 issue.body
             );
             assert_eq!(criteria.ids, *want, "live #{number}");
+        }
+    }
+
+    #[test]
+    fn issue_3836_tasks_cannot_supply_acceptance_criteria() {
+        use crate::issue_monitor_gate::{classify_acceptance_criteria, AcceptanceDefect};
+
+        let tasks = "## Acceptance Criteria\n- [ ] AC-1: misplaced";
+        let comment = gwt_github::body::Comment {
+            id: 1,
+            body: format!("<!-- artifact:tasks BEGIN -->\n{tasks}\n<!-- artifact:tasks END -->"),
+        };
+        let comment_body =
+            "<!-- gwt-spec id=3836 version=1 -->\n<!-- sections:\ntasks=comment:1\n-->";
+        let inline_body = format!(
+            "<!-- gwt-spec id=3836 version=1 -->\n<!-- sections:\ntasks=body\n-->\n{}",
+            comment.body,
+        );
+        for (body, comments) in [(comment_body, &[comment][..]), (&inline_body, &[][..])] {
+            let artifacts = gwt_github::SpecBody::parse(body, comments).expect("parse artifacts");
+            let criteria = classify_acceptance_criteria(&acceptance_source_text(body, &artifacts));
+            assert_eq!(criteria.defect, Some(AcceptanceDefect::MisplacedInTasks));
         }
     }
 

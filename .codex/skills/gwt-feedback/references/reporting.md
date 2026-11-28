@@ -49,11 +49,11 @@ Assignment values are conservatively masked through the physical line end;
 quoted values and escaped line continuations can span multiple lines.
 Unmasked refusal bytes and original line endings are retained without truncation.
 
-The native dialog shows the masked public snapshot; that same snapshot becomes
+The Decide card shows the masked public snapshot; that same snapshot becomes
 the GitHub Issue or comment. Only the original stays in the local receipt.
 Automatic masks cannot identify every arbitrary secret or unmarked code fragment;
 never promise complete detection or approve the preview for the user. The
-reporter's only required interaction is the existing native consent action.
+reporter's only required interaction is answering that Decide card.
 The actual gwt repository uses the same masks with its existing consent exemption.
 
 ## Submit and continue working
@@ -88,12 +88,15 @@ In the actual gwt repository, it sends synchronously and returns the Issue
 number and URL.
 
 In the Manual path, only the actual gwt repository is exempt from consent. Other and unknown
-repositories require the user's explicit **Send feedback** action in an OS
-native dialog before any Issue or comment is sent. Cancellation or an
-unavailable desktop preserves the local report. JSON approval flags, saved
+repositories wait as `pending_approval` on a Decide card until the user answers
+**Send**; nothing is sent before that. Any other answer preserves the local
+report as `declined`. Only the user's answer in gwt counts: a PM answer or a
+`decision.answer` CLI call without a session never sends. A card too long to
+show in full names the local file holding the complete masked preview. The
+answer reaches the PM, which runs `feedback.retry` with the request id to send it. JSON approval flags, saved
 approvals and repo/environment overrides cannot grant consent or Auto authority.
 Only the existing canonical Autonomous preference selects the safe Auto path;
-do not approve a Manual dialog on the user's behalf.
+do not answer a feedback Decide card on the user's behalf.
 
 ## Check the receipt
 
@@ -109,8 +112,8 @@ matching existing Issue may receive a comment instead of a new Issue.
 Check status when the result is needed, without repeatedly polling or waiting
 instead of doing project work. A sent receipt supplies the Issue number and
 URL. Auto status changes orphaned `sending` to `uncertain` under the sender lock;
-a live sender keeps `sending`. Status never resends a report. For Manual, retry only a `declined` or `failed` receipt when another attempt is wanted;
-a Manual external-project retry still obtains fresh native consent. Auto retry
+a live sender keeps `sending`. Status never resends a report. For Manual, retry a `pending_approval`, `declined` or `failed` receipt; a declined
+external-project retry asks again with a fresh Decide card. Auto retry
 accepts failed/withheld safe snapshots, rechecks policy and never opens consent.
 `withheld` means safe information or authority is unavailable: restore canonical
 policy or report a recognized operation instead of adding raw details.

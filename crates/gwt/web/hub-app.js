@@ -4,16 +4,15 @@ import { createProjectAutonomyControl } from "./project-autonomy.js";
 // and is never a workspace, dashboard, or tab strip:
 // - Home: the conversation with the Project Manager. It shows no project
 //   contents (design items 5 and 46).
-// - Projects: the picker — Open Folder, Clone, Recent, and the open Projects —
-//   opened from the header. Every Project entry is a real, path-free link that
-//   opens the Project in its own browser tab.
+// - Projects: the list of Projects — each one a name that opens it in its own
+//   browser tab — with adding a Project (Open Folder, Clone) as one group
+//   below it (Issue #8079). Every Project entry is a real, path-free link.
 // - Setup: the first-run setup (Issue #7731). It opens by itself while this
 //   machine still needs it, and from Settings at any time.
 // - Environments: the execution environments and accounts of this machine
 //   (Issue #7648 AC-7), the same screen a project page opens from its header.
 import { renderProjectCloneModal, createFolderPickerController, createOpenProjectPathForm } from "./project-clone-modal.js";
 import { HUB_URL_PATH, projectUrlPath, routeWebSocketUrl } from "./frontend-route.js";
-import { createProjectExecutionPolicyModel, mountProjectExecutionStatus } from "./project-execution-policy-model.js";
 import { createUiStateStore } from "./ui-state-store.js";
 import { createAppChrome } from "./app-chrome.js";
 import { createHomeConversation } from "./home-conversation.js";
@@ -23,6 +22,8 @@ import { createProviderUsageSurface } from "./provider-usage-surface.js";
 
 // The view a `/?view=…` link opens; anything else is Home.
 const HUB_VIEWS = Object.freeze(["home", "projects", "setup", "environments"]);
+// Issue #8079: the Projects search appears once the list is this long.
+const SEARCH_MIN_PROJECTS = 8;
 
 // The account sign-in terminal. xterm loads on first use: the Hub does not
 // draw terminals otherwise.
@@ -92,18 +93,7 @@ function createHubApp({ document: doc, window: win, setVersion, setPm = () => {}
     return element;
   };
 
-  const executionPolicies = new Map();
-  let releaseExecutionViews = [];
-  let catalogConnectionFresh = true;
-  function executionPolicy(key) {
-    if (!executionPolicies.has(key)) executionPolicies.set(key, createProjectExecutionPolicyModel(key));
-    return executionPolicies.get(key);
-  }
-  function executionView(project) {
-    const view = node("div", "gwt-hub__orphan-detail"); view.dataset.projectExecution = project.project_key;
-    releaseExecutionViews.push(mountProjectExecutionStatus(view, executionPolicy(project.project_key).model, { projectTitle: project.title }));
-    return view;
-  }
+  let releaseRowControls = [];
   let catalog = { app_version: "", projects: [], recent_projects: [] };
   let cloneState = initialCloneState();
   let socket = null;
@@ -112,10 +102,6 @@ function createHubApp({ document: doc, window: win, setVersion, setPm = () => {}
   let cloneTab = null;
   const cloneResults = createUiStateStore(null);
   const catalogResults = createUiStateStore(null);
-  const executionResults = createUiStateStore(null);
-  executionResults.subscribe(status => status, status => {
-    if (status && executionPolicies.has(status.project_key)) executionPolicies.get(status.project_key).applyStatus(status);
-  });
   const openResults = createUiStateStore(null);
 
   // `data-hub` marks the page; the picker is the Projects view inside it.
@@ -127,15 +113,22 @@ function createHubApp({ document: doc, window: win, setVersion, setPm = () => {}
   const header = node("header", "gwt-hub__header");
   const title = node("h1", "gwt-hub__title", "Projects");
   title.id = "gwt-hub-title";
-  header.append(title);
+  header.append(title, node("p", "gwt-hub__lead", "Projects open in a new browser tab."));
   // Projects are found by name; a path never reaches this page's markup.
   const search = node("input", "gwt-hub__search");
+  search.hidden = true;
   search.type = "search";
   search.placeholder = "Search projects…";
   search.setAttribute("aria-label", "Search projects");
   search.dataset.hubSearch = "";
   search.addEventListener("input", () => render());
 
+  // Issue #8079 AC-1: adding a Project is one group, below the lists.
+  const addSection = node("section", "gwt-hub__section gwt-hub__add");
+  addSection.dataset.hubAdd = "";
+  addSection.setAttribute("aria-labelledby", "gwt-hub-add-title");
+  const addTitle = node("h2", "gwt-hub__section-title", "Add a project");
+  addTitle.id = "gwt-hub-add-title";
   const actions = node("div", "gwt-hub__actions");
   const openFolder = node("button", "wizard-button primary", "Open Folder…");
   openFolder.type = "button";
@@ -144,7 +137,7 @@ function createHubApp({ document: doc, window: win, setVersion, setPm = () => {}
   cloneButton.type = "button";
   cloneButton.dataset.hubAction = "clone";
   actions.append(openFolder, cloneButton);
-  actions.append(createOpenProjectPathForm(doc, (path) => {
+  addSection.append(addTitle, actions, createOpenProjectPathForm(doc, (path) => {
     beginOpenRequest();
     send({ kind: "reopen_recent_project", path });
   }));
@@ -167,14 +160,19 @@ function createHubApp({ document: doc, window: win, setVersion, setPm = () => {}
   };
   const openSection = section("gwt-hub-open-title", "Open");
   openSection.list.dataset.hubList = "open";
-  const orphanSection = section("gwt-hub-orphans-title", "Projects awaiting shutdown");
+  // Issue #8079 AC-2: a closed Project whose shutdown did not finish. The
+  // section exists only while there is one; the page checks again on load.
+  const orphanSection = section("gwt-hub-orphans-title", "Still shutting down");
   orphanSection.list.dataset.hubList = "orphans";
-  const refreshOrphans = node("button", "text-button", "Refresh");
+  orphanSection.element.hidden = true;
+  orphanSection.list.before(node("p", "gwt-hub__section-copy", "These projects were closed but did not finish shutting down. Retry to finish it."));
+  const refreshOrphans = node("button", "text-button", "Check again");
   refreshOrphans.type = "button";
   refreshOrphans.dataset.hubAction = "refresh-orphans";
   refreshOrphans.addEventListener("click", () => send({ kind: "refresh_orphan_daemons" }));
   orphanSection.element.append(refreshOrphans);
-  const recentSection = section("gwt-hub-recent-title", "Recent");
+  // Projects known to this machine that are not open now.
+  const recentSection = section("gwt-hub-recent-title", "Closed projects");
   recentSection.list.dataset.hubList = "recent";
 
   const cloneModal = node("div", "modal-backdrop");
@@ -271,7 +269,7 @@ function createHubApp({ document: doc, window: win, setVersion, setPm = () => {}
         return false;
     }
   }
-  projectsView.append(header, actions, search, openSection.element, recentSection.element, orphanSection.element);
+  projectsView.append(header, search, openSection.element, recentSection.element, orphanSection.element, addSection);
   root.append(notice, error, homeView, projectsView, setupView, environmentsView);
 
   let view = "home";
@@ -308,7 +306,7 @@ function createHubApp({ document: doc, window: win, setVersion, setPm = () => {}
 
   function renderList(list, all, emptyText, renderEntry) {
     list.replaceChildren();
-    const needle = search.value.trim().toLowerCase();
+    const needle = search.hidden ? "" : search.value.trim().toLowerCase();
     const entries = needle
       ? all.filter(entry => String(entry.title || entry.project_key || "").toLowerCase().includes(needle))
       : all;
@@ -338,34 +336,52 @@ function createHubApp({ document: doc, window: win, setVersion, setPm = () => {}
     });
     control.element.dataset.projectAutonomy = project.project_key;
     control.update(project.autonomy);
-    releaseExecutionViews.push(() => control.unmount());
+    releaseRowControls.push(() => control.unmount());
     return control.element;
   }
 
+  const HEALTH_LABELS = Object.freeze({ healthy: "Ready", wedged: "Wedged", degraded: "Unavailable" });
+  // One Project row: its name opens it; its states sit apart from the name
+  // and from each other (Issue #8079 AC-3).
+  function projectRow(project, ...trailing) {
+    const row = node("div", "gwt-hub__row");
+    row.dataset.projectRow = project.project_key;
+    row.append(projectLink(project), ...trailing);
+    return row;
+  }
+
   function render() {
-    for (const release of releaseExecutionViews) release();
-    releaseExecutionViews = [];
+    for (const release of releaseRowControls) release();
+    releaseRowControls = [];
     setVersion(catalog.app_version ? `v${catalog.app_version}` : "");
+    // Issue #8079 AC-2: an open Project is listed once, under Open.
+    const openKeys = new Set(catalog.projects.map(project => project.project_key));
+    const closed = catalog.recent_projects.filter(project => !project.project_key || !openKeys.has(project.project_key));
+    const searchable = catalog.projects.length + closed.length >= SEARCH_MIN_PROJECTS;
+    search.hidden = !searchable;
+    if (!searchable) search.value = "";
     renderList(openSection.list, catalog.projects, "No open projects", (project) => {
-      const row = node("div", "gwt-hub__project-actions");
-      const close = node("button", "text-button", "Close Project");
-      close.type = "button";
-      close.dataset.closeProject = project.project_key;
-      close.addEventListener("click", () => closeController.request(project.project_key, { projectWide: true }));
-      row.append(projectLink(project));
+      const status = node("span", "gwt-hub__project-status");
+      status.dataset.projectStatus = "";
       if (project.owner_health) {
         const health = project.owner_health;
-        const badge = node("span", "project-owner-health", health.state === "healthy" ? "Ready" : health.state === "wedged" ? "Wedged" : health.state === "degraded" ? "Unavailable" : "Connecting");
+        const badge = node("span", "project-owner-health", HEALTH_LABELS[health.state] || "Connecting");
         badge.dataset.projectHealth = project.project_key;
         badge.dataset.state = health.state;
         badge.title = health.detail || "";
         badge.setAttribute("role", "status");
-        row.append(badge);
+        status.append(badge);
       }
-      row.append(autonomyControl(project), close, executionView(project));
-      return row;
+      status.append(autonomyControl(project));
+      const close = node("button", "text-button", "Close Project");
+      close.type = "button";
+      close.dataset.closeProject = project.project_key;
+      close.addEventListener("click", () => closeController.request(project.project_key, { projectWide: true }));
+      return projectRow(project, status, close);
     });
-    renderList(orphanSection.list, catalog.orphan_daemons || [], "No projects awaiting shutdown", (project) => {
+    const orphans = catalog.orphan_daemons || [];
+    orphanSection.element.hidden = orphans.length === 0;
+    renderList(orphanSection.list, orphans, "", (project) => {
       const row = node("div", "gwt-hub__orphan");
       row.append(node("span", "gwt-hub__project", project.title || project.project_key));
       row.append(node("span", "gwt-hub__orphan-detail", project.detail));
@@ -381,10 +397,8 @@ function createHubApp({ document: doc, window: win, setVersion, setPm = () => {}
       row.append(retry);
       return row;
     });
-    renderList(recentSection.list, catalog.recent_projects, "No recent projects", (project) => {
-      if (project.project_key) {
-        const row = node("div", "gwt-hub__project-actions"); row.append(projectLink(project), executionView(project)); return row;
-      }
+    renderList(recentSection.list, closed, "No closed projects", (project) => {
+      if (project.project_key) return projectRow(project);
       // The runtime resolves the key off-thread; until then the entry is
       // shown but not linkable (a link must never carry a path).
       const pending = node("span", "gwt-hub__project is-pending", project.title);
@@ -406,18 +420,6 @@ function createHubApp({ document: doc, window: win, setVersion, setPm = () => {}
   }
 
   function receiveCatalog(hub) {
-    // Recent links may duplicate an observed project without its runtime
-    // projection; the current project observation owns that shared row state.
-    const projects = new Map([...(hub?.recent_projects || []), ...(hub?.projects || [])].map(project => [project.project_key, project]));
-    for (const project of projects.values()) {
-      if (!project.project_key) continue;
-      if (project.execution) {
-        if (catalogConnectionFresh) executionPolicy(project.project_key).bindGeneration(project.execution.generation, { strict: false });
-        executionPolicy(project.project_key).applyStatus(project.execution);
-      }
-      else executionPolicy(project.project_key).connectionLost();
-    }
-    catalogConnectionFresh = false;
     catalog = {
       app_version: hub?.app_version || "",
       projects: Array.isArray(hub?.projects) ? hub.projects : [],
@@ -574,10 +576,6 @@ function createHubApp({ document: doc, window: win, setVersion, setPm = () => {}
     if (event && setup.receive(event)) return;
     if (event && closeController.receive(event)) return;
     if (receiveEnvironments(event)) return;
-    if (event?.kind === "project_execution_status") {
-      executionResults.update(() => event.status);
-      return;
-    }
     if (!event || !HUB_RESULT_KINDS.has(event.kind)) return;
     if (event.kind === "orphan_daemon_result") {
       openResults.update(() => ({ ...event }));
@@ -610,7 +608,6 @@ function createHubApp({ document: doc, window: win, setVersion, setPm = () => {}
     socket = connection;
     connection.addEventListener("open", () => {
       if (socket !== connection) return;
-      catalogConnectionFresh = true;
       connection.send(JSON.stringify({ kind: "frontend_ready" }));
       closeController.reconnect();
       home.connected();
@@ -644,7 +641,6 @@ function createHubApp({ document: doc, window: win, setVersion, setPm = () => {}
       home.connectionLost();
       setup.connectionLost();
       environments.connectionLost();
-      for (const policy of executionPolicies.values()) policy.connectionLost();
       closeCloneTab();
       if (cloneState.cloning) {
         cloneState = { ...cloneState, cloning: false, progress: "", error: "Connection lost while cloning. Check the project list before retrying." };

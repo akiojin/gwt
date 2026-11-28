@@ -1,0 +1,7 @@
+gwt_sha=019f8d4594af040fc1a53cb3e172957f560aad2f (production source; the driver spec was uncommitted)
+gwtd 9.179.0
+ProductName:		macOS
+ProductVersion:		27.2.1
+BuildVersion:		26B8132
+Apple M5 Max
+"recorded_at": "2026-11-28T03:53:55.058Z"
