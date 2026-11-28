@@ -16,6 +16,7 @@ pub mod admin;
 pub mod credential;
 pub mod registration_client;
 pub mod signal;
+pub mod transport;
 
 mod config;
 pub use config::{HostConfigError, MobileHostConfig};
