@@ -10846,7 +10846,7 @@ fn main() -> std::io::Result<()> {
     // the single cross-platform callback. The legacy macOS native
     // menubar was removed alongside the wry WebView.
     let menu_proxy = proxy.clone();
-    tray_icon::menu::MenuEvent::set_event_handler(Some(
+    tray_icon::menu::MenuEvent::set_event_handler(Some(std::sync::Arc::new(
         move |event: tray_icon::menu::MenuEvent| {
             if gwt::cli::tray::menu::MenuAction::from_id(event.id.as_ref())
                 == Some(gwt::cli::tray::menu::MenuAction::Quit)
@@ -10855,7 +10855,7 @@ fn main() -> std::io::Result<()> {
             }
             let _ = menu_proxy.send_event(UserEvent::MenuEvent(event));
         },
-    ));
+    )));
     let clients = ClientHub::default();
     let attachment_uploads = AttachmentUploadStore::in_system_temp();
     let bootstrap_proxy = proxy.clone();
