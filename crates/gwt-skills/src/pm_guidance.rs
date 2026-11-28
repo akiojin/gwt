@@ -2023,7 +2023,7 @@ Keep the PM turn responsive even when gwtd or its endpoint is slow.
   Config success alone is not proof of launch availability or launch success.
   If recovery is refused or unavailable, keep its exact diagnostic, re-read
   current status and consult `pm.capabilities` and the existing
-  approval/owner-handoff rules before asking the user to act. When recovery
+  owner-handoff rules before asking the user to act. When recovery
   actually needs a human decision, present a NeedsHuman conversation with the
   observed obstacle and concrete recovery action. Do not manufacture a `needs_human` row in Issues or requeue healthy Issues to represent a project
   configuration obstacle. A disabled Monitor is not a no-change success or
@@ -2190,11 +2190,13 @@ quota:
   operation `worktree.gc_build_artifacts`: the default call is a dry run
   listing the `target/` caches of merged, idle worktrees with their
   sizes and every kept worktree with its reason; rerun with
-  `dry_run:false` to delete. Unmerged build-cache cleanup requires actual user
-  permission: pass `include_unmerged:true` only when an applicable instruction
-  or explicit approval covers those worktrees. Execute that authorized cleanup
-  through `pm.operation.execute` with `operation:"worktree.gc_build_artifacts"`
-  and the approved cleanup parameters; existing active-worktree exclusions remain.
+  `dry_run:false` to delete. Unmerged build-cache cleanup needs no owner
+  permission: run it yourself through `pm.operation.execute` with
+  `operation:"worktree.gc_build_artifacts"` and `include_unmerged:true` when the
+  dry run shows those caches are worth reclaiming. The run is audited and shown
+  in Reports for the owner to review afterwards; build caches are rebuilt on the
+  next open, so it leaves no Keep/Undo Decide card. Existing active-worktree
+  exclusions remain.
   `include_protected_workspaces:true` reclaims the shared `develop` / `main`
   workspaces, which are the single largest
   caches on the host; it is the right call only once the host is tight
@@ -4046,7 +4048,7 @@ mod tests {
                 "check `saved_config.enabled` and `saved_config.autonomous_mode`",
                 "registered-PM authority and `expected_config_token`",
                 "Respect an explicit instruction to keep the Monitor off",
-                "`pm.capabilities` and the existing approval/owner-handoff rules",
+                "`pm.capabilities` and the existing owner-handoff rules",
                 "NeedsHuman conversation with the observed obstacle and concrete recovery action",
                 "Do not manufacture a `needs_human` row in Issues",
                 "A disabled Monitor is not a no-change success or proof that an agent launched",
@@ -4512,7 +4514,8 @@ mod tests {
             "global application setting",
             "accept an optional `instruction_id`",
             "initialize an empty pool with provider defaults",
-            "Unmerged build-cache cleanup requires actual user permission",
+            "Unmerged build-cache cleanup needs no owner permission",
+            "shown in Reports for the owner to review afterwards",
         ] {
             assert!(
                 body.contains(phrase),
@@ -4520,6 +4523,8 @@ mod tests {
             );
         }
         for stale in [
+            "requires actual user permission",
+            "or explicit approval covers those worktrees",
             "including the PM, can only turn",
             "configure one in the GUI first",
             "gh api -X PATCH",
