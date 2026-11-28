@@ -682,3 +682,82 @@ fn home_reads_older_pages_by_message_id_without_reparsing_the_transcript() {
         MAX_MESSAGES
     );
 }
+
+/// Issue #8086: Claude records a message submitted while the PM is mid-turn
+/// as a `queued_command` attachment instead of a `user` record. It is the
+/// owner's turn, so every reader of the native history shows it; generated
+/// queued commands stay hidden.
+#[test]
+fn claude_shows_owner_messages_absorbed_mid_turn() {
+    fn queued(id: &str, prompt: &str, origin: Value, human_turn: Option<bool>) -> Value {
+        let mut attachment = json!({"type":"queued_command","prompt":prompt,"commandMode":"prompt",
+            "source_uuid":format!("{id}-source"),"origin":origin,"timestamp":"2026-11-28T06:00:00.000Z"});
+        if let Some(human_turn) = human_turn {
+            attachment["humanTurn"] = json!(human_turn);
+        }
+        json!({"uuid":id,"sessionId":"conversation","cwd":"/work/project","type":"attachment",
+            "isSidechain":false,"timestamp":"2026-11-28T06:00:00.100Z","attachment":attachment})
+    }
+    let hook = json!({"uuid":"hook","sessionId":"conversation","cwd":"/work/project","type":"attachment",
+        "attachment":{"type":"hook_additional_context","content":["hidden hook context"]}});
+    let result = parse(
+        AgentId::ClaudeCode,
+        &[
+            claude_message("first", "user", json!("First request")),
+            claude_message("working", "assistant", json!([{"type":"text","text":"Working"}])),
+            queued("owner", "Owner follow-up", json!({"kind":"human"}), Some(true)),
+            queued(
+                "notification",
+                "<task-notification>\n<task-id>t</task-id>\n<status>completed</status>\n<summary>done</summary>\n</task-notification>",
+                json!({"kind":"task-notification"}),
+                None,
+            ),
+            queued("unmarked", "Not a human turn", json!({"kind":"human"}), None),
+            queued("wake", "$gwt-pm", json!({"kind":"human"}), Some(true)),
+            hook,
+            claude_message("reply", "assistant", json!([{"type":"text","text":"Reply"}])),
+        ],
+    );
+    assert_eq!(result.availability, PmConversationAvailability::Ready);
+    let visible: Vec<_> = result
+        .messages
+        .iter()
+        .map(|message| {
+            (
+                message.id.as_str(),
+                message.role.clone(),
+                message.text.as_str(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        visible,
+        [
+            ("first", PmConversationRole::User, "First request"),
+            ("working", PmConversationRole::Assistant, "Working"),
+            ("owner", PmConversationRole::User, "Owner follow-up"),
+            ("reply", PmConversationRole::Assistant, "Reply"),
+        ]
+    );
+    let owner = &result.messages[2];
+    assert_eq!(owner.timestamp.as_deref(), Some("2026-11-28T06:00:00.000Z"));
+    assert!(
+        owner.source_key.is_some(),
+        "an owner turn is a native request source"
+    );
+}
+
+#[test]
+fn claude_queued_owner_message_requires_this_conversation_identity() {
+    let foreign = json!({"uuid":"owner","sessionId":"other","cwd":"/work/project","type":"attachment",
+        "attachment":{"type":"queued_command","prompt":"Owner follow-up","commandMode":"prompt",
+            "origin":{"kind":"human"},"humanTurn":true}});
+    let result = parse(
+        AgentId::ClaudeCode,
+        &[
+            claude_message("first", "user", json!("First request")),
+            foreign,
+        ],
+    );
+    assert_eq!(result.availability, PmConversationAvailability::Unavailable);
+}

@@ -22,8 +22,15 @@
 //! browser's `{"type":"pair_proof","request_id","signature"}`, in that order.
 //! The key (65-byte raw P-256 point) and signature (64-byte `r‖s`) travel as
 //! unpadded base64url; the signing payload is the Host's exact JSON text. The
-//! end of candidates stops only candidates. A reconnected device's connection
-//! never pairs. Neither the request nor the proof is checked here beyond its
+//! end of candidates stops only candidates.
+//!
+//! A connection that reconnects an approved device
+//! ([`SignalSequence::reconnected`]) instead proves that device's key once,
+//! after the Host answered: the Host's
+//! `{"type":"auth_challenge","challenge_id","signing_payload"}`, then the
+//! browser's `{"type":"auth_proof","challenge_id","signature"}`. It never
+//! pairs, and a claimed connection is never challenged; a connection of
+//! neither origin does neither. No request or proof is checked here beyond its
 //! shape: the Host authority verifies them.
 
 use serde::{Deserialize, Serialize};
@@ -40,7 +47,7 @@ pub const MAX_SDP_MID_BYTES: usize = 64;
 pub const MAX_PAIR_NAME_BYTES: usize = 256;
 /// Bound of the Project a pairing request names.
 pub const MAX_PAIR_PROJECT_BYTES: usize = 4096;
-/// Bound of the pairing request ID the Host challenges with.
+/// Bound of the pairing request or device challenge ID the Host sends.
 pub const MAX_REQUEST_ID_BYTES: usize = 64;
 /// A raw uncompressed P-256 public key.
 const PUBLIC_KEY_BYTES: usize = 65;
@@ -73,6 +80,11 @@ pub enum BrowserSignal {
         #[serde(deserialize_with = "base64url")]
         signature: Vec<u8>,
     },
+    AuthProof {
+        challenge_id: String,
+        #[serde(deserialize_with = "base64url")]
+        signature: Vec<u8>,
+    },
 }
 
 fn base64url<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Vec<u8>, D::Error> {
@@ -99,8 +111,9 @@ pub enum SignalError {
 
 /// A signal the Host sends to a browser, encoded as `{"type":"answer","sdp"}`,
 /// `{"type":"candidate","candidate","sdp_mid"?,"sdp_m_line_index"?}` or
-/// `{"type":"end_of_candidates"}`, or a claimed connection's
-/// `{"type":"pair_challenge","request_id","signing_payload"}`.
+/// `{"type":"end_of_candidates"}`, a claimed connection's
+/// `{"type":"pair_challenge","request_id","signing_payload"}` or a reconnected
+/// connection's `{"type":"auth_challenge","challenge_id","signing_payload"}`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum HostSignal {
@@ -119,25 +132,33 @@ pub enum HostSignal {
         request_id: String,
         signing_payload: String,
     },
+    AuthChallenge {
+        challenge_id: String,
+        signing_payload: String,
+    },
 }
 
-/// How far a connection's pairing has gone.
+/// How far a connection's one key proof has gone: a pairing for a claimed
+/// connection, a device key proof for a reconnected one.
 #[derive(Debug, Default)]
-enum Pairing {
-    /// A reconnected device's connection: no pairing.
+enum Proof {
+    /// A connection of unknown origin: neither.
     #[default]
     Refused,
-    Open,
-    Requested,
-    Challenged(String),
-    Proved,
+    PairOpen,
+    PairRequested,
+    PairChallenged(String),
+    AuthOpen,
+    AuthChallenged(String),
+    Done,
 }
 
 /// The signal state of one browser connection, in both directions. The
-/// default is a reconnected device's connection, which never pairs.
+/// default neither pairs nor proves a device key; see [`Self::claimed`] and
+/// [`Self::reconnected`].
 #[derive(Debug, Default)]
 pub struct SignalSequence {
-    pairing: Pairing,
+    proof: Proof,
     offered: bool,
     candidates: usize,
     ended: bool,
@@ -151,7 +172,16 @@ impl SignalSequence {
     /// The state of a connection that claimed an invite: it may pair once.
     pub fn claimed() -> Self {
         Self {
-            pairing: Pairing::Open,
+            proof: Proof::PairOpen,
+            ..Self::default()
+        }
+    }
+
+    /// The state of a connection that reconnects an approved device: it may
+    /// prove that device's key once.
+    pub fn reconnected() -> Self {
+        Self {
+            proof: Proof::AuthOpen,
             ..Self::default()
         }
     }
@@ -217,23 +247,33 @@ impl SignalSequence {
             {
                 return Err(SignalError::Invalid)
             }
-            BrowserSignal::PairProof { signature, .. } if signature.len() != SIGNATURE_BYTES => {
+            BrowserSignal::PairProof { signature, .. }
+            | BrowserSignal::AuthProof { signature, .. }
+                if signature.len() != SIGNATURE_BYTES =>
+            {
                 return Err(SignalError::Invalid)
             }
             _ => {}
         }
         match &signal {
             BrowserSignal::PairRequest { .. } => {
-                if !self.answered || !matches!(self.pairing, Pairing::Open) {
+                if !self.answered || !matches!(self.proof, Proof::PairOpen) {
                     return Err(SignalError::OutOfOrder);
                 }
-                self.pairing = Pairing::Requested;
+                self.proof = Proof::PairRequested;
             }
-            BrowserSignal::PairProof { request_id, .. } => match &self.pairing {
-                Pairing::Challenged(challenged) if challenged == request_id => {
-                    self.pairing = Pairing::Proved
+            BrowserSignal::PairProof { request_id, .. } => match &self.proof {
+                Proof::PairChallenged(challenged) if challenged == request_id => {
+                    self.proof = Proof::Done
                 }
-                Pairing::Challenged(_) => return Err(SignalError::Invalid),
+                Proof::PairChallenged(_) => return Err(SignalError::Invalid),
+                _ => return Err(SignalError::OutOfOrder),
+            },
+            BrowserSignal::AuthProof { challenge_id, .. } => match &self.proof {
+                Proof::AuthChallenged(challenged) if challenged == challenge_id => {
+                    self.proof = Proof::Done
+                }
+                Proof::AuthChallenged(_) => return Err(SignalError::Invalid),
                 _ => return Err(SignalError::OutOfOrder),
             },
             _ if self.ended => return Err(SignalError::OutOfOrder),
@@ -263,12 +303,13 @@ impl SignalSequence {
                 return Err(SignalError::Invalid)
             }
             HostSignal::PairChallenge {
-                request_id,
+                request_id: id,
                 signing_payload,
-            } if request_id.is_empty()
-                || request_id.len() > MAX_REQUEST_ID_BYTES
-                || signing_payload.is_empty() =>
-            {
+            }
+            | HostSignal::AuthChallenge {
+                challenge_id: id,
+                signing_payload,
+            } if id.is_empty() || id.len() > MAX_REQUEST_ID_BYTES || signing_payload.is_empty() => {
                 return Err(SignalError::Invalid)
             }
             _ => {}
@@ -279,10 +320,16 @@ impl SignalSequence {
         }
         match signal {
             HostSignal::PairChallenge { request_id, .. } => {
-                if !matches!(self.pairing, Pairing::Requested) {
+                if !matches!(self.proof, Proof::PairRequested) {
                     return Err(SignalError::OutOfOrder);
                 }
-                self.pairing = Pairing::Challenged(request_id.clone());
+                self.proof = Proof::PairChallenged(request_id.clone());
+            }
+            HostSignal::AuthChallenge { challenge_id, .. } => {
+                if !self.answered || !matches!(self.proof, Proof::AuthOpen) {
+                    return Err(SignalError::OutOfOrder);
+                }
+                self.proof = Proof::AuthChallenged(challenge_id.clone());
             }
             _ if self.host_ended => return Err(SignalError::OutOfOrder),
             HostSignal::Answer { .. } if !self.offered || self.answered => {
@@ -686,15 +733,160 @@ mod tests {
             Err(SignalError::OutOfOrder)
         );
 
-        // A reconnected (not claimed) connection never pairs.
-        let mut sequence = SignalSequence::default();
+        // A reconnected (not claimed) connection never pairs, nor does one of
+        // unknown origin.
+        for mut sequence in [SignalSequence::reconnected(), SignalSequence::default()] {
+            assert!(sequence.accept(&offer()).is_ok());
+            assert!(sequence.send(&answer("v=0")).is_ok());
+            assert_eq!(
+                sequence.accept(&pair_request(&[4; 65])),
+                Err(SignalError::OutOfOrder)
+            );
+            assert_eq!(sequence.accept(&offer()), Err(SignalError::Rejected));
+        }
+    }
+
+    fn auth_challenge(challenge_id: &str) -> HostSignal {
+        HostSignal::AuthChallenge {
+            challenge_id: challenge_id.to_string(),
+            signing_payload: r#"["gwt-mobile-auth-v2"]"#.to_string(),
+        }
+    }
+
+    fn auth_proof(challenge_id: &str, signature: &[u8]) -> String {
+        json!({"type":"auth_proof","challenge_id":challenge_id,"signature":b64(signature)})
+            .to_string()
+    }
+
+    /// A reconnected connection after the Host answered.
+    fn answered_reconnect() -> SignalSequence {
+        let mut sequence = SignalSequence::reconnected();
         assert!(sequence.accept(&offer()).is_ok());
         assert!(sequence.send(&answer("v=0")).is_ok());
+        sequence
+    }
+
+    #[test]
+    fn a_reconnected_connection_proves_its_key_once_in_order_on_the_fixed_wire() {
+        let mut sequence = answered_reconnect();
+        // The end of candidates stops only candidates, never the proof.
+        let end = json!({"type":"end_of_candidates"}).to_string();
+        assert!(sequence.accept(&end).is_ok());
+        assert!(sequence.send(&HostSignal::EndOfCandidates {}).is_ok());
+        let sent: serde_json::Value =
+            serde_json::from_str(&sequence.send(&auth_challenge("c1")).unwrap()).unwrap();
         assert_eq!(
-            sequence.accept(&pair_request(&[4; 65])),
+            sent,
+            json!({"type":"auth_challenge","challenge_id":"c1",
+                   "signing_payload":r#"["gwt-mobile-auth-v2"]"#})
+        );
+        assert_eq!(
+            sequence.accept(&auth_proof("c1", &[7; 64])),
+            Ok(BrowserSignal::AuthProof {
+                challenge_id: "c1".to_string(),
+                signature: vec![7; 64],
+            })
+        );
+        // One proof per connection.
+        assert_eq!(
+            sequence.accept(&auth_proof("c1", &[7; 64])),
             Err(SignalError::OutOfOrder)
         );
-        assert_eq!(sequence.accept(&offer()), Err(SignalError::Rejected));
+    }
+
+    #[test]
+    fn key_proof_follows_its_order() {
+        // No challenge before the Host answered.
+        let mut sequence = SignalSequence::reconnected();
+        assert!(sequence.accept(&offer()).is_ok());
+        assert_eq!(
+            sequence.send(&auth_challenge("c1")),
+            Err(SignalError::OutOfOrder)
+        );
+
+        // One challenge per connection.
+        let mut sequence = answered_reconnect();
+        assert!(sequence.send(&auth_challenge("c1")).is_ok());
+        assert_eq!(
+            sequence.send(&auth_challenge("c1")),
+            Err(SignalError::OutOfOrder)
+        );
+
+        // No proof before the challenge.
+        let mut sequence = answered_reconnect();
+        assert_eq!(
+            sequence.accept(&auth_proof("c1", &[7; 64])),
+            Err(SignalError::OutOfOrder)
+        );
+
+        // A claimed connection, or one of unknown origin, is never challenged
+        // and never proves a device key.
+        for make in [SignalSequence::claimed, SignalSequence::default] {
+            let mut sequence = make();
+            assert!(sequence.accept(&offer()).is_ok());
+            assert!(sequence.send(&answer("v=0")).is_ok());
+            assert_eq!(
+                sequence.send(&auth_challenge("c1")),
+                Err(SignalError::OutOfOrder)
+            );
+            let mut sequence = make();
+            assert!(sequence.accept(&offer()).is_ok());
+            assert!(sequence.send(&answer("v=0")).is_ok());
+            assert_eq!(
+                sequence.accept(&auth_proof("c1", &[7; 64])),
+                Err(SignalError::OutOfOrder)
+            );
+        }
+    }
+
+    #[test]
+    fn key_proof_messages_are_bounded() {
+        let challenged = || {
+            let mut sequence = answered_reconnect();
+            assert!(sequence.send(&auth_challenge("c1")).is_ok());
+            sequence
+        };
+        for payload in [
+            auth_proof("c2", &[7; 64]),
+            auth_proof("c1", &[7; 63]),
+            auth_proof("c1", &[7; 65]),
+            json!({"type":"auth_proof","challenge_id":"c1","signature":"!!"}).to_string(),
+            json!({"type":"auth_proof","challenge_id":"c1","signature":b64(&[7; 64]),"x":1})
+                .to_string(),
+        ] {
+            let mut sequence = challenged();
+            assert_eq!(
+                sequence.accept(&payload),
+                Err(SignalError::Invalid),
+                "{payload}"
+            );
+            assert_eq!(
+                sequence.accept(&auth_proof("c1", &[7; 64])),
+                Err(SignalError::Rejected)
+            );
+        }
+
+        assert_eq!(
+            answered_reconnect().send(&auth_challenge("")),
+            Err(SignalError::Invalid)
+        );
+        assert!(answered_reconnect()
+            .send(&auth_challenge(&"c".repeat(MAX_REQUEST_ID_BYTES)))
+            .is_ok());
+        assert_eq!(
+            answered_reconnect().send(&auth_challenge(&"c".repeat(MAX_REQUEST_ID_BYTES + 1))),
+            Err(SignalError::Invalid)
+        );
+        let empty = HostSignal::AuthChallenge {
+            challenge_id: "c1".to_string(),
+            signing_payload: String::new(),
+        };
+        let mut sequence = answered_reconnect();
+        assert_eq!(sequence.send(&empty), Err(SignalError::Invalid));
+        assert_eq!(
+            sequence.accept(&auth_proof("c1", &[7; 64])),
+            Err(SignalError::Rejected)
+        );
     }
 
     #[test]

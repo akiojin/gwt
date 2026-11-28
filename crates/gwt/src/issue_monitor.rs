@@ -12925,12 +12925,11 @@ impl IssueMonitorState {
     }
 
     /// Physical implementation presence is independent of launch binding.
-    /// Retained error/stopped panes still prevent a second pane for the Issue.
+    /// SPEC #3590 AC-8: the duplicate guard (#4804) shares the
+    /// `idle_window_is_alive` judgment with slot accounting, so a retained
+    /// Stopped/Error pane keeps its diagnostics but does not block a relaunch.
     pub fn has_monitor_pane_for_issue(&self, issue_number: u64) -> bool {
         self.has_observed_monitor_runtime(issue_number)
-            || self
-                .monitor_canvas_windows()
-                .any(|window| !window.review_dispatch && window.issue_number == Some(issue_number))
     }
 
     /// Include untracked Launched rows and open delivered owners still settling.
@@ -22116,20 +22115,8 @@ impl IssueMonitorState {
         if !self.queue.contains(&issue_number) {
             reasons.push("not_in_launch_queue: use issue.monitor.launch_now".to_string());
         }
-        if self.has_observed_monitor_runtime(issue_number) {
+        if self.has_monitor_pane_for_issue(issue_number) {
             reasons.push("runtime_already_present".to_string());
-        } else if self.has_monitor_pane_for_issue(issue_number) {
-            let windows = self
-                .monitor_canvas_windows()
-                .filter(|window| {
-                    !window.review_dispatch && window.issue_number == Some(issue_number)
-                })
-                .map(|window| window.window_id.as_str())
-                .collect::<Vec<_>>()
-                .join(", ");
-            reasons.push(format!(
-                "retained_implementation_pane: {windows}; close the stopped/error pane with pane.close before retry"
-            ));
         }
         if let Some(hold) = self
             .open_pr_observations
@@ -45748,7 +45735,11 @@ mod tests {
     }
 
     #[test]
-    fn retained_implementation_pane_is_excluded_before_launch_claim() {
+    fn dead_retained_implementation_pane_does_not_block_launch_claim() {
+        // SPEC #3590 AC-8: the duplicate guard shares the `idle_window_is_alive`
+        // judgment with slot accounting. A retained Stopped/Error pane keeps its
+        // diagnostics but neither excludes the Issue nor holds a slot; a live
+        // pane still prevents a second implementation (#4804).
         for state in [WindowState::Stopped, WindowState::Error] {
             let now = "2026-10-22T00:00:00Z";
             let mut monitor = test_monitor(IssueMonitorConfig {
@@ -45762,64 +45753,48 @@ mod tests {
                 now,
                 vec![live_pane_observation("tab-1::old", 42, state)],
             ));
-            assert!(monitor.claim_probe_plan(4).0 > 0, "spare capacity");
-            assert!(monitor.claim_probe_plan(4).1.is_empty());
+            assert!(!monitor.has_monitor_pane_for_issue(42), "{state:?}");
+            assert_eq!(monitor.occupied_slot_count(), 0, "{state:?}");
+            let status = monitor.agent_status_at(now);
+            let reason = status.inbox[0].exclusion_reason.clone().unwrap_or_default();
+            assert!(!reason.contains("retained_implementation_pane"), "{reason}");
+            assert_eq!(monitor.claim_probe_plan(4).1, vec![42], "{state:?}");
             assert_eq!(
                 monitor.prepare_claim_effects_with_probe("owner", now, 4, |_| false),
-                0
-            );
-            assert!(monitor.clone().next_launch_request(now).is_none());
-            let probes = std::cell::Cell::new(0);
-            monitor.clone().claim_next_launch_requests_with_probe(
-                &gwt_github::FakeIssueClient::new(),
-                "owner",
-                now,
-                4,
-                |_| {
-                    probes.set(probes.get() + 1);
-                    false
-                },
-            );
-            assert_eq!(probes.get(), 0, "synchronous admission also excludes it");
-            let status = monitor.agent_status_at("2026-10-22T00:03:00Z");
-            let row = &status.inbox[0];
-            let reason = row.exclusion_reason.as_deref().unwrap();
-            assert!(reason.contains("retained_implementation_pane"), "{reason}");
-            assert!(reason.contains("tab-1::old") && reason.contains("pane.close"));
-            assert_eq!(row.state, MonitorInboxState::Queued);
-            assert!(row.error_message.is_none(), "no windowless timeout");
-            assert!(monitor.prefs().pending_launch_deliveries.is_empty());
-            assert!(monitor.pending_effects().is_empty());
-            assert!(monitor.terminal_queue_contains(42));
-            assert_eq!(monitor.attempt_count(42), 0);
-
-            // A fresh canvas after pane.close clears the exclusion. Reviews
-            // and another Issue's pane must not be mistaken for this producer.
-            monitor.record_window_snapshot(pane_snapshot(
-                "2026-10-22T00:03:01Z",
-                vec![
-                    IssueMonitorWindowObservation {
-                        review_dispatch: true,
-                        ..live_pane_observation("tab-1::review", 42, state)
-                    },
-                    live_pane_observation("tab-1::other", 43, state),
-                ],
-            ));
-            assert_eq!(monitor.claim_probe_plan(4).1, vec![42]);
-            assert_eq!(
-                monitor.prepare_claim_effects_with_probe(
-                    "owner",
-                    "2026-10-22T00:03:01Z",
-                    4,
-                    |_| false,
-                ),
-                1
+                1,
+                "{state:?}"
             );
         }
+
+        let now = "2026-10-22T00:00:00Z";
+        let mut monitor = test_monitor(IssueMonitorConfig {
+            enabled: true,
+            max_active: 4,
+            ..IssueMonitorConfig::default()
+        });
+        monitor.set_gui_connected(true);
+        scan_queued_candidates(&mut monitor, &[issue(42)], now);
+        monitor.record_window_snapshot(pane_snapshot(
+            now,
+            vec![live_pane_observation(
+                "tab-1::live",
+                42,
+                WindowState::Running,
+            )],
+        ));
+        assert!(monitor.has_monitor_pane_for_issue(42));
+        assert!(monitor.claim_probe_plan(4).1.is_empty());
+        assert_eq!(
+            monitor.prepare_claim_effects_with_probe("owner", now, 4, |_| false),
+            0
+        );
+        let status = monitor.agent_status_at(now);
+        let reason = status.inbox[0].exclusion_reason.as_deref().unwrap();
+        assert!(reason.contains("runtime_already_present"), "{reason}");
     }
 
     #[test]
-    fn retained_implementation_pane_compensates_an_inflight_claim() {
+    fn live_implementation_pane_compensates_an_inflight_claim() {
         let now = "2026-10-22T00:00:00Z";
         let mut monitor = test_monitor(IssueMonitorConfig {
             enabled: true,
@@ -45844,7 +45819,7 @@ mod tests {
             vec![live_pane_observation(
                 "tab-1::old",
                 42,
-                WindowState::Stopped,
+                WindowState::Running,
             )],
         ));
         for _ in 0..2 {
@@ -45870,7 +45845,7 @@ mod tests {
     }
 
     #[test]
-    fn monitor_pending_reservation_does_not_replace_a_retained_same_issue_pane() {
+    fn monitor_pending_reservation_materializes_beside_a_dead_same_issue_pane() {
         let mut monitor = test_monitor(IssueMonitorConfig {
             max_active: 2,
             ..IssueMonitorConfig::default()
@@ -45893,19 +45868,9 @@ mod tests {
             1,
             "Issue #7072: only the pending reservation consumes capacity"
         );
-        assert!(!monitor.claim_launch_delivery(
-            42,
-            "launch:effect",
-            "gui",
-            101,
-            "tab-1::new",
-            |_| false
-        ));
-        monitor.set_max_active_agents(3);
         assert!(
-            !monitor
-                .claim_launch_delivery(42, "launch:effect", "gui", 101, "tab-1::new", |_| false),
-            "headroom must not create another implementation over a retained same-Issue pane"
+            monitor.claim_launch_delivery(42, "launch:effect", "gui", 101, "tab-1::new", |_| false),
+            "SPEC #3590 AC-8: a dead retained pane neither blocks nor holds the slot"
         );
     }
 

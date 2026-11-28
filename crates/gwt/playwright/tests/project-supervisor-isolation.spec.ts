@@ -537,7 +537,10 @@ test("Hub observes and retries A exact failed retirement while B stays usable", 
         retirementHealth.push({ observed_at_ms: Date.now(), ...health });
         return { draining: health.draining, failed: health.reconciliation_required, presence: health.gui_presence_count };
       }, { timeout: 45_000, intervals: [250] }).toEqual({ draining: true, failed: true, presence: 0 });
-      await hub.locator('[data-hub-action="refresh-orphans"]').click();
+      // Issue #8079: the shutdown section exists only once a project is
+      // observed still shutting down; opening the page observes again.
+      await hub.reload();
+      await expect(hub.locator("[data-hub]")).toBeVisible();
       const row = hub.locator(".gwt-hub__orphan").filter({ hasText: "alpha" });
       await expect(row).toHaveCount(1);
       const retry = row.locator("[data-orphan-retry]");

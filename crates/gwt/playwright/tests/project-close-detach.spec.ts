@@ -164,7 +164,9 @@ test("live Project view close, Continue, ACK reconciliation and Stop preserve th
       await command(mirror, agent, "test \"$GWT_PW1\" = \"$$\" && printf 'GWT_%s\\n' 'SAME_AGENT'", "GWT_SAME_AGENT");
       let dialogs = 0; mirror.on('dialog', async dialog => { dialogs += 1; await dialog.dismiss(); });
       await mirror.close({ runBeforeUnload: true }); expect(dialogs).toBe(0);
-      await expect(hub.locator(`[data-project-execution="${a.project_key}"]`).first()).toContainText(/Selection pending|Unknown/);
+      // Issue #8079: the Hub row shows the project, not its internal execution state.
+      await expect(hub.locator(`[data-hub-list="open"] [data-project-row="${a.project_key}"]`)).toHaveCount(1);
+      await expect(hub.locator('[data-hub-projects]')).not.toContainText('Saved choice');
 
       reopened = await context.newPage(); observations.push(capture(reopened));
       let dropAck = false, dropped = 0;
@@ -206,7 +208,7 @@ test("live Project view close, Continue, ACK reconciliation and Stop preserve th
       dropAck = false; await reopened.reload();
       await expect(reopened.locator('[data-hub]')).toBeVisible({ timeout: 30_000 });
       expect(confirmations).toHaveLength(1); expect(confirmations[0].choice).toBe('continue');
-      await expect(hub.locator(`[data-project-execution="${a.project_key}"]`).first()).toContainText(/Saved choice: Continue/);
+      await expect(hub.locator(`[data-hub-list="open"] [data-project-row="${a.project_key}"]`)).toHaveCount(1);
 
       await reopened.bringToFront();
       await gotoLiveGwt(reopened, base!, { projectKey: a.project_key, enableTestBridge: true });
@@ -229,7 +231,7 @@ test("live Project view close, Continue, ACK reconciliation and Stop preserve th
       await hub.locator(`[data-close-project="${a.project_key}"]`).click();
       await hubDialog.getByRole('button', { name: 'Stop', exact: true }).click();
       await expect(reopened.locator('[data-hub]')).toBeVisible({ timeout: 30_000 });
-      await expect(hub.locator(`[data-project-execution="${a.project_key}"]`).first()).toContainText(/Stopped.*Saved choice: Stop/);
+      await expect(hub.locator(`[data-hub-list="open"] [data-project-row="${a.project_key}"]`)).toHaveCount(0);
       const reconcileDialog = hub.getByRole('dialog', { name: 'Check Project Choice' });
       if (await reconcileDialog.isVisible()) await reconcileDialog.getByRole('button', { name: 'Check status', exact: true }).click();
       await expect(reconcileDialog).toBeHidden();

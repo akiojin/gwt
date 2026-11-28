@@ -590,3 +590,51 @@ for (const width of [1440, 390]) {
     expect(errors).toEqual([]);
   });
 }
+
+// Issue #8086 AC-1/AC-2/AC-4: two tabs of one gwt. The host projects the
+// owner's message into the native history every client reads, so the tab
+// that did not send it shows both sides in order, and both tabs name the PM.
+test("Issue #8086 two tabs show both sides of the PM conversation and the PM name", async ({ context }, testInfo) => {
+  const theme = themeOf(testInfo.project.name);
+  const text = "Ship the nightly fix";
+  const pm = { name: "Ozawa Hino", avatar: { kind: "preset" as const, preset_id: "fox" } };
+  const history = (owner: boolean) => [
+    { id: "pm-1", role: "assistant", text: "Working on the queue.", timestamp: "2026-11-28T06:00:00.000Z" },
+    ...(owner ? [
+      { id: "owner-1", role: "user", text, timestamp: "2026-11-28T06:01:00.000Z" },
+      { id: "pm-2", role: "assistant", text: "Shipping it now.", timestamp: "2026-11-28T06:02:00.000Z" },
+    ] : []),
+  ];
+  const backend = (owner: boolean): Backend => ({ projects: [alpha], pm, conversation: [{
+    project_key: alpha.project_key, title: alpha.title, pm_available: true, decisions: [],
+    conversation: { availability: "ready", messages: history(owner) },
+  }] });
+  const sender = await context.newPage();
+  const other = await context.newPage();
+  const errors = [...[sender, other].map(collectBrowserErrors)];
+  await openHome(sender, theme, backend(false));
+  await openHome(other, theme, backend(false));
+
+  const composer = sender.locator("[data-home]").getByRole("textbox", { name: "Message to the Project Manager" });
+  await composer.fill(text);
+  await composer.press("Enter");
+  await expect(sender.locator("[data-home-sent]")).toContainText(text);
+  // The host now holds the message in the native history both tabs read.
+  for (const page of [sender, other]) {
+    await page.evaluate(projects => (window as any).__homeProjects(projects), backend(true).conversation);
+  }
+  for (const page of [sender, other]) {
+    const log = page.locator("[data-home]").getByRole("log");
+    const entries = log.locator(":scope > article:not([data-home-greeting])");
+    // Home reads again every 5 seconds; wait for the native turn to arrive.
+    await expect(log.getByText("Shipping it now.")).toBeVisible({ timeout: 15_000 });
+    await expect(entries).toHaveCount(3);
+    await expect(entries.nth(0)).toContainText("Working on the queue.");
+    await expect(entries.nth(1)).toContainText(new RegExp(`You.*to Alpha.*${text}`));
+    await expect(entries.nth(2)).toContainText("Shipping it now.");
+    await expect(page.locator("[data-home-sent]")).toHaveCount(0);
+    await expect(page.locator("footer.app-foot .app-foot__pm")).toHaveText(`PM: ${pm.name}`);
+  }
+  await other.screenshot({ path: testInfo.outputPath(`home-two-tabs-${theme}.png`) });
+  expect(errors.flat()).toEqual([]);
+});

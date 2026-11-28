@@ -666,6 +666,7 @@ fn handle_at(
          start over. Give the directive through `board.post` with a mention or `pm.message.send`; \
          close it only once you have read why it is idle and that reason makes the window \
          unusable. \
+         For each unconfirmed ruling from the previous cycle, check whether the target pane resumed. \
          Submit only material changes through `pm.report.post` `submission` under the shared \
          conditional-reporting clause below. \
          Reconcile every unresolved wait in every cycle; report new or materially changed state \
@@ -1466,6 +1467,7 @@ mod tests {
             // Issue #3767 AC-2 / AC-3: the running launches are steered
             // through the ruling channels before the no-change judgment.
             "Steer every running launch before you judge the cycle unchanged",
+            "For each unconfirmed ruling from the previous cycle, check whether the target pane resumed",
             "more than twice the monitor scan interval",
             "drifting outside its owner Issue's scope",
             "waiting for its next action",
