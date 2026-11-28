@@ -1451,6 +1451,10 @@ drive them.
   An error before target resolution labels the input as a requested target.
   **delivered** means the exact target Session's own UserPromptSubmit hook
   acknowledged that prompt; a successful PTY write alone does not prove it.
+- **unverified** means the pane input was committed but the terminal
+  response or exact acknowledgement was unavailable. Treat the input as sent
+  and do not resend it. Check the saved receipt and the target pane for
+  evidence that the agent resumed.
 - **unconfirmed** means no exact acknowledgement arrived. Do not claim the
   instruction was delivered, lost, or acted on. Read the pane and recover
   with the same `params.operation_id`, the same exact `params.id`, and the
@@ -1750,8 +1754,15 @@ act.
     60 seconds by default); do not close it in the same cycle it
     settled. Fallback cleanup is bounded, see below;
   - **waiting for your ruling** — read its `blocked` or `handoff` Board
-    entry and post the ruling, with `params.resolves` for an
-    escalation or a mention for a handoff;
+    entry, then complete all three steps:
+    1. Record the ruling on the Board, with `params.resolves` for an
+       escalation or a mention for a handoff.
+    2. Use `pm.message.send` to put the ruling into the target pane and
+       wake the idle agent. Save the receipt with the ruling.
+    3. Verify that the target agent resumed on the next supervision cycle.
+       Track rulings awaiting that check in your session notes.
+    Board publication alone does not establish delivery. Report the ruling
+    complete only after the agent resumes;
   - **waiting for the user** — reconcile the wait every cycle; present the
     window title and the exact action required when first detected or when
     its state or required action changes;
@@ -4098,6 +4109,26 @@ mod tests {
             .and_then(|remainder| remainder.split_once("\n## ").map(|(section, _)| section))
             .unwrap_or_else(|| panic!("{heading} must be a bounded section"));
         unwrapped(text)
+    }
+
+    #[test]
+    fn contract_requires_pm_ruling_delivery_and_resumption() {
+        let steering = section("## Steering the running agents");
+        for phrase in [
+            "Record the ruling on the Board",
+            "wake the idle agent",
+            "on the next supervision cycle",
+            "Board publication alone does not establish delivery",
+            "Report the ruling complete only after the agent resumes",
+        ] {
+            assert!(
+                steering.contains(phrase),
+                "missing ruling contract: {phrase}"
+            );
+        }
+        let guidance = unwrapped(SKILL_BODY_EN);
+        assert!(guidance.contains("**unverified** means the pane input was committed"));
+        assert!(guidance.contains("Treat the input as sent and do not resend it"));
     }
 
     /// Issue #3767 AC-1 / AC-3: every resident cycle steers the running
