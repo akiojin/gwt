@@ -229,6 +229,36 @@ p50 / p95 は nearest-rank。n=3 のため p95 は最悪値と同じ。
 - `sync-index.json`: P12 / P11 の生サンプル（outcome、error、受付時間を含む）。
 - `sync-index-environment.txt`: checkout SHA、version、OS、CPU、採取時刻。
 
+### P12 強制 refresh の成功経路（ローカル再生）
+
+| テーマ | 成功 / 要求 | p50 ms | p95 ms | 最悪 ms |
+|---|---:|---:|---:|---:|
+| Dark | 10 / 10 | 371.1 | 417.9 | 417.9 |
+| Light | 10 / 10 | 348.7 | 417.4 | 417.4 |
+| 合算 | 20 / 20 | 368.0 | 417.4 | 417.9 |
+
+各テーマで fresh HOME を用意し、初回の強制 refresh をウォームアップとして除外した。
+起点は `load_knowledge_bridge`（`refresh:true`）の WebSocket 送信時刻、終点は同一 request ID の
+`knowledge_entries` の受信時刻。20 回すべてがキャッシュから組み立てた Issue 3 件を返した。
+集計は nearest-rank。実 Chromium の両テーマで console/page error は 0 件、隔離プロセスは終了済み。
+
+対象は `303b1398f238cea58354ad773a6dc76f66fb5e54` の debug build。2026-11-28 06:26–06:28 UTC、
+macOS 27.2.1、Apple M5 Max。GitHub は読み取り専用の loopback-v1 と `gh` shim で再生した。
+fixture は open Issue 3 件（うち queue 対象 1 件）、PM・Issues 自動実行・バックグラウンド index は無効。
+shim はテーマごとにウォームアップ込みで全体一覧 11 回、queue 一覧 11 回を記録した。
+生サンプルの `gh_starts` は gwt ログからの集計で、この shim の呼び出し数は含まない。
+
+再現には `crates/gwt/playwright/verify-issue-5321.mjs` の live fixture と隔離起動を使用する。
+計測時は一時コピーに `p12: "sync-index-inventory-live.spec.ts"` を suite として追加し、
+checkout root を作業ディレクトリに設定した。Playwright 子プロセスに
+`GWT_PERF_INVENTORY_OUT`（証跡先）、`GWT_PERF_INVENTORY_REMOTE=https://github.com/fixture/perf-3820.git`、
+`GWT_PERF_INVENTORY_P12_ONLY=1`、`GWT_PERF_INVENTORY_SAMPLES=10` を渡した。
+`--skip-build --live --suites p12 --project=chromium-dark` と `--project=chromium-light` を別々に実行した。
+生サンプルは `sync-chromium-dark.json` と `sync-chromium-light.json` に保存した。
+
+この値はウォームキャッシュ・小規模 fixture の暫定値。実 GitHub のネットワーク時間、API 消費量、
+初回同期との競合がある場合の成功時所要時間は未測定。上記の実 GitHub での失敗 3 件は維持する。
+
 ## P03 / P04 / P06 production route（#8040 の計装修復後）
 
 ### 結論

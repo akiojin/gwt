@@ -1,0 +1,97 @@
+{
+  "samples_per_path": 10,
+  "remote": "https://github.com/fixture/perf-3820.git",
+  "recorded_at": "2026-11-28T06:26:34.808Z",
+  "P12": {
+    "n": 10,
+    "p50_ms": 371.09999999403954,
+    "p95_ms": 417.90000000596046,
+    "max_ms": 417.90000000596046,
+    "samples_ms": [
+      417.90000000596046,
+      376.19999998807907,
+      370.69999998807907,
+      381.89999997615814,
+      357.89999997615814,
+      384,
+      400.39999997615814,
+      355,
+      371.09999999403954,
+      366.7999999821186
+    ],
+    "samples": [
+      {
+        "ms": 417.90000000596046,
+        "outcome": "refreshed",
+        "error": null,
+        "entries": 3,
+        "gh_starts": 0
+      },
+      {
+        "ms": 376.19999998807907,
+        "outcome": "refreshed",
+        "error": null,
+        "entries": 3,
+        "gh_starts": 0
+      },
+      {
+        "ms": 370.69999998807907,
+        "outcome": "refreshed",
+        "error": null,
+        "entries": 3,
+        "gh_starts": 0
+      },
+      {
+        "ms": 381.89999997615814,
+        "outcome": "refreshed",
+        "error": null,
+        "entries": 3,
+        "gh_starts": 0
+      },
+      {
+        "ms": 357.89999997615814,
+        "outcome": "refreshed",
+        "error": null,
+        "entries": 3,
+        "gh_starts": 0
+      },
+      {
+        "ms": 384,
+        "outcome": "refreshed",
+        "error": null,
+        "entries": 3,
+        "gh_starts": 0
+      },
+      {
+        "ms": 400.39999997615814,
+        "outcome": "refreshed",
+        "error": null,
+        "entries": 3,
+        "gh_starts": 0
+      },
+      {
+        "ms": 355,
+        "outcome": "refreshed",
+        "error": null,
+        "entries": 3,
+        "gh_starts": 0
+      },
+      {
+        "ms": 371.09999999403954,
+        "outcome": "refreshed",
+        "error": null,
+        "entries": 3,
+        "gh_starts": 0
+      },
+      {
+        "ms": 366.7999999821186,
+        "outcome": "refreshed",
+        "error": null,
+        "entries": 3,
+        "gh_starts": 0
+      }
+    ]
+  },
+  "P11": null,
+  "console_errors": []
+}
