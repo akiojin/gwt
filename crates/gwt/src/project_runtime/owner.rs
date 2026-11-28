@@ -10595,7 +10595,17 @@ impl OwnerState {
                 client_id,
                 grant,
                 request,
-            } => self.dispatch_agent_frontend(client_id, grant, request),
+            } => {
+                // A delayed initial sync has no recipient once its socket ends.
+                if matches!(
+                    request,
+                    crate::agent_capability::AgentFrontendRequest::Ready
+                ) && self.clients.scope(&client_id).is_none()
+                {
+                    return;
+                }
+                self.dispatch_agent_frontend(client_id, grant, request);
+            }
             TransportEvent::ClientPaneSnapshotRepair {
                 client_id,
                 pane_ids,
@@ -16792,6 +16802,57 @@ mod tests {
         .iter()
         .any(|row| row.id == "stopped"));
     }
+    #[tokio::test]
+    async fn queued_pane_sync_skips_disconnected_client_and_serves_reconnect() {
+        use crate::agent_capability::AgentFrontendRequest;
+        use crate::project_transport::DrainStep;
+
+        let root = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(root.path());
+        let (session, _) = unbound_fixture(root.path());
+        let (mut state, receiver, handle) = owner_fixture(root.path());
+        let token = state.issuer.issue(root.path(), &session.id).unwrap().token;
+        let grant = state.issuer.grant_for_test(&token).unwrap();
+        let old_client = "expired-pane-sync";
+        let new_client = "reconnected-pane-sync";
+        state.clients.register_pane_for_test(old_client.into());
+        state
+            .pending_transport
+            .push_back(TransportEvent::AgentFrontend {
+                client_id: old_client.into(),
+                grant: grant.clone(),
+                request: AgentFrontendRequest::Ready,
+            });
+        state.clients.unregister(old_client);
+
+        state.resume_agent_transport();
+        let expired_jobs = state.agent_dispatch_jobs;
+        let queue = state.clients.register_pane_for_test(new_client.into());
+        state.handle_transport_event(TransportEvent::AgentFrontend {
+            client_id: new_client.into(),
+            grant,
+            request: AgentFrontendRequest::Ready,
+        });
+        let owner = spawn_owner_worker(move || run_fixture_owner(state, receiver));
+        // test-hygiene: allow-wall-clock-deadline Bound fixture I/O while a new client waits for its sync completion.
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while let DrainStep::Message { kind, .. } = queue.next().await {
+                if kind == "pane_sync_complete" {
+                    return;
+                }
+            }
+            panic!("reconnected client closed before sync completion");
+        })
+        .await
+        .expect("reconnected client sync completion");
+        // test-hygiene: allow-wall-clock-deadline Bound fixture shutdown after dispatch has drained.
+        tokio::time::timeout(std::time::Duration::from_secs(10), handle.shutdown())
+            .await
+            .unwrap();
+        owner.join().unwrap();
+        assert_eq!(expired_jobs, 0, "closed client still started a worker");
+    }
+
     #[tokio::test]
     async fn stalled_self_close_worker_leaves_the_runtime_with_the_owner() {
         use super::super::agent_frontend::{
