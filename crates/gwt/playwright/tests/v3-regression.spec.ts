@@ -88,16 +88,19 @@ test.describe('T-036 v3 regression (isolated checkout)', () => {
       'docs/design/issue-7007/mock-full-refresh-v3.html');
     const compare = async (product: Page, name: string, mockPage: string, mockScreen?: string) => {
       await mock.goto(`${pathToFileURL(referencePath).href}?full=1`);
-      // Select the reference through its own links, including hidden menu items.
-      if (mockPage !== 'start') {
-        const links = mock.locator(`[data-openpage="${mockPage}"]`);
-        const direct = links.and(mock.locator(`[data-openscreen="${mockScreen}"]`));
-        await (await direct.count() ? direct : links).first().evaluate((entry: HTMLElement) => entry.click());
-        const navigation = mock.locator(`.pagegroup[data-page="${mockPage}"] [data-nav="${mockScreen}"]`);
-        if (!(await direct.count()) && await navigation.count()) {
-          await navigation.first().evaluate((entry: HTMLElement) => entry.click());
+      // Pin the mock's active pane without invoking menu or dialog actions.
+      await mock.evaluate(({ mockPage, mockScreen }) => {
+        for (const group of document.querySelectorAll<HTMLElement>('.pagegroup')) {
+          const active = group.dataset.page === mockPage;
+          group.classList.toggle('on', active);
+          if (!active || !mockScreen) continue;
+          for (const pane of group.querySelectorAll<HTMLElement>('.screen-pane')) {
+            pane.classList.toggle('on', pane.dataset.screen === mockScreen);
+          }
+          const title = group.querySelector(`.screen-pane.on :is(.h-big, h1, h2)`);
+          if (title) document.getElementById('appTitle')!.textContent = title.textContent;
         }
-      }
+      }, { mockPage, mockScreen });
       await expect(mock.locator(`.pagegroup.on[data-page="${mockPage}"]`)).toBeVisible();
       if (mockScreen) {
         await expect(mock.locator(`.screen-pane.on[data-screen="${mockScreen}"]`)).toBeVisible();
