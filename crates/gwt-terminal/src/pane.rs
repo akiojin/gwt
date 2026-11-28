@@ -786,25 +786,12 @@ impl Pane {
         self.last_exit.as_ref()
     }
 
-    /// Join the last `max_lines` non-empty screen rows into a single line.
-    ///
-    /// The final frame is the only readable trace of what the child was doing
-    /// when it went away. Shared by the logged exit record (Issue #3341) and
-    /// the persistent error detail (Issue #3274) so both describe the same
-    /// frame instead of drifting apart.
+    /// Join the last `max_lines` non-empty screen rows with spaces.
     pub fn screen_tail(&self, max_lines: usize) -> Option<String> {
         if max_lines == 0 {
             return None;
         }
-        let contents = self.parser.screen().contents();
-        let lines: Vec<&str> = contents
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-            .collect();
-        let start = lines.len().saturating_sub(max_lines);
-        let tail = lines[start..].join(" ");
-        (!tail.is_empty()).then_some(tail)
+        screen_tail_text(&self.parser.screen().contents(), max_lines, " ")
     }
 
     /// Record the child exit in the Process facet log stream, mirroring the
@@ -893,6 +880,18 @@ impl Pane {
     pub fn reader(&self) -> Result<Box<dyn std::io::Read + Send>, TerminalError> {
         self.pty.reader()
     }
+}
+
+/// Join the last `max_lines` non-empty rows of a rendered terminal screen.
+pub fn screen_tail_text(contents: &str, max_lines: usize, separator: &str) -> Option<String> {
+    let lines: Vec<&str> = contents
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    let start = lines.len().saturating_sub(max_lines);
+    let tail = lines[start..].join(separator);
+    (!tail.is_empty()).then_some(tail)
 }
 
 #[cfg(test)]
@@ -2709,6 +2708,19 @@ mod tests {
         let _ = pane.kill();
     }
 
+    #[test]
+    fn screen_tail_text_preserves_the_requested_separator() {
+        let screen = "first\n  second  \n\n third\n";
+        assert_eq!(
+            super::screen_tail_text(screen, 2, "\n").as_deref(),
+            Some("second\nthird")
+        );
+        assert_eq!(
+            super::screen_tail_text(screen, 2, " ").as_deref(),
+            Some("second third")
+        );
+    }
+
     /// Issue #3341: gwt logged every `git` spawn but nothing at all for the
     /// agent PTY that matters most. A clean `exit 0` in particular reached no
     /// log line, and the final screen tail was kept only for `Error` exits, so
@@ -2718,7 +2730,7 @@ mod tests {
         let _pty_guard = lock_pty_test();
         let capture = SummaryFieldCapture::default();
         let mut pane = test_pane("test-exit-log", success_command());
-        pane.process_bytes(b"thinking about the next step\r\n");
+        pane.process_bytes(b"old output\r\nfirst\r\n second\r\n\r\nthird\r\n");
 
         {
             use tracing_subscriber::layer::SubscriberExt as _;
@@ -2743,7 +2755,7 @@ mod tests {
         );
         assert_eq!(
             capture.field("screen_tail").as_deref(),
-            Some("thinking about the next step"),
+            Some("first second third"),
             "a clean exit must still log the final screen tail"
         );
         assert_eq!(

@@ -1,5 +1,6 @@
 //! Runtime failure and screen policy shared by the physical project owner and read-only GUI adapters.
 use gwt_core::timestamp::UtcTimestamp;
+pub use gwt_terminal::pane::screen_tail_text;
 
 use crate as gwt;
 
@@ -309,16 +310,6 @@ impl OrdinaryAgentErrorDetail {
         let tail = screen_tail_text(final_screen, 3, " ")?;
         tagged_agent_error_detail(self.base_detail.clone(), Some(&tail)).0
     }
-}
-
-pub fn screen_tail_text(contents: &str, lines: usize, separator: &str) -> Option<String> {
-    let screen_lines: Vec<&str> = contents
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .collect();
-    let tail = screen_lines[screen_lines.len().saturating_sub(lines)..].join(separator);
-    (!tail.is_empty()).then_some(tail)
 }
 
 pub fn issue_monitor_launch_failed_payload(
@@ -864,7 +855,10 @@ mod tests {
             accounts: &[],
             now,
         };
-        let initial = classify_exit(&mut RuntimePolicyState::default(), input("partial output"));
+        let initial = classify_exit(
+            &mut RuntimePolicyState::default(),
+            input("old output\nfirst\n second\n\nthird\n"),
+        );
         let context = initial
             .ordinary_error_detail
             .expect("ordinary generic exit");
@@ -875,15 +869,19 @@ mod tests {
         assert_eq!(context.observed_at, now);
         assert_eq!(
             initial.detail.as_deref(),
-            Some("Process exited with status 1 — last output: partial output")
+            Some("Process exited with status 1 — last output: first second third")
         );
         assert!(context.promote("", Some("codex"), None).is_none());
         assert_eq!(
             context
-                .promote("unexpected fatal: config parse error", Some("codex"), None)
+                .promote(
+                    "old output\nfirst\n second\n\nunexpected fatal: config parse error\n",
+                    Some("codex"),
+                    None,
+                )
                 .as_deref(),
             Some(
-                "Process exited with status 1 — last output: unexpected fatal: config parse error"
+                "Process exited with status 1 — last output: first second unexpected fatal: config parse error"
             )
         );
         let promoted = context
@@ -893,7 +891,7 @@ mod tests {
             Some(promoted.clone()),
             super::compose_agent_error_detail(None, Some(super::EXACT_RESUME_FAILURE_SIGNATURE))
         );
-        assert!(!promoted.contains("partial output"));
+        assert!(!promoted.contains("first second third"));
         assert!(!promoted.contains("last output:"));
         let recognized = classify_exit(
             &mut RuntimePolicyState::default(),
