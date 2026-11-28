@@ -2694,6 +2694,11 @@ pub fn write_current_raw_input(
     entry: &Arc<PtyWriterEntry>,
     bytes: &[u8],
 ) -> Result<(), String> {
+    // Only record WebSocket submits. Raw keystrokes must not write to the perf log.
+    let _route = bytes
+        .iter()
+        .any(|byte| matches!(byte, b'\r' | b'\n'))
+        .then(|| crate::perf::RouteTimer::start(crate::perf::PerfRoute::PromptSend));
     write_current_raw_input_with_session(writers, id, entry, bytes, None)
 }
 
@@ -2812,6 +2817,7 @@ pub fn write_current_pane_input(
             write_current_raw_input_with_session(writers, id, entry, body.as_bytes(), held_session)
         };
     };
+    let _route = crate::perf::RouteTimer::start(crate::perf::PerfRoute::PromptSend);
     let reservation = with_current_writer(writers, id, entry, |handle| {
         Arc::clone(handle)
             .reserve_input_transaction()

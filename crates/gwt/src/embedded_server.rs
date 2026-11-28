@@ -1003,14 +1003,27 @@ fn handle_frontend_message(
 ) {
     let (id, data) = match event {
         FrontendEvent::TerminalInput { id, data } => (id, data),
-        FrontendEvent::StartupFirstFrame { navigation_ms } => {
+        FrontendEvent::StartupFirstFrame {
+            navigation_ms,
+            project_switch,
+        } => {
+            let scope = state.clients.scope(client_id);
+            if project_switch && matches!(scope, Some(ClientScope::Project(_))) {
+                if let Ok(elapsed) = std::time::Duration::try_from_secs_f64(navigation_ms / 1_000.0)
+                {
+                    gwt::perf::record_route(gwt::perf::PerfRoute::ProjectSwitch, elapsed);
+                }
+            }
             gwt::perf::startup::first_frame(navigation_ms);
             // Keep the shell/event-loop readiness acknowledgement separate
             // from the paint observation when restore is still draining.
             state.proxy.send(UserEvent::Frontend {
                 client_id: client_id.to_string(),
-                client_scope: state.clients.scope(client_id),
-                event: FrontendEvent::StartupFirstFrame { navigation_ms },
+                client_scope: scope,
+                event: FrontendEvent::StartupFirstFrame {
+                    navigation_ms,
+                    project_switch,
+                },
                 received_at,
             });
             return;

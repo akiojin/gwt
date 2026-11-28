@@ -9299,7 +9299,8 @@ pub enum DecodedWorkspaceWorkEvent {
 }
 
 /// A portable owning-root marker has meaning only in its explicit source
-/// worktree. Preserve historical absolute paths without normalization.
+/// worktree. A named branch requires matching checkout evidence. Preserve
+/// historical absolute paths without normalization.
 pub(crate) fn resolve_workspace_work_event_container(
     event: &mut WorkEvent,
     source_root: Option<&Path>,
@@ -9311,12 +9312,11 @@ pub(crate) fn resolve_workspace_work_event_container(
     if container.worktree_path.as_deref() != Some(Path::new(".")) {
         return;
     }
-    let branch_matches =
-        source_branch
-            .zip(container.branch.as_deref())
-            .is_none_or(|(source, event)| {
-                canonical_work_branch_identity(source) == canonical_work_branch_identity(event)
-            });
+    let branch_matches = container.branch.as_deref().is_none_or(|event| {
+        source_branch.is_some_and(|source| {
+            canonical_work_branch_identity(source) == canonical_work_branch_identity(event)
+        })
+    });
     container.worktree_path = source_root
         .filter(|_| branch_matches)
         .map(Path::to_path_buf);
