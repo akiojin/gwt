@@ -1,6 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 import { spawn, type ChildProcess } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, readdir, realpath, rename, rmdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { startIssueQueueLaunchFixture } from "./_helpers/issue-queue-launch";
@@ -36,6 +36,52 @@ test.describe("Issue queue real backend launch", () => {
   test.skip(process.env.GWT_PLAYWRIGHT_QUEUE_LAUNCH !== "1", "requires checkout binaries and isolated provider fixture");
   test.setTimeout(240_000);
   test.use({ viewport: { width: 1600, height: 1100 } });
+
+  test("Issue #3788 Continue resolves a cloned Work with legacy history", async ({ page }, info) => {
+    const errors: string[] = [];
+    page.on("pageerror", error => errors.push(error.message));
+    page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+    const theme = info.project.name.includes("light") ? "light" : "dark";
+    const workId = "work-portable-3788";
+    const fixture = await startIssueQueueLaunchFixture(info, {
+      page,
+      prepare: async ({ home, project }) => {
+        for (const [kind, path, updated_at] of [
+          ["start", join(home, "unavailable-clone"), "2026-10-22T00:00:00Z"],
+          ["update", ".", "2026-10-22T00:01:00Z"],
+        ]) {
+          const id = randomUUID();
+          const digest = createHash("sha256").update(id).digest("hex");
+          const bucket = join(project, ".gwt", "work", "events", digest.slice(0, 2));
+          await mkdir(bucket, { recursive: true });
+          await writeFile(join(bucket, `${digest}.jsonl`), JSON.stringify({
+            id, work_item_id: workId, kind, updated_at,
+            execution_container: { branch: "main", worktree_path: path },
+          }) + "\n");
+        }
+      },
+    });
+    try {
+      await page.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme), theme);
+      await gotoLiveGwt(page, fixture.url, { enableTestBridge: true });
+      await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+      await expect.poll(async () => (await fixture.workItems()).work_items.find((row: any) => row.id === workId)?.events.length)
+        .toBe(2);
+      const operationId = randomUUID();
+      await sendLiveGwtEvent(page, { kind: "continue_work", operation_id: operationId, work_id: workId });
+      const reply = await page.waitForFunction(operationId =>
+        (window as any).__gwtPlaywrightMessages?.find(({ payload }: any) =>
+          payload.kind === "continue_work_outcome" && payload.operation_id === operationId)?.payload,
+        operationId).then(handle => handle.jsonValue());
+      // Selecting the local checkout lets Continue reach the independent owner guard.
+      expect(reply).toMatchObject({ error_code: "execution_owner_missing" });
+      await info.attach("continue-outcome", { body: JSON.stringify(reply), contentType: "application/json" });
+      await page.screenshot({ path: info.outputPath(`portable-continue-${theme}.png`) });
+    } finally {
+      try { await page.close(); } finally { await fixture.stop(); }
+    }
+    expect(errors).toEqual([]);
+  });
 
   test("Issue #7817 launch_now leaves a delivered PM check queued without starting its Agent", async ({ page }, info) => {
     const issueNumber = 43;

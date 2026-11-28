@@ -61,7 +61,7 @@ const SOURCE_LIST: &str = "source-list:v1";
 /// Bump this when projection-time source metadata changes. Older cache entries
 /// used only the raw content/blob fingerprint, which would skip the repair pass.
 const SOURCE_CONTEXT_FINGERPRINT_VERSION: &str =
-    "source-context-v11-source-relative-event-containers";
+    "source-context-v12-portable-containers-require-source-branch";
 
 /// Tree path of the persistent core inside a worktree / commit.
 const EVENTS_TREE_PATH: &str = ".gwt/work/events.jsonl";
@@ -4632,7 +4632,11 @@ mod tests {
     }
 
     #[test]
-    fn detached_containerless_source_rebuilds_once_then_is_fingerprint_current() {
+    fn detached_source_rebuild_clears_old_portable_binding() {
+        use gwt_core::workspace_projection::{
+            load_workspace_work_items_from_path, save_workspace_work_items_projection_to_path,
+        };
+
         let temp = tempfile::tempdir().expect("tempdir");
         let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
@@ -4643,8 +4647,15 @@ mod tests {
             .current_dir(&repo));
         let events_path = repo.join(".gwt/work/events.jsonl");
         std::fs::create_dir_all(events_path.parent().unwrap()).expect("work event dir");
+        let portable = serde_json::json!({
+            "id": "evt-branched",
+            "work_item_id": "work-branched",
+            "kind": "start",
+            "execution_container": {"branch": "work/target", "worktree_path": "."},
+            "updated_at": "2026-07-15T07:00:00Z"
+        });
         let content = format!(
-            "{}\n",
+            "{}\n{portable}\n",
             event_line(
                 "evt-detached",
                 "work-detached",
@@ -4667,7 +4678,45 @@ mod tests {
         let first = ingest_project_work_events_paths(&repo, &work_items_path, &state_path);
         assert!(first.projection_rebuilt);
         assert_eq!(first.sources_ingested, 1);
-        assert_eq!(first.events_applied, 1);
+        assert_eq!(first.events_applied, 2);
+
+        // The old decoder assigned a branch-bearing marker to this detached
+        // checkout and cached the result even though the source had no branch.
+        let mut polluted = load_workspace_work_items_from_path(&work_items_path)
+            .unwrap()
+            .unwrap();
+        let item = polluted
+            .work_items
+            .iter_mut()
+            .find(|item| item.id == "work-branched")
+            .unwrap();
+        item.execution_containers[0].worktree_path = Some(repo.clone());
+        item.events[0]
+            .execution_container
+            .as_mut()
+            .unwrap()
+            .worktree_path = Some(repo.clone());
+        save_workspace_work_items_projection_to_path(&work_items_path, &polluted).unwrap();
+        let mut state = WorkEventsIntakeStore::open(&state_path);
+        state.record_projection_version("source-context-v11-source-relative-event-containers");
+        state.save().unwrap();
+
+        let repaired = ingest_project_work_events_paths(&repo, &work_items_path, &state_path);
+        assert!(repaired.projection_rebuilt);
+        let rebuilt = load_workspace_work_items_from_path(&work_items_path)
+            .unwrap()
+            .unwrap();
+        let item = rebuilt
+            .work_items
+            .iter()
+            .find(|item| item.id == "work-branched")
+            .unwrap();
+        assert_eq!(
+            item.execution_containers[0].branch.as_deref(),
+            Some("work/target")
+        );
+        assert_eq!(item.execution_containers[0].worktree_path, None);
+        assert_eq!(std::fs::read_to_string(&events_path).unwrap(), content);
 
         let second = ingest_project_work_events_paths(&repo, &work_items_path, &state_path);
         assert!(!second.projection_rebuilt);
